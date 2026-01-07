@@ -163,7 +163,7 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
 
     # Workaround for passing in importance_sampling_algo as jax transforms
     # doesn't like partial functions with kwargs.
-    loss_fn = lambda model, train_example, algo_config: policy_loss_fn(
+    loss_fn = lambda model, train_example: policy_loss_fn(
         model,
         train_example,
         algo_config=self.algo_config,
@@ -176,10 +176,7 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
         has_aux=True,
     )
     self.rl_cluster.actor_trainer.with_gen_model_input_fn(
-        lambda x: {
-            "train_example": x,
-            "algo_config": self.algo_config,
-        }
+        lambda x: {"train_example": x}
     )
     self.rl_cluster.actor_trainer.with_rl_metrics_to_log({"kl": np.mean})
     self.rl_cluster.actor_trainer.with_tqdm_metrics_to_display([
@@ -230,7 +227,11 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
     jax_completion_ids = jnp.array(completion_ids)
     jax_completion_mask = jnp.array(completion_mask)
 
-    if self.algo_config.beta != 0.0:
+    force_logps = (
+        self.rl_cluster.cluster_config.training_config.use_dynamic_batch_curation
+    )
+    need_ref_logps = self.algo_config.beta != 0.0 or force_logps
+    if need_ref_logps and self.algo_config.beta != 0.0:
       devices = self.rl_cluster.r2m[rl_cluster_lib.Role.REFERENCE].devices
       # TODO(yangmu): use function decorator to trace this part, same below.
       with self.rl_cluster.perf.span("refer_inference", devices) as interval:
@@ -245,9 +246,14 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
             ),
         )
         interval.device_end([ref_per_token_logps])
+    elif need_ref_logps:
+      ref_per_token_logps = jnp.zeros_like(
+          jax_completion_ids, dtype=jnp.float32
+      )
     else:
       ref_per_token_logps = None
-    if self.algo_config.num_iterations > 1:
+    need_old_logps = self.algo_config.num_iterations > 1 or force_logps
+    if need_old_logps:
       devices = self.rl_cluster.r2m[rl_cluster_lib.Role.ACTOR].devices
       with self.rl_cluster.perf.span(
           "old_actor_inference", devices
@@ -441,28 +447,35 @@ def grpo_loss_fn(
   )
   loss_aggregation_mode = algo_config.loss_agg_mode
 
-  completion_ids, completion_mask = (
-      train_example.completion_ids,
-      train_example.completion_mask,
+  completion_ids = jnp.atleast_2d(train_example.completion_ids)
+  completion_mask = jnp.atleast_2d(train_example.completion_mask)
+  prompt_ids = jnp.atleast_2d(train_example.prompt_ids)
+  advantages = jnp.atleast_1d(train_example.advantages)
+  ref_per_token_logps = (
+      None
+      if train_example.ref_per_token_logps is None
+      else jnp.atleast_2d(train_example.ref_per_token_logps)
+  )
+  old_per_token_logps = (
+      None
+      if train_example.old_per_token_logps is None
+      else jnp.atleast_2d(train_example.old_per_token_logps)
   )
 
   # TODO(yangmu): trace this part as "actor_inference_and_training".
   # with perf_tracer.span("...", list(completion_ids.devices())):
   per_token_logps = common.compute_per_token_logps(
       model,
-      prompt_tokens=train_example.prompt_ids,
+      prompt_tokens=prompt_ids,
       completion_tokens=completion_ids,
       pad_id=pad_id,
       eos_id=eos_id,
       stop_gradient=False,
       return_logits=False,
   )
-  advantages = train_example.advantages
 
-  if train_example.old_per_token_logps is None:
+  if old_per_token_logps is None:
     old_per_token_logps = jax.lax.stop_gradient(per_token_logps)
-  else:
-    old_per_token_logps = train_example.old_per_token_logps
 
   seq_importance_ratio = per_token_logps - old_per_token_logps
   # TODO(sizhi): Refactor this to a separate function.
@@ -489,7 +502,7 @@ def grpo_loss_fn(
   aux = {"kl": 0.0}
   if beta is not None and beta != 0.0:
     kl = common.compute_kl_divergence(
-        per_token_logps, train_example.ref_per_token_logps
+        per_token_logps, ref_per_token_logps
     )
     per_token_loss = per_token_loss + beta * kl
 

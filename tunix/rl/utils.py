@@ -32,10 +32,25 @@ Mesh = jax.sharding.Mesh
 NamedSharding = jax.sharding.NamedSharding
 
 
-def is_positive_integer(value: int | None, name: str):
-  """Checks if the value is positive."""
-  if value is not None and (not value.is_integer() or value <= 0):
+def is_positive_integer(value: int | float | None, name: str):
+  """Checks if the value is a positive integer."""
+  if value is None:
+    return
+  if isinstance(value, bool):
     raise ValueError(f"{name} must be a positive integer. Got: {value}")
+  if isinstance(value, (int, np.integer)):
+    if value <= 0:
+      raise ValueError(f"{name} must be a positive integer. Got: {value}")
+    return
+  if isinstance(value, (float, np.floating)):
+    if not float(value).is_integer() or value <= 0:
+      raise ValueError(f"{name} must be a positive integer. Got: {value}")
+    return
+  if hasattr(value, "is_integer"):
+    if not value.is_integer() or value <= 0:
+      raise ValueError(f"{name} must be a positive integer. Got: {value}")
+    return
+  raise ValueError(f"{name} must be a positive integer. Got: {value}")
 
 
 def check_divisibility(

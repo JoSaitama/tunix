@@ -62,6 +62,11 @@ class MetricsLoggerOptions:
         )
       except ImportError:
         logging.info("WandbBackend skipped: 'wandb' library not installed.")
+      except Exception as exc:
+        if exc.__class__.__name__ == "UsageError":
+          logging.warning("WandbBackend skipped: %s", exc)
+        else:
+          raise
     return active_backends
 
 

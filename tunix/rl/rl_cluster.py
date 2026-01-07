@@ -43,6 +43,7 @@ import optax
 from tunix.perf import metrics as perf_metrics
 from tunix.perf import trace as perf_trace
 from tunix.rl import reshard
+from tunix.rl import robust_trainer
 from tunix.rl import trainer as rl_trainer
 from tunix.rl import utils as rl_utils
 from tunix.rl.inference import inference_worker
@@ -103,6 +104,10 @@ class RLTrainingConfig(peft_trainer.TrainingConfig):
   train_micro_batch_size: int | None = None
   rollout_micro_batch_size: int | None = None
   compute_logps_micro_batch_size: int | None = None
+
+  # Dynamic Batch Curation
+  use_dynamic_batch_curation: bool = False
+  curation_threshold: float = 3.0
 
   def __post_init__(self):
     """Validates the configuration after initialization."""
@@ -509,7 +514,22 @@ class RLCluster:
       actor_config.checkpoint_root_directory = os.path.join(
           actor_config.checkpoint_root_directory, "actor"
       )
-    self._actor_trainer = rl_trainer.Trainer(
+    actor_trainer_cls = (
+        robust_trainer.RobustTrainer
+        if actor_config.use_dynamic_batch_curation
+        else rl_trainer.Trainer
+    )
+    actor_trainer_kwargs = {}
+    if actor_config.use_dynamic_batch_curation:
+      logging.info(
+          "Dynamic batch curation enabled: using RobustTrainer"
+          " (curation_threshold=%s).",
+          actor_config.curation_threshold,
+      )
+      actor_trainer_kwargs["curation_threshold"] = (
+          actor_config.curation_threshold
+      )
+    self._actor_trainer = actor_trainer_cls(
         model=self.train_actor,
         optimizer=self.cluster_config.training_config.actor_optimizer,
         training_config=actor_config,
@@ -518,6 +538,7 @@ class RLCluster:
         },  # offset by 1 since global_step is incremented after the training loop in rl_learner. # pylint: disable=line-too-long
         metrics_logger=self._rl_metrics_logger,
         perf_tracer=self._perf,
+        **actor_trainer_kwargs,
     )
     del self.rollout_actor
     del self.train_actor

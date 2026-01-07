@@ -10,6 +10,7 @@
 .idea
 .vscode
 .envrc
+/my_example/.env
 
 # virtualenv/venv directories
 /venv/
@@ -25,3 +26,14 @@
 /docs/sg_execution_times.rst
 /docs/generated
 build/*
+# local virtualenv
+tunixenv/
+.venv/
+venv/
+
+# experiment logs
+wandb/
+.wandb/
+# large HF/LoRA artifacts
+google/gemma-3-1b-it-lora/
+**/*.safetensors

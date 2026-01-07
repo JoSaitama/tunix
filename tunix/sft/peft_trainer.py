@@ -14,7 +14,7 @@
 
 """PEFT trainer."""
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 import contextlib
 import dataclasses
 import time
@@ -334,7 +334,10 @@ class PeftTrainer:
       self, model: nnx.Module, inputs: Any
   ) -> ArrayLike | Tuple[ArrayLike, Any]:
     inputs = self.gen_model_input_fn(inputs)
-    out = self.eval_loss_fn(model, **inputs)
+    if isinstance(inputs, Mapping):
+      out = self.eval_loss_fn(model, **inputs)
+    else:
+      out = self.eval_loss_fn(model, inputs)
     if self._has_aux:
       loss, aux = out
       return loss, aux
