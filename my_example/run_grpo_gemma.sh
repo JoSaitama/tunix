@@ -25,8 +25,8 @@ python -m my_example.main \
   --train-data-dir ./data/train \
   --test-data-dir ./data/test \
   --train-fraction 0.9 \
-  --train-micro-batch-size 16 \
-  --test-micro-batch-size 1 \
+  --train-micro-batch-size 8 \
+  --test-micro-batch-size 32 \
   --num-generations 4 \
   --max-train-examples 29888 \
   --max-eval-examples 1319 \

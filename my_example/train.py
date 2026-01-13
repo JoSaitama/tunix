@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from typing import Tuple
 
 import optax
@@ -13,6 +14,8 @@ from .config import GrpoGenerationConfig, TrainingConfig
 from .rewards import (
     check_answer,
     check_numbers,
+    format_integrity_reward,
+    numeric_relative_reward,
     match_format_approximately,
     match_format_exactly,
 )
@@ -134,13 +137,26 @@ def build_grpo_config(grpo: GrpoGenerationConfig) -> GRPOConfig:
 
 def build_trainer(rl_cluster, grpo: GrpoGenerationConfig) -> GRPOLearner:
     grpo_config = build_grpo_config(grpo)
-    return GRPOLearner(
-        rl_cluster=rl_cluster,
-        reward_fns=[
+    use_accuracy_reward_mode = (
+        os.environ.get("TUNIX_REWARD_MODE", "").lower() == "accuracy"
+    )
+    if use_accuracy_reward_mode:
+        reward_fns = [
+            format_integrity_reward,
+            numeric_relative_reward,
+            check_numbers,
+        ]
+    else:
+        reward_fns = [
             match_format_exactly,
             match_format_approximately,
             check_answer,
             check_numbers,
+        ]
+    return GRPOLearner(
+        rl_cluster=rl_cluster,
+        reward_fns=[
+            *reward_fns,
         ],
         algo_config=grpo_config,
     )
