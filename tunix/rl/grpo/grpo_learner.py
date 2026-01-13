@@ -214,6 +214,31 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
     prompt_ids = jnp.array(rollout_output.left_padded_prompt_tokens)
     completion_text = rollout_output.text
 
+    # Fix for shape mismatch when rollout expands prompts to multiple generations
+    # but returns original prompt tokens/strings.
+    # Check if we need to repeat prompts to match completions (B vs B*G).
+    if (
+        self.algo_config.num_generations > 1
+        and prompt_ids.shape[0] != completion_ids.shape[0]
+        and prompt_ids.shape[0] * self.algo_config.num_generations
+        == completion_ids.shape[0]
+    ):
+      prompt_ids = jnp.repeat(
+          prompt_ids, self.algo_config.num_generations, axis=0
+      )
+
+    if (
+        self.algo_config.num_generations > 1
+        and len(training_input["prompts"]) != len(completion_text)
+        and len(training_input["prompts"]) * self.algo_config.num_generations
+        == len(completion_text)
+    ):
+      # Repeat the prompt strings to match completions
+      training_input["prompts"] = [
+          p for p in training_input["prompts"] 
+          for _ in range(self.algo_config.num_generations)
+      ]
+
     # Assemble masks
     prompt_mask = prompt_ids != pad_value
     completion_padding_mask = np.not_equal(completion_ids, pad_value)
@@ -252,6 +277,7 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
       )
     else:
       ref_per_token_logps = None
+
     need_old_logps = self.algo_config.num_iterations > 1 or force_logps
     if need_old_logps:
       devices = self.rl_cluster.r2m[rl_cluster_lib.Role.ACTOR].devices
@@ -462,8 +488,22 @@ def grpo_loss_fn(
       else jnp.atleast_2d(train_example.old_per_token_logps)
   )
 
+
+  
   # TODO(yangmu): trace this part as "actor_inference_and_training".
   # with perf_tracer.span("...", list(completion_ids.devices())):
+
+  
+  # Robust expansion logic:
+  if ref_per_token_logps is not None:
+      completion_batch = completion_ids.shape[0]
+      ref_batch = ref_per_token_logps.shape[0]
+      
+      # If ref is smaller and divides completion evenly, repeat it.
+      if ref_batch < completion_batch and completion_batch % ref_batch == 0:
+          factor = completion_batch // ref_batch
+          ref_per_token_logps = jnp.repeat(ref_per_token_logps, factor, axis=0)
+          
   per_token_logps = common.compute_per_token_logps(
       model,
       prompt_tokens=prompt_ids,

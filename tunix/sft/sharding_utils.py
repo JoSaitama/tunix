@@ -55,12 +55,24 @@ def shard_input(
     return input_data
 
   with jax.transfer_guard("allow"):
-    return jax.tree.map(
-        lambda x: jax.make_array_from_process_local_data(
+      # If x is already a JAX array, we might not need to do anything or just reshard.
+      # device_put requires fully addressable data (host-local).
+      # If x is a global sharded array, we should use jax.lax.with_sharding_constraint or similar,
+      # but make_array_from_process_local_data is definitely wrong for global arrays.
+      def _shard_leaf(x):
+          if isinstance(x, jax.Array) and not x.is_fully_addressable:
+               # It's a global array. Correctly resharding global arrays usually involves
+               # jax.lax.with_sharding_constraint if we are inside jit, or device_put with sharding
+               # if we are outside. However, device_put(global_array, sharding) *is* supported
+               # and handles resharding. The issue was make_array_from_process_local_data.
+               return jax.device_put(x, get_sharding(x, mesh=mesh, pspec=pspec))
+          
+          # For local data (processed on host) or fully addressable arrays:
+          return jax.make_array_from_process_local_data(
             get_sharding(x, mesh=mesh, pspec=pspec), x
-        ),
-        input_data,
-    )
+        )
+
+      return jax.tree.map(_shard_leaf, input_data)
 
 
 def get_sharding(x: jax.Array, mesh: shd.Mesh, pspec: shd.PartitionSpec):

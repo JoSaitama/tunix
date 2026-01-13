@@ -62,9 +62,25 @@ def apply_lora(base_model: nnx.Module, lora: LoraConfig, mesh) -> nnx.Module:
     )
 
     model_input = base_model.get_model_input()
-    lora_model = qwix.apply_lora_to_model(
-        base_model, lora_provider, **model_input
-    )
+
+    # Create a JIT-compiled function to ensure logical shapes are used
+    # This prevents the eager execution mismatch where Worker 0 sees global shape (4608)
+    # and Worker 1 sees local shard shape (1152).
+    # Create a JIT-compiled function to ensure logical shapes are used
+    # This prevents the eager execution mismatch where Worker 0 sees global shape (4608)
+    # and Worker 1 sees local shard shape (1152).
+    # Capture lora_provider via closure to avoid passing it as an argument (it's not a pytree)
+    @nnx.jit
+    def _apply_lora_jit(model, inputs):
+        return qwix.apply_lora_to_model(
+            model,
+            lora_provider,
+            rngs=nnx.Rngs(0),
+            **inputs,
+        )
+
+    # Run inside JIT
+    lora_model = _apply_lora_jit(base_model, model_input)
 
     with mesh:
         state = nnx.state(lora_model)

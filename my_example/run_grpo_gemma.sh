@@ -17,8 +17,18 @@ fi
 #   --curation-threshold 3.0
 
 RUN_TS="$(date +%Y%m%d_%H%M%S)"
-METRICS_LOG_DIR="/tmp/content/tmp/tensorboard/grpo_${RUN_TS}"
-CHECKPOINT_ROOT="/tmp/content/ckpts_run2_${RUN_TS}"
+METRICS_LOG_DIR="${METRICS_LOG_DIR:-/tmp/content/tmp/tensorboard/grpo_${RUN_TS}}"
+
+# Use a shared checkpoint location for multi-host runs. Set CKPT_BUCKET to something
+# like gs://your-bucket. You can also override CHECKPOINT_ROOT directly.
+if [ -n "${CKPT_BUCKET:-}" ]; then
+  CKPT_BUCKET="${CKPT_BUCKET%/}"
+  DEFAULT_CHECKPOINT_ROOT="${CKPT_BUCKET}/tunix/ckpts/grpo_${RUN_TS}"
+else
+  DEFAULT_CHECKPOINT_ROOT="/tmp/content/ckpts_run2_${RUN_TS}"
+  echo "WARNING: CKPT_BUCKET not set; defaulting to local ${DEFAULT_CHECKPOINT_ROOT}. Multi-host checkpointing will likely fail." >&2
+fi
+CHECKPOINT_ROOT="${CHECKPOINT_ROOT:-${DEFAULT_CHECKPOINT_ROOT}}"
 
 python -m my_example.main \
   --source tfds \
@@ -34,6 +44,7 @@ python -m my_example.main \
   --no-wandb \
   --metrics-log-dir "${METRICS_LOG_DIR}" \
   --checkpoint-root "${CHECKPOINT_ROOT}" \
+  --save-interval-steps 100000 \
   --model-id google/gemma-3-1b-it \
   --tokenizer-path gs://gemma-data/tokenizers/tokenizer_gemma3.model \
   --mesh-counts 4,1 \

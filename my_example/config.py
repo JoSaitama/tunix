@@ -62,7 +62,7 @@ class TrainingConfig:
     warmup_fraction: float = 0.1
     max_grad_norm: float = 0.1
     eval_every_n_steps: int = 256
-    checkpoint_root_directory: str = "/tmp/content/ckpts"
+    checkpoint_root_directory: str | None = "/tmp/content/ckpts"
     save_interval_steps: int = 500
     max_to_keep: int = 4
     metrics_log_dir: str = "/tmp/content/tmp/tensorboard/grpo"
@@ -101,6 +101,15 @@ def _parse_mesh_counts(value: str) -> Tuple[int, int]:
         return int(parts[0]), int(parts[1])
     except ValueError as exc:
         raise argparse.ArgumentTypeError("mesh-counts must be integers") from exc
+
+
+def _normalize_optional_path(value: str | None) -> str | None:
+    if value is None:
+        return None
+    lowered = value.strip().lower()
+    if lowered in ("", "none", "null"):
+        return None
+    return value
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -149,6 +158,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-grad-norm", type=float, default=0.1)
     parser.add_argument("--eval-every-n-steps", type=int, default=64)
     parser.add_argument("--checkpoint-root", default="/tmp/content/ckpts")
+    parser.add_argument("--no-checkpoint", action="store_true")
     parser.add_argument("--save-interval-steps", type=int, default=500)
     parser.add_argument("--max-to-keep", type=int, default=4)
     parser.add_argument("--metrics-log-dir", default="/tmp/content/tmp/tensorboard/grpo")
@@ -208,6 +218,9 @@ def config_from_args(argv: Optional[Sequence[str]] = None) -> Config:
         top_p=args.eval_top_p,
         top_k=args.eval_top_k,
     )
+    checkpoint_root = _normalize_optional_path(args.checkpoint_root)
+    if args.no_checkpoint:
+        checkpoint_root = None
     training = TrainingConfig(
         learning_rate=args.learning_rate,
         b1=args.b1,
@@ -216,7 +229,7 @@ def config_from_args(argv: Optional[Sequence[str]] = None) -> Config:
         warmup_fraction=args.warmup_fraction,
         max_grad_norm=args.max_grad_norm,
         eval_every_n_steps=args.eval_every_n_steps,
-        checkpoint_root_directory=args.checkpoint_root,
+        checkpoint_root_directory=checkpoint_root,
         save_interval_steps=args.save_interval_steps,
         max_to_keep=args.max_to_keep,
         metrics_log_dir=args.metrics_log_dir,

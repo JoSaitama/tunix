@@ -37,3 +37,6 @@ wandb/
 # large HF/LoRA artifacts
 google/gemma-3-1b-it-lora/
 **/*.safetensors
+
+# local datasets / caches (e.g. TFDS, Kaggle downloads)
+data/

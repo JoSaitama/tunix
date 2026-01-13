@@ -79,8 +79,25 @@ def _suppress_jax_monitoring():
 
 
 def main() -> None:
+    # === Multi-host init (required for v4-32 and other multi-host TPU slices) ===
+    import socket
+    if "JAX_COORDINATOR_ADDRESS" in os.environ:
+        hostname = socket.gethostname()
+        pid = int(hostname.split("-w-")[-1])
+        coord_addr = os.environ["JAX_COORDINATOR_ADDRESS"]
+        num_procs = int(os.environ.get("JAX_PROCESS_COUNT", 1))
+        print(f"[DEBUG] hostname={hostname}, pid={pid}, coord={coord_addr}, num_procs={num_procs}")
+        jax.distributed.initialize(
+            coordinator_address=coord_addr,
+            num_processes=num_procs,
+            process_id=pid,
+        )
+        print(f"[DEBUG] After init: process_index={jax.process_index()}, process_count={jax.process_count()}, device_count={jax.device_count()}, local_device_count={jax.local_device_count()}")
+    else:
+        print("[DEBUG] JAX_COORDINATOR_ADDRESS not set, skipping distributed init")
+    # === End multi-host init ===
+
     try:
-        import jax
         jax.monitoring.clear_event_listeners()
     except Exception:
         pass
@@ -242,40 +259,45 @@ def main() -> None:
         except Exception:
             pass
 
-        trained_ckpt_path = os.path.join(
-            cfg.training.checkpoint_root_directory,
-            "actor",
-            str(max_steps),
-            "model_params",
-        )
+        if cfg.training.checkpoint_root_directory:
+            trained_ckpt_path = os.path.join(
+                cfg.training.checkpoint_root_directory,
+                "actor",
+                str(max_steps),
+                "model_params",
+            )
 
-        if os.path.exists(trained_ckpt_path):
-            abs_params = jax.tree.map(
-                lambda x: jax.ShapeDtypeStruct(x.shape, x.dtype),
-                nnx.state(lora_policy, nnx.LoRAParam),
-            )
-            checkpointer = ocp.StandardCheckpointer()
-            with _suppress_jax_monitoring():
-                try:
-                    trained_lora_params = checkpointer.restore(
-                        trained_ckpt_path, target=abs_params
-                    )
-                except Exception:
-                    # Retry once if needed
-                    trained_lora_params = checkpointer.restore(
-                        trained_ckpt_path, target=abs_params
-                    )
- 
-            nnx.update(
-                lora_policy,
-                jax.tree.map(
-                    lambda _a, b: b,
+            if os.path.exists(trained_ckpt_path):
+                abs_params = jax.tree.map(
+                    lambda x: jax.ShapeDtypeStruct(x.shape, x.dtype),
                     nnx.state(lora_policy, nnx.LoRAParam),
-                    trained_lora_params,
-                ),
-            )
+                )
+                checkpointer = ocp.StandardCheckpointer()
+                with _suppress_jax_monitoring():
+                    try:
+                        trained_lora_params = checkpointer.restore(
+                            trained_ckpt_path, target=abs_params
+                        )
+                    except Exception:
+                        # Retry once if needed
+                        trained_lora_params = checkpointer.restore(
+                            trained_ckpt_path, target=abs_params
+                        )
+
+                nnx.update(
+                    lora_policy,
+                    jax.tree.map(
+                        lambda _a, b: b,
+                        nnx.state(lora_policy, nnx.LoRAParam),
+                        trained_lora_params,
+                    ),
+                )
+            else:
+                print(
+                    f"Checkpoint not found at {trained_ckpt_path}. Skipping restore."
+                )
         else:
-            print(f"Checkpoint not found at {trained_ckpt_path}. Skipping restore.")
+            print("Checkpointing disabled. Skipping restore.")
 
         if cfg.runtime.eval_after_train:
             with _suppress_jax_monitoring():
