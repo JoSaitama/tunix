@@ -13,12 +13,14 @@ fi
 #   HF_TOKEN=... KAGGLE_USERNAME=... KAGGLE_KEY=... WANDB_API_KEY=... \
 #   HF_TOKEN=... KAGGLE_USERNAME=... KAGGLE_KEY=... WANDB_API_KEY=... \
 #   ./my_example/run_grpo_gemma.sh \
-#   --use-dynamic-batch-curation \
+#   --use-dbc-outlier-l2 \
 #   --curation-threshold 3.0
 
 RUN_TS="$(date +%Y%m%d_%H%M%S)"
 METRICS_LOG_DIR="/tmp/content/tmp/tensorboard/grpo_${RUN_TS}"
 CHECKPOINT_ROOT="/tmp/content/ckpts_run2_${RUN_TS}"
+
+ARGS=("$@")
 
 python -m my_example.main \
   --source tfds \
@@ -37,4 +39,4 @@ python -m my_example.main \
   --model-id google/gemma-3-1b-it \
   --tokenizer-path gs://gemma-data/tokenizers/tokenizer_gemma3.model \
   --mesh-counts 4,1 \
-  "$@"
+  "${ARGS[@]}"

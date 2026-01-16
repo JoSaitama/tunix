@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import argparse
 from dataclasses import dataclass
 from typing import Optional, Sequence, Tuple
@@ -155,6 +156,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--metrics-flush-every", type=int, default=20)
     
     parser.add_argument("--use-dynamic-batch-curation", action="store_true")
+    parser.add_argument("--use-dbc-outlier-l2", action="store_true")
+    parser.add_argument("--use-dbc-self-inf-batch", action="store_true")
+    parser.add_argument("--use-dbc-self-inf-group", action="store_true")
     parser.add_argument("--curation-threshold", type=float, default=3.0)
 
     parser.add_argument("--output-dir", default=None)
@@ -171,6 +175,31 @@ def build_parser() -> argparse.ArgumentParser:
 def config_from_args(argv: Optional[Sequence[str]] = None) -> Config:
     parser = build_parser()
     args = parser.parse_args(argv)
+
+    if args.use_dbc_self_inf_batch and args.use_dbc_self_inf_group:
+        parser.error(
+            "choose only one: --use-dbc-self-inf-batch or --use-dbc-self-inf-group"
+        )
+
+    use_dynamic_batch_curation = bool(
+        args.use_dynamic_batch_curation
+        or args.use_dbc_outlier_l2
+        or args.use_dbc_self_inf_batch
+        or args.use_dbc_self_inf_group
+    )
+
+    use_self_inf = bool(args.use_dbc_self_inf_batch or args.use_dbc_self_inf_group)
+    if use_self_inf and args.use_dbc_outlier_l2:
+        parser.error(
+            "cannot combine --use-dbc-outlier-l2 with self-inf; use only one DBC variant"
+        )
+
+    if use_self_inf:
+        os.environ["TUNIX_DBC_VARIANT"] = "self_inf"
+        os.environ["TUNIX_DBC_SELF_INF_SCOPE"] = (
+            "batch" if args.use_dbc_self_inf_batch else "group"
+        )
+        os.environ["TUNIX_GRPO_NUM_GENERATIONS"] = str(args.num_generations)
 
     model = ModelConfig(
         model_id=args.model_id,
@@ -221,7 +250,7 @@ def config_from_args(argv: Optional[Sequence[str]] = None) -> Config:
         max_to_keep=args.max_to_keep,
         metrics_log_dir=args.metrics_log_dir,
         metrics_flush_every_n_steps=args.metrics_flush_every,
-        use_dynamic_batch_curation=args.use_dynamic_batch_curation,
+        use_dynamic_batch_curation=use_dynamic_batch_curation,
         curation_threshold=args.curation_threshold,
     )
     runtime = RuntimeConfig(
