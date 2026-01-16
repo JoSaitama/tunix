@@ -148,7 +148,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--weight-decay", type=float, default=0.1)
     parser.add_argument("--warmup-fraction", type=float, default=0.1)
     parser.add_argument("--max-grad-norm", type=float, default=0.1)
-    parser.add_argument("--eval-every-n-steps", type=int, default=64)
+    parser.add_argument("--eval-every-n-steps", type=int, default=32)
     parser.add_argument("--checkpoint-root", default="/tmp/content/ckpts")
     parser.add_argument("--save-interval-steps", type=int, default=500)
     parser.add_argument("--max-to-keep", type=int, default=4)

@@ -27,12 +27,13 @@ python -m my_example.main \
   --train-data-dir ./data/train \
   --test-data-dir ./data/test \
   --train-fraction 0.9 \
-  --train-micro-batch-size 8 \
+  --train-micro-batch-size 2 \
   --test-micro-batch-size 32 \
   --num-generations 4 \
-  --max-train-examples 29888 \
+  --max-train-examples 3072 \
   --max-eval-examples 1319 \
   --num-epochs 1 \
+  --learning-rate 1e-6 \
   --no-wandb \
   --metrics-log-dir "${METRICS_LOG_DIR}" \
   --checkpoint-root "${CHECKPOINT_ROOT}" \
