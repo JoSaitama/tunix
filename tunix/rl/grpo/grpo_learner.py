@@ -178,7 +178,19 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
     self.rl_cluster.actor_trainer.with_gen_model_input_fn(
         lambda x: {"train_example": x}
     )
-    self.rl_cluster.actor_trainer.with_rl_metrics_to_log({"kl": np.mean})
+    # Log policy loss aux metrics, and optionally dynamic batch curation stats
+    # (present only when DBC trainers are used).
+    self.rl_cluster.actor_trainer.with_rl_metrics_to_log(
+        {
+            "kl": np.mean,
+            "skipped_samples": np.mean,
+            "grad_norm_mean": np.mean,
+            "grad_norm_std": np.mean,
+            "self_inf_dot_mean": np.mean,
+            "self_inf_dot_std": np.mean,
+            "self_inf_kept_fraction": np.mean,
+        }
+    )
     self.rl_cluster.actor_trainer.with_tqdm_metrics_to_display([
         lambda: "kl" if self.algo_config.beta != 0.0 else None,
     ])
