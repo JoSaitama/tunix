@@ -1,6 +1,6 @@
 # Tunix / my_example 环境配置流程（Ubuntu 22.04 + Python 3.11 + TPU）
 
-> 如果你能看到这个文件，说明你已经 `git clone` 了仓库（文件路径：`my_example/ENV_SETUP.md`）。
+> 如果你能看到这个文件，说明你已经 `git clone` 了仓库（文件路径：`ENV_SETUP.md`）。
 >
 > 目标：完成本地虚拟环境与依赖安装，并能运行 `./my_example/run_grpo_gemma.sh`。
 
