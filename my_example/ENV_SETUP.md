@@ -59,6 +59,14 @@ python -c "import jax; print('backend:', jax.default_backend()); print('device_c
 
 期望看到 `backend: tpu` 且 `device_count: 4`（或与你的 TPU 拓扑一致）。
 
+（可选）你也可以用系统设备节点快速确认 TPU 是否可见：
+
+```bash
+ls -l /dev/accel*
+```
+
+在 TPU VM 上通常会看到类似 `/dev/accel0 ... /dev/accel3`（数量取决于 TPU 拓扑）；如果提示 `No such file or directory`，通常说明当前不是 TPU VM，或 TPU 运行时/驱动未正确安装。
+
 ## 6) 安装 gcsfs（解决 gs:// tokenizer 读取失败）
 
 如果报错 `ImportError: Please install gcsfs to access Google Storage`：
@@ -91,4 +99,3 @@ pip install "gcsfs==2025.10.0" "fsspec==2025.10.0"
 ```
 
 > 若遇到 Hugging Face 401（`GatedRepoError`），需要在 HF 网页端完成模型权限/条款确认，并确保 `HF_TOKEN` 具备访问权限。
-
