@@ -1,6 +1,18 @@
 # Tunix / my_example 环境配置流程（Ubuntu 22.04 + Python 3.11 + TPU）
 
-> 目标：从拉取代码开始，完成本地虚拟环境与依赖安装，并能运行 `./my_example/run_grpo_gemma.sh`。
+> 如果你能看到这个文件，说明你已经 `git clone` 了仓库（文件路径：`my_example/ENV_SETUP.md`）。
+>
+> 目标：完成本地虚拟环境与依赖安装，并能运行 `./my_example/run_grpo_gemma.sh`。
+
+## 0) 先确认机器真的有 TPU（最重要）
+
+在 TPU VM 上通常可以看到 `/dev/accel*` 设备节点：
+
+```bash
+ls -l /dev/accel*
+```
+
+一般会看到类似 `/dev/accel0 ... /dev/accel3`（数量取决于 TPU 拓扑）；如果提示 `No such file or directory`，通常说明当前不是 TPU VM，或 TPU 运行时/驱动未正确安装。
 
 ## 1) 拉代码
 
@@ -58,14 +70,6 @@ python -c "import jax; print('backend:', jax.default_backend()); print('device_c
 ```
 
 期望看到 `backend: tpu` 且 `device_count: 4`（或与你的 TPU 拓扑一致）。
-
-（可选）你也可以用系统设备节点快速确认 TPU 是否可见：
-
-```bash
-ls -l /dev/accel*
-```
-
-在 TPU VM 上通常会看到类似 `/dev/accel0 ... /dev/accel3`（数量取决于 TPU 拓扑）；如果提示 `No such file or directory`，通常说明当前不是 TPU VM，或 TPU 运行时/驱动未正确安装。
 
 ## 6) 安装 gcsfs（解决 gs:// tokenizer 读取失败）
 
