@@ -4,6 +4,12 @@
 >
 > 目标：完成本地虚拟环境与依赖安装，并能运行 `./my_example/run_grpo_gemma.sh`。
 
+## 环境选择（先看这个）
+
+- `examples/deepscaler`：优先使用 `.venv_jax081`（JAX 0.8.1 对齐环境）。当前这套环境用于该目录的 `run_train.sh` / `run_eval.sh` 是可用的。
+- `my_example` / `my_example_qwen_aime`：也建议优先用 `.venv_jax081`，以便与项目 `prod` 的 JAX 约束（`<=0.8.1`）保持一致。
+- 如果只是一般代码开发且不要求固定 JAX 版本，可以使用 `.venv`。
+
 ## 0) 先确认机器真的有 TPU（最重要）
 
 在 TPU VM 上通常可以看到 `/dev/accel*` 设备节点：
