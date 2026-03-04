@@ -21,11 +21,28 @@ git clone -b my-changes --single-branch https://github.com/yangziao56/tunix.git
 cd tunix
 ```
 
-## 2) 创建并激活虚拟环境
+## 2) 创建并激活虚拟环境（`.venv` vs `.venv_jax081`）
+
+当前仓库里常见两套环境名：
+
+- `.venv`：通用开发环境，按 `pip install -e ".[dev]"` 正常安装即可（依赖可能更“新”）。
+- `.venv_jax081`：JAX 0.8.1 对齐环境（更贴近 `pyproject.toml` 里的 `jax[tpu] <= 0.8.1` 约束）。
+
+推荐：
+
+- 如果你主要跑当前 `my_example`/`my_example_qwen_aime`，并希望和项目 `prod` 约束保持一致，优先用 `.venv_jax081`。
+- 如果你只是日常开发且不要求固定 JAX 版本，用 `.venv` 即可。
+
+二选一执行（不要同时激活）：
 
 ```bash
+# A) 通用开发环境
 python3.11 -m venv .venv
 source .venv/bin/activate
+
+# B) JAX 0.8.1 对齐环境（推荐给 TPU 训练复现）
+python3.11 -m venv .venv_jax081
+source .venv_jax081/bin/activate
 ```
 
 ## 3) 安装依赖（开发模式）
@@ -33,6 +50,13 @@ source .venv/bin/activate
 ```bash
 pip install -U pip
 pip install -e ".[dev]"
+```
+
+如果你选择的是 `.venv_jax081`，建议显式固定 TPU JAX 版本：
+
+```bash
+pip uninstall -y jax jaxlib
+pip install "jax[tpu]==0.8.1" -f https://storage.googleapis.com/jax-releases/libtpu_releases.html
 ```
 
 ## 4) 配置 Hugging Face / Kaggle 凭据（my_example/.env）
@@ -56,9 +80,14 @@ chmod 600 my_example/.env
 - `A Google TPU may be present... Falling back to cpu.`
 - `ValueError: Number of devices 1 must be >= the product of mesh_shape (4, 1)`
 
-说明当前是 CPU 后端（`jax.device_count()==1`）。在 TPU VM 上执行：
+说明当前是 CPU 后端（`jax.device_count()==1`）。在 TPU VM 上执行（按你选的环境二选一）：
 
 ```bash
+# 如果当前是 .venv_jax081（保持 0.8.1）
+pip uninstall -y jax jaxlib
+pip install "jax[tpu]==0.8.1" -f https://storage.googleapis.com/jax-releases/libtpu_releases.html
+
+# 如果当前是 .venv（不固定版本）
 pip uninstall -y jax jaxlib
 pip install "jax[tpu]" -f https://storage.googleapis.com/jax-releases/libtpu_releases.html
 ```
