@@ -343,6 +343,9 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         engine_cls=trajectory_collect_engine.TrajectoryCollectEngine,
         engine_defaults=engine_defaults,
         max_concurrency=self.algo_config.max_concurrency,
+        run_episodes_sequentially=(
+            self.rl_cluster.cluster_config.rollout_engine == "sglang_jax"
+        ),
         rollout_sync_lock=self._rollout_sync_lock,
     )
 

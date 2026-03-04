@@ -118,6 +118,9 @@ class SglangJaxSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-nam
     args["device_indexes"] = config.mesh.device_ids.flatten().tolist()
     args["mem_fraction_static"] = config.mem_fraction_static
     args["enable_single_process"] = True
+    # Overlap scheduling can trigger event-loop/thread re-entry issues in
+    # agentic rollout usage; keep it disabled for stability.
+    args["disable_overlap_schedule"] = True
     if config.disable_radix_cache:
       args["disable_radix_cache"] = True
     if config.enable_deterministic_sampling:

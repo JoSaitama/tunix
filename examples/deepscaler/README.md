@@ -26,6 +26,12 @@ Smoke-test (minimal run shape, useful to validate runtime wiring):
 ./examples/deepscaler/run_eval.sh
 ```
 
+Smoke-test training only:
+
+```bash
+./examples/deepscaler/run_train.sh --smoke-test
+```
+
 Override script defaults with environment variables:
 
 ```bash
@@ -37,6 +43,118 @@ TEST_DATA_PATH=/path/to/train-00000-of-00001.parquet \
 MODEL_PATH=/path/to/model \
 TEST_DATA_PATH=/path/to/train-00000-of-00001.parquet \
 ./examples/deepscaler/run_eval.sh
+```
+
+## Rollout backends
+
+Training now supports `vanilla`, `vllm`, and `sglang_jax` rollout engines:
+
+```bash
+# vanilla (default)
+./examples/deepscaler/run_train.sh --smoke-test --rollout-engine vanilla
+
+# sglang-jax
+./examples/deepscaler/run_train.sh --smoke-test --rollout-engine sglang_jax
+
+# vllm
+./examples/deepscaler/run_train.sh --smoke-test --rollout-engine vllm
+```
+
+Optional rollout model source for non-vanilla engines (local path, `gs://`, or
+HF repo id):
+
+```bash
+./examples/deepscaler/run_train.sh \
+  --smoke-test \
+  --rollout-engine vllm \
+  --rollout-model-source deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B
+```
+
+Notes:
+
+- `--rollout-engine sglang-jax` is accepted as an alias of `sglang_jax`.
+- If rollout dependency packages are missing, preflight will fail early with install hints.
+- `vllm` exposes tuning flags like `--rollout-vllm-hbm-utilization`, `--rollout-dp`, and `--rollout-tp`.
+- `sglang_jax` exposes tuning flags like `--rollout-sglang-jax-context-length` and `--rollout-sglang-jax-mem-fraction-static`.
+
+## Repro commands (this machine)
+
+Use the tested Python 3.12 environment for `sglang_jax` runs:
+
+```bash
+source .venv_sglang312/bin/activate
+# Optional override (run_train.sh default is 1):
+# export GRPO_MAX_CONCURRENCY=2
+```
+
+Run baseline vanilla smoke regression:
+
+```bash
+RUN_TS=$(date +%Y%m%d_%H%M%S)
+CHECKPOINT_DIR=/tmp/deepscaler_ckpt_${RUN_TS} \
+METRICS_LOG_DIR=/tmp/deepscaler_tb_${RUN_TS} \
+./examples/deepscaler/run_train.sh --smoke-test --rollout-engine vanilla
+```
+
+Run `sglang_jax` smoke test with tensor parallel rollout (`--rollout-tp 2`):
+
+```bash
+RUN_TS=$(date +%Y%m%d_%H%M%S)
+CHECKPOINT_DIR=/tmp/deepscaler_ckpt_${RUN_TS} \
+METRICS_LOG_DIR=/tmp/deepscaler_tb_${RUN_TS} \
+./examples/deepscaler/run_train.sh --smoke-test --rollout-engine sglang_jax --rollout-tp 2
+```
+
+Run `sglang_jax` non-smoke experiment:
+
+```bash
+RUN_TS=$(date +%Y%m%d_%H%M%S)
+CHECKPOINT_DIR=/tmp/deepscaler_ckpt_${RUN_TS} \
+METRICS_LOG_DIR=/tmp/deepscaler_tb_${RUN_TS} \
+./examples/deepscaler/run_train.sh --rollout-engine sglang_jax --rollout-tp 2
+```
+
+If non-smoke run fails with `RESOURCE_EXHAUSTED` at `jit__train_step`, start with
+this lower-memory profile (verified in this environment):
+
+```bash
+RUN_TS=$(date +%Y%m%d_%H%M%S)
+CHECKPOINT_DIR=/tmp/deepscaler_ckpt_${RUN_TS} \
+METRICS_LOG_DIR=/tmp/deepscaler_tb_${RUN_TS} \
+./examples/deepscaler/run_train.sh \
+  --rollout-engine sglang_jax \
+  --rollout-tp 2 \
+  --max-prompt-length 1024 \
+  --total-generation-steps 512 \
+  --batch-size 8 \
+  --mini-batch-size 8 \
+  --train-micro-batch-size 1
+```
+
+To probe only compile + first step before a long run:
+
+```bash
+RUN_TS=$(date +%Y%m%d_%H%M%S)
+CHECKPOINT_DIR=/tmp/deepscaler_ckpt_${RUN_TS} \
+METRICS_LOG_DIR=/tmp/deepscaler_tb_${RUN_TS} \
+./examples/deepscaler/run_train.sh \
+  --rollout-engine sglang_jax \
+  --rollout-tp 2 \
+  --max-prompt-length 1024 \
+  --total-generation-steps 512 \
+  --batch-size 8 \
+  --mini-batch-size 8 \
+  --train-micro-batch-size 1 \
+  --num-batches 1 \
+  --num-epochs 1 \
+  --max-steps 1
+```
+
+If you see checkpoint save failures like `No space left on device`, free old
+temporary checkpoints first:
+
+```bash
+rm -rf /tmp/deepscaler_ckpt_*
 ```
 
 ## Authentication modes
@@ -57,6 +175,12 @@ export HF_TOKEN=...
 ```
 
 - You can enforce token presence with `--require-hf-token`.
+
+#### Backend-specific runtime deps
+
+- `vllm` rollout requires `vllm`/`tpu-inference` runtime support.
+- `sglang_jax` rollout requires `sglang-jax` (`sgl_jax` Python package).
+- Keep these in an isolated environment from baseline vanilla runs.
 
 ### 3) `gs://` model/data
 

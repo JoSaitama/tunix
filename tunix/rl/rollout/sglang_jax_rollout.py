@@ -58,7 +58,9 @@ class SglangJaxRollout(base_rollout.BaseRollout):
             page_size=rollout_config.rollout_sglang_jax_page_size,
         ),
     )
-    state = nnx.state(model)
+    # Keep only trainable params when syncing trainer -> rollout weights.
+    # Non-param states (e.g. RNG streams) can carry a different mesh context.
+    state = nnx.state(model).filter(nnx.Param)
     self._sampler.load_checkpoint(state)
 
   def generate(
@@ -109,6 +111,8 @@ class SglangJaxRollout(base_rollout.BaseRollout):
       params: jaxtyping.PyTree,
       filter_types: Optional[Tuple[Any, ...]] = None,
   ) -> None:
+    if hasattr(params, "filter"):
+      params = params.filter(nnx.Param)
     self._sampler.update_params(params, filter_types)
 
   def pad_id(self) -> int:

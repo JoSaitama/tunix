@@ -59,6 +59,7 @@ class RolloutOrchestrator:
       engine_cls: Type[TrajectoryCollectEngine] = TrajectoryCollectEngine,
       engine_defaults: Optional[Dict[str, Any]] = None,
       max_concurrency: Optional[int] = None,
+      run_episodes_sequentially: bool = False,
   ):
     """Initializes the RolloutOrchestrator.
 
@@ -78,10 +79,13 @@ class RolloutOrchestrator:
       max_concurrency: The maximum number of agent-environment interaction
         episodes to run in parallel. This limits the number of concurrent calls
         to the underlying language model.
+      run_episodes_sequentially: If True, runs multiple episodes for the same
+        pair one-by-one instead of concurrently.
     """
     self.engine_cls = engine_cls
     self.engine_defaults = engine_defaults or {}
     self.max_concurrency = max_concurrency
+    self.run_episodes_sequentially = run_episodes_sequentially
     self._tasks: List[asyncio.Task] = []
     self._stop = asyncio.Event()
     self._logger = logging.getLogger(self.__class__.__name__)
@@ -173,23 +177,36 @@ class RolloutOrchestrator:
       # Parallel execution for the group
       self._rollout_sync_lock.acquire_rollout()
       try:
-        tasks = []
-        for ep_id in range(num_episodes):
-          # TODO(b/462779884): Replace deepcopy with a factory pattern.
-          tasks.append(
-              self._run_and_queue_one_episode(
-                  pair_idx=i,
-                  episode_idx=ep_id,
-                  agent=copy.deepcopy(agent),
-                  env=copy.deepcopy(env),
-                  manager=manager,
-                  group_key=group_key,
-                  start_step_fn=start_step_fn,
-                  collect_mode=collect_mode,
-              )
-          )
-        results = await asyncio.gather(*tasks)
-        episode_count = sum(results)
+        if self.run_episodes_sequentially:
+          for ep_id in range(num_episodes):
+            episode_count += await self._run_and_queue_one_episode(
+                pair_idx=i,
+                episode_idx=ep_id,
+                agent=copy.deepcopy(agent),
+                env=copy.deepcopy(env),
+                manager=manager,
+                group_key=group_key,
+                start_step_fn=start_step_fn,
+                collect_mode=collect_mode,
+            )
+        else:
+          tasks = []
+          for ep_id in range(num_episodes):
+            # TODO(b/462779884): Replace deepcopy with a factory pattern.
+            tasks.append(
+                self._run_and_queue_one_episode(
+                    pair_idx=i,
+                    episode_idx=ep_id,
+                    agent=copy.deepcopy(agent),
+                    env=copy.deepcopy(env),
+                    manager=manager,
+                    group_key=group_key,
+                    start_step_fn=start_step_fn,
+                    collect_mode=collect_mode,
+                )
+            )
+          results = await asyncio.gather(*tasks)
+          episode_count = sum(results)
       finally:
         self._rollout_sync_lock.release_rollout()
     except Exception as e:

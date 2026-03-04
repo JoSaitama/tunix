@@ -4,6 +4,7 @@
 
 import argparse
 import contextlib
+import importlib.util
 import os
 import subprocess
 from typing import Sequence
@@ -12,6 +13,7 @@ from flax import nnx
 import grain
 import jax
 from jax import numpy as jnp
+import numpy as np
 import optax
 from orbax import checkpoint as ocp
 import pandas as pd
@@ -101,6 +103,19 @@ MAX_TO_KEEP = 4
 
 # ====== Rollout ======
 ROLLOUT_ENGINE = "vanilla"  # one of "vanilla", "vllm" or "sglang-jax"
+ROLLOUT_VLLM_HBM_UTILIZATION = 0.2
+ROLLOUT_VLLM_TPU_BACKEND_TYPE = "jax"
+ROLLOUT_VLLM_SERVER_MODE = False
+ROLLOUT_VLLM_ASYNC_SCHEDULING = False
+ROLLOUT_VLLM_SWAP_SPACE_SIZE_GB = 4.0
+ROLLOUT_DP = -1
+ROLLOUT_TP = -1
+ROLLOUT_SGLANG_JAX_CONTEXT_LENGTH = None
+ROLLOUT_SGLANG_JAX_MEM_FRACTION_STATIC = 0.2
+ROLLOUT_SGLANG_JAX_DISABLE_RADIX_CACHE = True
+ROLLOUT_SGLANG_JAX_ENABLE_DETERMINISTIC_SAMPLING = False
+ROLLOUT_SGLANG_JAX_CHUNKED_PREFILL_SIZE = -1
+ROLLOUT_SGLANG_JAX_PAGE_SIZE = 64
 
 REMOTE_PREFIXES = ("gs://", "gcs://", "s3://", "http://", "https://", "hf://")
 
@@ -180,6 +195,70 @@ def _resolve_mesh(mesh_fsdp: int | None, mesh_tp: int | None):
   return (mesh_fsdp, mesh_tp)
 
 
+def _build_training_mesh(mesh_shape: tuple[int, int]) -> jax.sharding.Mesh:
+  return jax.make_mesh(
+      mesh_shape,
+      ("fsdp", "tp"),
+      axis_types=(jax.sharding.AxisType.Auto,) * 2,
+  )
+
+
+def _build_rollout_mesh(
+    rollout_engine: str,
+    training_mesh: jax.sharding.Mesh,
+    rollout_tp_override: int | None = None,
+) -> jax.sharding.Mesh:
+  # sglang-jax expects rollout computations under a data/tensor mesh context.
+  # Keep actor/reference mesh unchanged so the vanilla training path is intact.
+  if rollout_engine != "sglang_jax":
+    return training_mesh
+
+  ordered_devices = sorted(training_mesh.devices.flatten().tolist(), key=lambda d: d.id)
+  if rollout_tp_override is not None and rollout_tp_override > 0:
+    if rollout_tp_override > len(ordered_devices):
+      raise ValueError(
+          f"`--rollout-tp`={rollout_tp_override} exceeds available devices "
+          f"({len(ordered_devices)}) for sglang-jax rollout."
+      )
+    ordered_devices = ordered_devices[:rollout_tp_override]
+  try:
+    # Use JAX's mesh builder to preserve TPU physical topology ordering.
+    from jax._src import mesh_utils as jax_mesh_utils  # pylint: disable=g-import-not-at-top
+    rollout_devices = jax_mesh_utils.create_device_mesh(
+        (1, len(ordered_devices)),
+        devices=ordered_devices,
+        contiguous_submeshes=False,
+        allow_split_physical_axes=True,
+    )
+  except Exception:
+    rollout_devices = np.array(ordered_devices, dtype=object).reshape((1, len(ordered_devices)))
+  return jax.sharding.Mesh(
+      rollout_devices,
+      ("data", "tensor"),
+      axis_types=(jax.sharding.AxisType.Auto, jax.sharding.AxisType.Auto),
+  )
+
+
+def _normalize_rollout_engine(rollout_engine: str) -> str:
+  normalized = rollout_engine.strip().lower().replace("-", "_")
+  if normalized not in ("vanilla", "vllm", "sglang_jax"):
+    raise ValueError(
+        "`--rollout-engine` must be one of: vanilla, vllm, sglang_jax "
+        f"(or alias sglang-jax). Got: {rollout_engine!r}"
+    )
+  return normalized
+
+
+def _resolve_rollout_model_source(args) -> str:
+  if args.rollout_model_source:
+    return args.rollout_model_source
+  return args.model_path
+
+
+def _is_module_available(module_name: str) -> bool:
+  return importlib.util.find_spec(module_name) is not None
+
+
 def _check_gcp_auth() -> bool:
   credentials_path = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
   if credentials_path and os.path.exists(credentials_path):
@@ -215,6 +294,8 @@ def _resolve_tokenizer_source(args) -> str:
 
 def _run_preflight(args):
   errors = []
+  rollout_engine = _normalize_rollout_engine(args.rollout_engine)
+  rollout_model_source = _resolve_rollout_model_source(args)
 
   for required_input in (args.train_dataset_path, args.test_dataset_path):
     if not _is_remote(required_input) and not os.path.exists(required_input):
@@ -223,9 +304,24 @@ def _run_preflight(args):
   if not _is_remote(args.model_path) and not os.path.exists(args.model_path):
     errors.append(f"Missing local model path: {args.model_path}")
 
+  if (
+      rollout_engine in ("vllm", "sglang_jax")
+      and not _is_remote(rollout_model_source)
+      and not _is_hf_repo_id(rollout_model_source)
+      and not os.path.exists(rollout_model_source)
+  ):
+    errors.append(
+        f"Missing local rollout model path/source: {rollout_model_source}"
+    )
+
   if any(
       _is_gcs(path)
-      for path in (args.model_path, args.train_dataset_path, args.test_dataset_path)
+      for path in (
+          args.model_path,
+          args.train_dataset_path,
+          args.test_dataset_path,
+          rollout_model_source,
+      )
   ):
     if not _check_gcp_auth():
       errors.append(
@@ -240,6 +336,66 @@ def _run_preflight(args):
         "INFO: Hugging Face repo id is used without token. "
         "Public models may still work; gated/private models require `HF_TOKEN`."
     )
+
+  if (
+      rollout_engine in ("vllm", "sglang_jax")
+      and _is_hf_repo_id(rollout_model_source)
+      and not args.hf_token
+  ):
+    print(
+        "INFO: rollout model source is a Hugging Face repo id without token. "
+        "Public models may still work; gated/private models require `HF_TOKEN`."
+    )
+
+  if rollout_engine == "vllm" and not _is_module_available("vllm"):
+    errors.append(
+        "Rollout engine `vllm` was selected, but `vllm` is not installed. "
+        "Install vLLM/tpu-inference in this runtime or use `--rollout-engine vanilla`."
+    )
+  if rollout_engine == "vllm":
+    if args.rollout_dp == 0 or args.rollout_dp < -1:
+      errors.append(
+          "`--rollout-dp` must be -1 (auto) or a positive integer."
+      )
+    if args.rollout_tp == 0 or args.rollout_tp < -1:
+      errors.append(
+          "`--rollout-tp` must be -1 (auto) or a positive integer."
+      )
+    if not (0.0 < args.rollout_vllm_hbm_utilization <= 1.0):
+      errors.append(
+          "`--rollout-vllm-hbm-utilization` must be in (0, 1]."
+      )
+    if args.rollout_vllm_swap_space_size_gb < 0:
+      errors.append(
+          "`--rollout-vllm-swap-space-size-gb` must be >= 0."
+      )
+  if rollout_engine == "sglang_jax" and not _is_module_available("sgl_jax"):
+    errors.append(
+        "Rollout engine `sglang_jax` was selected, but `sgl_jax` is not installed. "
+        "Install sglang-jax in this runtime or use `--rollout-engine vanilla`."
+    )
+  if rollout_engine == "sglang_jax":
+    if (
+        args.rollout_sglang_jax_context_length is not None
+        and args.rollout_sglang_jax_context_length <= 0
+    ):
+      errors.append(
+          "`--rollout-sglang-jax-context-length` must be > 0 if set."
+      )
+    if not (0.0 < args.rollout_sglang_jax_mem_fraction_static <= 1.0):
+      errors.append(
+          "`--rollout-sglang-jax-mem-fraction-static` must be in (0, 1]."
+      )
+    if (
+        args.rollout_sglang_jax_chunked_prefill_size == 0
+        or args.rollout_sglang_jax_chunked_prefill_size < -1
+    ):
+      errors.append(
+          "`--rollout-sglang-jax-chunked-prefill-size` must be -1 "
+          "(disable) or a positive integer."
+      )
+    if args.rollout_sglang_jax_page_size <= 0:
+      errors.append("`--rollout-sglang-jax-page-size` must be > 0.")
 
   _ensure_parent(args.checkpoint_dir)
   _ensure_parent(args.metrics_log_dir)
@@ -337,8 +493,89 @@ def parse_args(argv: Sequence[str] | None = None):
   parser_.add_argument("--temperature", type=float, default=TEMPERATURE)
   parser_.add_argument("--top-p", type=float, default=TOP_P)
   parser_.add_argument("--top-k", type=int, default=TOP_K)
+  parser_.add_argument(
+      "--rollout-engine",
+      default=ROLLOUT_ENGINE,
+      choices=["vanilla", "vllm", "sglang_jax", "sglang-jax"],
+      help="Rollout backend. `sglang-jax` is accepted as an alias of `sglang_jax`.",
+  )
+  parser_.add_argument(
+      "--rollout-model-source",
+      default=None,
+      help=(
+          "Model path or repo id used by non-vanilla rollout backends. "
+          "Defaults to --model-path."
+      ),
+  )
+  parser_.add_argument(
+      "--rollout-vllm-hbm-utilization",
+      type=float,
+      default=ROLLOUT_VLLM_HBM_UTILIZATION,
+  )
+  parser_.add_argument(
+      "--rollout-vllm-tpu-backend-type",
+      default=ROLLOUT_VLLM_TPU_BACKEND_TYPE,
+      help='vLLM TPU backend type, e.g. "jax", "torchax", "pytorch_xla".',
+  )
+  parser_.add_argument(
+      "--rollout-vllm-server-mode",
+      action=argparse.BooleanOptionalAction,
+      default=ROLLOUT_VLLM_SERVER_MODE,
+  )
+  parser_.add_argument(
+      "--rollout-vllm-async-scheduling",
+      action=argparse.BooleanOptionalAction,
+      default=ROLLOUT_VLLM_ASYNC_SCHEDULING,
+  )
+  parser_.add_argument(
+      "--rollout-vllm-swap-space-size-gb",
+      type=float,
+      default=ROLLOUT_VLLM_SWAP_SPACE_SIZE_GB,
+  )
+  parser_.add_argument("--rollout-dp", type=int, default=ROLLOUT_DP)
+  parser_.add_argument("--rollout-tp", type=int, default=ROLLOUT_TP)
+  parser_.add_argument(
+      "--rollout-sglang-jax-context-length",
+      type=int,
+      default=ROLLOUT_SGLANG_JAX_CONTEXT_LENGTH,
+      help="Context length for sglang-jax rollout. Defaults to rollout KV cache size.",
+  )
+  parser_.add_argument(
+      "--rollout-sglang-jax-mem-fraction-static",
+      type=float,
+      default=ROLLOUT_SGLANG_JAX_MEM_FRACTION_STATIC,
+  )
+  parser_.add_argument(
+      "--rollout-sglang-jax-disable-radix-cache",
+      action=argparse.BooleanOptionalAction,
+      default=ROLLOUT_SGLANG_JAX_DISABLE_RADIX_CACHE,
+  )
+  parser_.add_argument(
+      "--rollout-sglang-jax-enable-deterministic-sampling",
+      action=argparse.BooleanOptionalAction,
+      default=ROLLOUT_SGLANG_JAX_ENABLE_DETERMINISTIC_SAMPLING,
+  )
+  parser_.add_argument(
+      "--rollout-sglang-jax-chunked-prefill-size",
+      type=int,
+      default=ROLLOUT_SGLANG_JAX_CHUNKED_PREFILL_SIZE,
+  )
+  parser_.add_argument(
+      "--rollout-sglang-jax-page-size",
+      type=int,
+      default=ROLLOUT_SGLANG_JAX_PAGE_SIZE,
+  )
   parser_.add_argument("--num-generations", type=int, default=NUM_GENERATIONS)
   parser_.add_argument("--num-iterations", type=int, default=NUM_ITERATIONS)
+  parser_.add_argument(
+      "--grpo-max-concurrency",
+      type=int,
+      default=None,
+      help=(
+          "Override GRPO rollout orchestration concurrency. "
+          "For sglang_jax, default remains 1 when not set."
+      ),
+  )
   parser_.add_argument("--beta", type=float, default=BETA)
   parser_.add_argument("--epsilon", type=float, default=EPSILON)
   parser_.add_argument("--save-interval-steps", type=int, default=SAVE_INTERVAL_STEPS)
@@ -394,6 +631,61 @@ def _build_runtime_values(args):
   }
 
 
+def _build_rollout_config(
+    args,
+    runtime: dict[str, int],
+    tokenizer,
+    rollout_engine: str,
+) -> base_rollout.RolloutConfig:
+  kv_cache_size = (
+      runtime["max_prompt_length"] + runtime["total_generation_steps"] + 256
+  )
+  common_kwargs = dict(
+      max_tokens_to_generate=runtime["total_generation_steps"],
+      max_prompt_length=runtime["max_prompt_length"],
+      kv_cache_size=kv_cache_size,
+      temperature=args.temperature,
+      top_p=args.top_p,
+      top_k=args.top_k,
+      eos_tokens=[tokenizer.encode("<|im_end|>")[0]],
+  )
+  if rollout_engine == "vanilla":
+    return base_rollout.RolloutConfig(**common_kwargs)
+
+  rollout_model_source = _resolve_rollout_model_source(args)
+  if rollout_engine == "vllm":
+    return base_rollout.RolloutConfig(
+        **common_kwargs,
+        data_parallel_size=args.rollout_dp,
+        tensor_parallel_size=args.rollout_tp,
+        rollout_vllm_model_version=rollout_model_source,
+        rollout_vllm_hbm_utilization=args.rollout_vllm_hbm_utilization,
+        rollout_vllm_tpu_backend_type=args.rollout_vllm_tpu_backend_type,
+        rollout_vllm_server_mode=args.rollout_vllm_server_mode,
+        rollout_vllm_async_scheduling=args.rollout_vllm_async_scheduling,
+        rollout_vllm_swap_space_size_gb=args.rollout_vllm_swap_space_size_gb,
+    )
+
+  if rollout_engine == "sglang_jax":
+    context_length = (
+        args.rollout_sglang_jax_context_length
+        if args.rollout_sglang_jax_context_length is not None
+        else kv_cache_size
+    )
+    return base_rollout.RolloutConfig(
+        **common_kwargs,
+        rollout_sglang_jax_model_version=rollout_model_source,
+        rollout_sglang_jax_context_length=context_length,
+        rollout_sglang_jax_mem_fraction_static=args.rollout_sglang_jax_mem_fraction_static,
+        rollout_sglang_jax_disable_radix_cache=args.rollout_sglang_jax_disable_radix_cache,
+        rollout_sglang_jax_enable_deterministic_sampling=args.rollout_sglang_jax_enable_deterministic_sampling,
+        rollout_sglang_jax_chunked_prefill_size=args.rollout_sglang_jax_chunked_prefill_size,
+        rollout_sglang_jax_page_size=args.rollout_sglang_jax_page_size,
+    )
+
+  raise ValueError(f"Unsupported rollout engine: {rollout_engine}")
+
+
 def run_training(args):
   if not args.enable_wandb:
     os.environ.setdefault("WANDB_DISABLED", "true")
@@ -408,12 +700,26 @@ def run_training(args):
     _run_preflight(args)
 
   runtime = _build_runtime_values(args)
+  rollout_engine = _normalize_rollout_engine(args.rollout_engine)
+  rollout_model_source = _resolve_rollout_model_source(args)
   mesh_shape = _resolve_mesh(args.mesh_fsdp, args.mesh_tp)
+  training_mesh = _build_training_mesh(mesh_shape)
+  sglang_rollout_tp = args.rollout_tp if rollout_engine == "sglang_jax" and args.rollout_tp > 0 else None
+  rollout_mesh = _build_rollout_mesh(
+      rollout_engine,
+      training_mesh,
+      rollout_tp_override=sglang_rollout_tp,
+  )
   print(f"NOTEBOOK_ENV: {NOTEBOOK_ENV}")
   print(f"mesh shape: {mesh_shape}")
   print(f"checkpoint dir: {args.checkpoint_dir}")
   print(f"metrics log dir: {args.metrics_log_dir}")
   print(f"smoke test: {args.smoke_test}")
+  print(f"rollout engine: {rollout_engine}")
+  if rollout_engine != "vanilla":
+    print(f"rollout model source: {rollout_model_source}")
+    print(f"rollout mesh shape: {tuple(rollout_mesh.shape.values())}")
+    print(f"rollout mesh axes: {tuple(rollout_mesh.shape.keys())}")
 
   tokenizer_source = _resolve_tokenizer_source(args)
   print(f"tokenizer source: {tokenizer_source}")
@@ -437,24 +743,19 @@ def run_training(args):
   del test_dataset
   show_hbm_usage()
 
-  mesh = jax.make_mesh(
-      mesh_shape,
-      ("fsdp", "tp"),
-      axis_types=(jax.sharding.AxisType.Auto,) * 2,
-  )
   config = model_lib.ModelConfig.deepseek_r1_distill_qwen_1p5b()
   print("model path:", args.model_path)
   qwen2_ref = params_lib.create_model_from_safe_tensors(
-      args.model_path, config, mesh, dtype=jnp.float32
+      args.model_path, config, training_mesh, dtype=jnp.float32
   )
 
   if args.train_with_lora:
     qwen2_actor = get_lora_model(
-        qwen2_ref, mesh, rank=args.lora_rank, alpha=args.lora_alpha
+        qwen2_ref, training_mesh, rank=args.lora_rank, alpha=args.lora_alpha
     )
   else:
     qwen2_actor = params_lib.create_model_from_safe_tensors(
-        args.model_path, config, mesh, dtype=jnp.float32
+        args.model_path, config, training_mesh, dtype=jnp.float32
     )
   show_hbm_usage()
 
@@ -487,11 +788,11 @@ def run_training(args):
 
   cluster_config = rl_cluster_lib.ClusterConfig(
       role_to_mesh={
-          rl_cluster_lib.Role.ACTOR: mesh,
-          rl_cluster_lib.Role.REFERENCE: mesh,
-          rl_cluster_lib.Role.ROLLOUT: mesh,
+          rl_cluster_lib.Role.ACTOR: training_mesh,
+          rl_cluster_lib.Role.REFERENCE: training_mesh,
+          rl_cluster_lib.Role.ROLLOUT: rollout_mesh,
       },
-      rollout_engine=ROLLOUT_ENGINE,
+      rollout_engine=rollout_engine,
       offload_to_cpu=False,
       training_config=rl_cluster_lib.RLTrainingConfig(
           actor_optimizer=optimizer,
@@ -503,16 +804,25 @@ def run_training(args):
           checkpoint_root_directory=args.checkpoint_dir,
           checkpointing_options=checkpointing_options,
       ),
-      rollout_config=base_rollout.RolloutConfig(
-          max_tokens_to_generate=runtime["total_generation_steps"],
-          max_prompt_length=runtime["max_prompt_length"],
-          kv_cache_size=runtime["max_prompt_length"] + runtime["total_generation_steps"] + 256,
-          temperature=args.temperature,
-          top_p=args.top_p,
-          top_k=args.top_k,
-          eos_tokens=[tokenizer.encode("<|im_end|>")[0]],
+      rollout_config=_build_rollout_config(
+          args=args,
+          runtime=runtime,
+          tokenizer=tokenizer,
+          rollout_engine=rollout_engine,
       ),
   )
+
+  if args.grpo_max_concurrency is not None and args.grpo_max_concurrency <= 0:
+    raise ValueError("`--grpo-max-concurrency` must be a positive integer.")
+
+  grpo_max_concurrency = 1 if rollout_engine == "sglang_jax" else 8
+  if rollout_engine == "sglang_jax":
+    if args.grpo_max_concurrency is not None:
+      grpo_max_concurrency = args.grpo_max_concurrency
+    print(
+        "sglang_jax rollout sets agentic max_concurrency="
+        f"{grpo_max_concurrency} to control concurrent model calls."
+    )
 
   grpo_config = GRPOConfig(
       num_generations=args.num_generations,
@@ -520,10 +830,10 @@ def run_training(args):
       beta=args.beta,
       epsilon=args.epsilon,
       system_prompt="",
-      max_concurrency=8,
+      max_concurrency=grpo_max_concurrency,
   )
 
-  with compat.set_mesh(mesh):
+  with compat.set_mesh(training_mesh):
     rl_cluster = rl_cluster_lib.RLCluster(
         actor=qwen2_actor,
         reference=qwen2_ref,

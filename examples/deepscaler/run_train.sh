@@ -14,6 +14,7 @@ CHECKPOINT_DIR="${CHECKPOINT_DIR:-/tmp/deepscaler_ckpt_${RUN_TS}}"
 METRICS_LOG_DIR="${METRICS_LOG_DIR:-/tmp/deepscaler_tb_${RUN_TS}}"
 MESH_FSDP="${MESH_FSDP:-2}"
 MESH_TP="${MESH_TP:-2}"
+GRPO_MAX_CONCURRENCY="${GRPO_MAX_CONCURRENCY:-1}"
 
 for p in "$MODEL_PATH" "$TRAIN_DATA_PATH" "$TEST_DATA_PATH"; do
   if [[ ! -e "$p" ]]; then
@@ -31,4 +32,5 @@ python examples/deepscaler/train_deepscaler_nb.py \
   --metrics-log-dir "$METRICS_LOG_DIR" \
   --mesh-fsdp "$MESH_FSDP" \
   --mesh-tp "$MESH_TP" \
+  --grpo-max-concurrency "$GRPO_MAX_CONCURRENCY" \
   "$@"
