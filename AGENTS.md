@@ -33,3 +33,9 @@
 - Dynamic batch curation command also works:
 
   `./my_example/run_grpo_gemma.sh --use-dynamic-batch-curation --curation-threshold 3.0 --num-test-batches 1 --metrics-log-dir /tmp/content/tmp/tensorboard/grpo_$(date +%Y%m%d_%H%M%S) --checkpoint-root /tmp/content/ckpts_run2_$(date +%Y%m%d_%H%M%S)`
+
+## Development Log Requirement
+
+- 每次对仓库做任何代码/脚本/文档更新，都必须同步更新根目录 `develop.md`。
+- `develop.md` 记录至少包含：日期、改动范围、修改文件列表、验证命令与结果、已知风险/待办。
+- 如果某次任务没有代码改动，也要在 `develop.md` 里注明“无代码改动”。
