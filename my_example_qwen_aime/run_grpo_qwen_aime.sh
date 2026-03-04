@@ -101,17 +101,23 @@ fi
 python -m my_example_qwen_aime.main \
   --train-data-path ./data/deepscaler/deepscaler.json \
   --test-data-path ./data/aime_2024/train-00000-of-00001.parquet \
-  --train-fraction 0.9 \
-  --train-micro-batch-size 1 \
+  --train-fraction 1.0 \
+  --train-micro-batch-size 8 \
   --test-micro-batch-size 1 \
   --num-generations 2 \
-  --max-train-examples 512 \
+  --total-generation-steps 1024 \
+  --max-train-examples 50000 \
   --max-eval-examples 64 \
   --num-epochs 1 \
+  --eval-every-n-steps 999999 \
+  --mesh-counts 2,2 \
   --learning-rate 1e-6 \
+  --model-dtype bf16 \
+  --rollout-dtype inherit \
+  --eval-before \
   --no-wandb \
   --metrics-log-dir "${METRICS_LOG_DIR}" \
   --checkpoint-root "${CHECKPOINT_ROOT}" \
-  --model-id Qwen/Qwen2.5-1.5B-Instruct \
+  --model-id agentica-org/DeepScaleR-1.5B-Preview \
   "${EXTRA_EVAL_ARGS[@]}" \
   "${FORWARD_ARGS[@]}"

@@ -77,23 +77,21 @@ def math_reward(prompts: List[str], completions: List[str], answer: List[str], *
           processed_ground_truths.append(processed_truth)
         else:
           processed_ground_truths.append(truth)
+      else:
+        processed_ground_truths.append(truth)
 
     if not processed_ground_truths:
       rewards.append(0.0)
       continue
 
-    # Check against all possible correct answers
+    # Check against all possible correct answers and append once per completion.
+    is_correct = False
     for ground_truth in processed_ground_truths:
       is_correct = math_utils.grade_answer_mathd(
           model_answer, ground_truth
       ) or math_utils.grade_answer_sympy(model_answer, ground_truth)
       if is_correct:
-        reward_value: float = 1.0  # Base reward for a correct answer.
-        # Apply tool call bonus if applicable and answer is correct
-        # if task_info.get("has_toolcall", False):
-        #   reward_value += 0.5
-        rewards.append(reward_value)
-        continue
+        break
 
-    rewards.append(0.0)
+    rewards.append(1.0 if is_correct else 0.0)
   return rewards

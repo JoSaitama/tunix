@@ -55,13 +55,14 @@ def load_model(
     model_path: str,
     model_config: qwen2_lib.ModelConfig,
     mesh,
+    dtype: jnp.dtype,
 ) -> nnx.Module:
     with mesh:
         return qwen2_params.create_model_from_safe_tensors(
             file_dir=model_path,
             config=model_config,
             mesh=mesh,
-            dtype=jnp.float32,
+            dtype=dtype,
         )
 
 
@@ -95,7 +96,18 @@ def load_eos_tokens(model_path: str) -> list[int]:
 
         with open(generation_config_path, "r", encoding="utf-8") as handle:
             generation_configs = json.load(handle)
-        eos_tokens = generation_configs.get("eos_token_id", [])
+        raw_eos_tokens = generation_configs.get("eos_token_id", [])
+        if raw_eos_tokens is None:
+            eos_tokens = []
+        elif isinstance(raw_eos_tokens, int):
+            eos_tokens = [raw_eos_tokens]
+        elif isinstance(raw_eos_tokens, list):
+            eos_tokens = [int(token_id) for token_id in raw_eos_tokens]
+        else:
+            try:
+                eos_tokens = [int(token_id) for token_id in raw_eos_tokens]
+            except TypeError:
+                eos_tokens = []
         print(f"Using EOS token IDs from generation config: {eos_tokens}")
     return eos_tokens
 

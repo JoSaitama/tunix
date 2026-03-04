@@ -104,20 +104,45 @@ def _format_prompt(tokenizer, question: str) -> str:
     )
 
 
-def get_dataset(data_path: str, tokenizer) -> grain.MapDataset:
+def get_dataset(
+    data_path: str,
+    tokenizer,
+    max_prompt_length: int | None = None,
+) -> grain.MapDataset:
     resolved_path = _resolve_data_path(data_path)
     records = _records_from_frame(_read_dataframe(resolved_path))
-    dataset = (
-        grain.MapDataset.source(records)
-        .shuffle(seed=42)
-        .map(
-            lambda x: {
-                "prompts": _format_prompt(tokenizer, x["question"]),
-                "question": x["question"],
-                "answer": x["answer"],
+    prepared_records: list[dict[str, str]] = []
+    dropped_overlong = 0
+
+    for row in records:
+        prompt = _format_prompt(tokenizer, row["question"])
+        if max_prompt_length is not None and max_prompt_length > 0:
+            prompt_length = len(tokenizer.tokenize(prompt))
+            if prompt_length > max_prompt_length:
+                dropped_overlong += 1
+                continue
+        prepared_records.append(
+            {
+                "prompts": prompt,
+                "question": row["question"],
+                "answer": row["answer"],
             }
         )
-    )
+
+    if not prepared_records:
+        raise ValueError(
+            "No usable records after prompt-length filtering. "
+            f"max_prompt_length={max_prompt_length}"
+        )
+
+    if dropped_overlong > 0:
+        print(
+            "Dropped overlong prompts:",
+            f"{dropped_overlong}/{len(records)}",
+            f"(max_prompt_length={max_prompt_length})",
+        )
+
+    dataset = grain.MapDataset.source(prepared_records).shuffle(seed=42)
     return dataset
 
 

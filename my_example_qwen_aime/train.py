@@ -9,6 +9,7 @@ from tunix.sft import metrics_logger
 from tunix.utils import math_rewards
 
 from .config import GrpoGenerationConfig, TrainingConfig
+from .diagnostics import build_optional_metric_fns
 
 
 def build_optimizer(training: TrainingConfig, max_steps: int):
@@ -42,6 +43,7 @@ def build_cluster_config(
     max_steps: int,
     train_micro_batch_size: int,
     eos_tokens: list[int],
+    rollout_dtype,
     use_wandb: bool,
 ):
     checkpointing_options = ocp.CheckpointManagerOptions(
@@ -70,6 +72,7 @@ def build_cluster_config(
         temperature=grpo.temperature,
         top_p=grpo.top_p,
         top_k=grpo.top_k,
+        data_type=rollout_dtype,
         eos_tokens=eos_tokens,
     )
 
@@ -85,6 +88,7 @@ def build_cluster_config(
         temperature=eval_cfg.temperature,
         top_p=eval_cfg.top_p,
         top_k=eval_cfg.top_k,
+        data_type=rollout_dtype,
         eos_tokens=eos_tokens,
     )
 
@@ -127,9 +131,10 @@ def build_grpo_config(grpo: GrpoGenerationConfig) -> GRPOConfig:
 
 def build_trainer(rl_cluster, grpo: GrpoGenerationConfig) -> GRPOLearner:
     grpo_config = build_grpo_config(grpo)
+    metric_fns = build_optional_metric_fns()
     return GRPOLearner(
         rl_cluster=rl_cluster,
         reward_fns=[math_rewards.math_reward],
+        metric_fns=metric_fns,
         algo_config=grpo_config,
     )
-

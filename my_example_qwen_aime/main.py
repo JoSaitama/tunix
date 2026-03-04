@@ -1,12 +1,15 @@
 from __future__ import annotations
 
-from contextlib import contextmanager
+from contextlib import contextmanager, redirect_stdout
+import io
 import os
 import shutil
+import sys
 from typing import Optional, Tuple
 
 from flax import nnx
 import jax
+from jax import numpy as jnp
 from orbax import checkpoint as ocp
 from tunix.generate import sampler as sampler_lib
 from tunix.rl import rl_cluster as rl_cluster_lib
@@ -94,6 +97,66 @@ def _safe_len(dataset):
         return None
 
 
+def _is_noisy_math_log_line(line: str) -> bool:
+    stripped = line.strip()
+    if not stripped:
+        return False
+    if stripped.startswith("solution=") and "in extracted_boxed_answer" in stripped:
+        return True
+    if stripped.startswith("mathd ground_truth_normalized_mathd="):
+        return True
+    return False
+
+
+class _FilteredStdout(io.TextIOBase):
+    def __init__(self, wrapped):
+        super().__init__()
+        self._wrapped = wrapped
+        self._buffer = ""
+
+    def writable(self) -> bool:
+        return True
+
+    def isatty(self) -> bool:
+        return bool(getattr(self._wrapped, "isatty", lambda: False)())
+
+    @property
+    def encoding(self):
+        return getattr(self._wrapped, "encoding", None)
+
+    def write(self, text: str) -> int:
+        if not text:
+            return 0
+
+        combined = self._buffer + text
+        self._buffer = ""
+
+        lines = combined.splitlines(keepends=True)
+        if lines and not lines[-1].endswith(("\n", "\r")):
+            self._buffer = lines.pop()
+
+        for line in lines:
+            if not _is_noisy_math_log_line(line):
+                self._wrapped.write(line)
+        return len(text)
+
+    def flush(self) -> None:
+        if self._buffer and not _is_noisy_math_log_line(self._buffer):
+            self._wrapped.write(self._buffer)
+        self._buffer = ""
+        self._wrapped.flush()
+
+
+@contextmanager
+def _suppress_noisy_math_logs():
+    filtered_stdout = _FilteredStdout(sys.stdout)
+    with redirect_stdout(filtered_stdout):
+        try:
+            yield
+        finally:
+            filtered_stdout.flush()
+
+
 def _choose_mesh_counts(
     requested_counts: Optional[Tuple[int, int]],
     num_devices: int,
@@ -134,6 +197,14 @@ def _choose_mesh_counts(
     return (fsdp, tp)
 
 
+def _dtype_from_string(dtype_name: str) -> jnp.dtype:
+    if dtype_name == "fp32":
+        return jnp.float32
+    if dtype_name == "bf16":
+        return jnp.bfloat16
+    raise ValueError(f"Unsupported dtype: {dtype_name}")
+
+
 def main() -> None:
     try:
         jax.monitoring.clear_event_listeners()
@@ -145,6 +216,14 @@ def main() -> None:
     if not cfg.runtime.use_wandb:
         os.environ["WANDB_DISABLED"] = "true"
         os.environ["WANDB_MODE"] = "disabled"
+
+    model_dtype = _dtype_from_string(cfg.runtime.model_dtype)
+    rollout_dtype_name = (
+        cfg.runtime.model_dtype
+        if cfg.runtime.rollout_dtype == "inherit"
+        else cfg.runtime.rollout_dtype
+    )
+    rollout_dtype = _dtype_from_string(rollout_dtype_name)
 
     model_path = download_model(cfg.model)
     model_config = resolve_model_config(cfg.model.model_id)
@@ -162,12 +241,20 @@ def main() -> None:
     )
 
     full_train_dataset = batch_dataset(
-        get_dataset(cfg.data.train_data_path, tokenizer),
+        get_dataset(
+            cfg.data.train_data_path,
+            tokenizer,
+            max_prompt_length=cfg.grpo.max_prompt_length,
+        ),
         train_micro_batch_size,
         max_train_examples,
     )
     test_dataset = batch_dataset(
-        get_dataset(cfg.data.test_data_path, tokenizer),
+        get_dataset(
+            cfg.data.test_data_path,
+            tokenizer,
+            max_prompt_length=cfg.eval.max_prompt_length,
+        ),
         cfg.data.test_micro_batch_size,
         max_eval_examples,
     )
@@ -203,6 +290,9 @@ def main() -> None:
         f"train_micro_batch_size={cfg.data.train_micro_batch_size}",
         f"test_micro_batch_size={cfg.data.test_micro_batch_size}",
         f"max_eval_examples={cfg.data.max_eval_examples}",
+        f"model_dtype={cfg.runtime.model_dtype}",
+        f"rollout_dtype={cfg.runtime.rollout_dtype}",
+        f"effective_rollout_dtype={rollout_dtype_name}",
         f"eval_before_train={cfg.runtime.eval_before_train}",
         f"eval_after_train={cfg.runtime.eval_after_train}",
         sep=" | ",
@@ -226,7 +316,7 @@ def main() -> None:
     mesh, mesh_counts = make_mesh(mesh_counts)
     print(f"Using mesh counts: {mesh_counts}")
 
-    qwen2 = load_model(model_path, model_config, mesh)
+    qwen2 = load_model(model_path, model_config, mesh, dtype=model_dtype)
     lora_policy = apply_lora(qwen2, cfg.lora, mesh=mesh)
 
     eos_tokens = load_eos_tokens(model_path)
@@ -244,15 +334,16 @@ def main() -> None:
     )
 
     if cfg.runtime.eval_before_train:
-        num_correct, total, accuracy = evaluate(
-            test_dataset,
-            sampler,
-            temperature=cfg.eval.temperature,
-            top_k=cfg.eval.top_k,
-            top_p=cfg.eval.top_p,
-            num_passes=cfg.runtime.eval_num_passes,
-            verbose=cfg.runtime.verbose_eval,
-        )
+        with _suppress_noisy_math_logs():
+            num_correct, total, accuracy = evaluate(
+                test_dataset,
+                sampler,
+                temperature=cfg.eval.temperature,
+                top_k=cfg.eval.top_k,
+                top_p=cfg.eval.top_p,
+                num_passes=cfg.runtime.eval_num_passes,
+                verbose=cfg.runtime.verbose_eval,
+            )
         print(
             f"pre-train: num_correct={num_correct}, total={total}, "
             f"accuracy={accuracy}%"
@@ -268,6 +359,7 @@ def main() -> None:
         max_steps,
         train_micro_batch_size,
         eos_tokens,
+        rollout_dtype,
         cfg.runtime.use_wandb,
     )
 
@@ -283,8 +375,9 @@ def main() -> None:
 
     try:
         print("Starting training...")
-        with mesh:
-            trainer.train(train_dataset, val_dataset)
+        with _suppress_noisy_math_logs():
+            with mesh:
+                trainer.train(train_dataset, val_dataset)
         print("Training complete.")
 
         try:
@@ -340,17 +433,18 @@ def main() -> None:
                     ),
                     eos_tokens,
                 )
-                num_correct, total, accuracy = (
-                    evaluate(
-                        test_dataset,
-                        sampler,
-                        temperature=cfg.eval.temperature,
-                        top_k=cfg.eval.top_k,
-                        top_p=cfg.eval.top_p,
-                        num_passes=cfg.runtime.eval_num_passes,
-                        verbose=cfg.runtime.verbose_eval,
+                with _suppress_noisy_math_logs():
+                    num_correct, total, accuracy = (
+                        evaluate(
+                            test_dataset,
+                            sampler,
+                            temperature=cfg.eval.temperature,
+                            top_k=cfg.eval.top_k,
+                            top_p=cfg.eval.top_p,
+                            num_passes=cfg.runtime.eval_num_passes,
+                            verbose=cfg.runtime.verbose_eval,
+                        )
                     )
-                )
                 print(
                     f"post-train: num_correct={num_correct}, total={total}, "
                     f"accuracy={accuracy}%"

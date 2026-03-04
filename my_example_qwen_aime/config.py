@@ -16,7 +16,7 @@ class ModelConfig:
 class DataConfig:
     train_data_path: str = "./data/deepscaler/deepscaler.json"
     test_data_path: str = "./data/aime_2024/train-00000-of-00001.parquet"
-    train_fraction: float = 0.9
+    train_fraction: float = 1.0
     train_micro_batch_size: int = 1
     test_micro_batch_size: int = 1
     max_train_examples: int = 512
@@ -33,7 +33,7 @@ class LoraConfig:
 @dataclass(frozen=True)
 class GrpoGenerationConfig:
     max_prompt_length: int = 2048
-    total_generation_steps: int = 2048
+    total_generation_steps: int = 1024
     temperature: float = 0.6
     top_p: float = 0.95
     top_k: int = 50
@@ -60,7 +60,7 @@ class TrainingConfig:
     weight_decay: float = 0.1
     warmup_fraction: float = 0.1
     max_grad_norm: float = 0.1
-    eval_every_n_steps: int = 128
+    eval_every_n_steps: int = 999999
     checkpoint_root_directory: str = "/tmp/content/ckpts_qwen_aime"
     save_interval_steps: int = 500
     max_to_keep: int = 4
@@ -73,11 +73,13 @@ class TrainingConfig:
 @dataclass(frozen=True)
 class RuntimeConfig:
     use_wandb: bool = True
-    eval_before_train: bool = True
+    eval_before_train: bool = False
     eval_after_train: bool = True
     eval_num_passes: int = 1
     output_dir: Optional[str] = None
     mesh_counts: Optional[Tuple[int, int]] = None
+    model_dtype: str = "fp32"
+    rollout_dtype: str = "inherit"
     verbose_eval: bool = False
 
 
@@ -115,7 +117,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--test-data-path",
         default="./data/aime_2024/train-00000-of-00001.parquet",
     )
-    parser.add_argument("--train-fraction", type=float, default=0.9)
+    parser.add_argument("--train-fraction", type=float, default=1.0)
     parser.add_argument("--train-micro-batch-size", type=int, default=1)
     parser.add_argument("--test-micro-batch-size", type=int, default=1)
     parser.add_argument("--max-train-examples", type=int, default=512)
@@ -129,7 +131,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--lora-alpha", type=float, default=64.0)
 
     parser.add_argument("--max-prompt-length", type=int, default=2048)
-    parser.add_argument("--total-generation-steps", type=int, default=2048)
+    parser.add_argument("--total-generation-steps", type=int, default=1024)
     parser.add_argument("--temperature", type=float, default=0.6)
     parser.add_argument("--top-p", type=float, default=0.95)
     parser.add_argument("--top-k", type=int, default=50)
@@ -150,7 +152,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--weight-decay", type=float, default=0.1)
     parser.add_argument("--warmup-fraction", type=float, default=0.1)
     parser.add_argument("--max-grad-norm", type=float, default=0.1)
-    parser.add_argument("--eval-every-n-steps", type=int, default=128)
+    parser.add_argument("--eval-every-n-steps", type=int, default=999999)
     parser.add_argument("--checkpoint-root", default="/tmp/content/ckpts_qwen_aime")
     parser.add_argument("--save-interval-steps", type=int, default=500)
     parser.add_argument("--max-to-keep", type=int, default=4)
@@ -164,7 +166,18 @@ def build_parser() -> argparse.ArgumentParser:
 
     parser.add_argument("--output-dir", default=None)
     parser.add_argument("--mesh-counts", type=_parse_mesh_counts, default=None)
+    parser.add_argument(
+        "--model-dtype",
+        choices=("fp32", "bf16"),
+        default="fp32",
+    )
+    parser.add_argument(
+        "--rollout-dtype",
+        choices=("inherit", "fp32", "bf16"),
+        default="inherit",
+    )
     parser.add_argument("--no-wandb", action="store_true")
+    parser.add_argument("--eval-before", action="store_true")
     parser.add_argument("--skip-eval-before", action="store_true")
     parser.add_argument("--skip-eval-after", action="store_true")
     parser.add_argument("--eval-num-passes", type=int, default=1)
@@ -232,11 +245,13 @@ def config_from_args(argv: Optional[Sequence[str]] = None) -> Config:
     )
     runtime = RuntimeConfig(
         use_wandb=not args.no_wandb,
-        eval_before_train=not args.skip_eval_before,
+        eval_before_train=(args.eval_before and not args.skip_eval_before),
         eval_after_train=not args.skip_eval_after,
         eval_num_passes=args.eval_num_passes,
         output_dir=args.output_dir,
         mesh_counts=args.mesh_counts,
+        model_dtype=args.model_dtype,
+        rollout_dtype=args.rollout_dtype,
         verbose_eval=args.verbose_eval,
     )
 

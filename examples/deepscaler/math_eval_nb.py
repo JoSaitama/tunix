@@ -1,11 +1,18 @@
 # %%
-from pprint import pprint
-import datasets as datasets_lib
-import grain
-import pandas as pd
+import argparse
+import contextlib
 import os
-import fsspec
+from pprint import pprint
+import subprocess
+from typing import Any, Dict, Optional, Sequence
 
+import datasets as datasets_lib
+import fsspec
+import grain
+import jax
+import pandas as pd
+import re
+from tqdm.auto import tqdm
 import transformers
 from tunix.generate import mappings
 
@@ -28,8 +35,6 @@ try:
   NOTEBOOK_ENV = "g3"
 except Exception:
   NOTEBOOK_ENV = "git"
-
-  import contextlib
   cm = contextlib.nullcontext()
 
   file_open = fsspec.open
@@ -40,10 +45,39 @@ with cm:
   from tunix.generate import sampler as sampler_lib
   from tunix.utils import math_utils
 # %%
-from typing import Any, Dict, Optional
-import jax
-from tqdm.auto import tqdm
-import re
+
+REMOTE_PREFIXES = ("gs://", "gcs://", "s3://", "http://", "https://", "hf://")
+
+
+def _is_remote(path: str) -> bool:
+  return path.startswith(REMOTE_PREFIXES)
+
+
+def _is_gcs(path: str) -> bool:
+  return path.startswith("gs://") or path.startswith("gcs://")
+
+
+def _is_hf_repo_id(path_or_id: str) -> bool:
+  if os.path.isabs(path_or_id) or path_or_id.startswith("."):
+    return False
+  return ("/" in path_or_id) and (not _is_remote(path_or_id)) and (not os.path.exists(path_or_id))
+
+
+def _check_gcp_auth() -> bool:
+  credentials_path = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
+  if credentials_path and os.path.exists(credentials_path):
+    return True
+  try:
+    subprocess.run(
+        ["gcloud", "auth", "application-default", "print-access-token"],
+        check=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        timeout=5,
+    )
+    return True
+  except Exception:
+    return False
 
 # Only used for Math500
 def extract_answer_robust(passage: str) -> str:
@@ -174,6 +208,8 @@ class Qwen25MathEvaluator:
       max_prompt_length: int = 1024,  # Increased from 512
       max_generation_steps: int = 1024,  # Increased from 512
       sampler_type: str = "vanilla",  # vanilla, vllm, or sglang-jax
+      tokenizer_source: str | None = None,
+      hf_token: str | None = None,
   ):
     self.model_config = model_config
     self.model_version = model_version
@@ -182,19 +218,50 @@ class Qwen25MathEvaluator:
     self.max_prompt_length = max_prompt_length
     self.max_generation_steps = max_generation_steps
     self.sampler_type = sampler_type
+    self.tokenizer_source = tokenizer_source
+    self.hf_token = hf_token
 
     if mesh_config is None:
-      # Default: 4-way tensor parallelism
-      mesh_config = [[1, 4], ["fsdp", "tp"]]
+      mesh_config = [[1, max(1, jax.device_count())], ["fsdp", "tp"]]
+    mesh_size = mesh_config[0][0] * mesh_config[0][1]
+    if mesh_size != max(1, jax.device_count()):
+      raise ValueError(
+          f"mesh size mismatch: {mesh_config[0][0]}x{mesh_config[0][1]}={mesh_size}, "
+          f"but jax.device_count()={jax.device_count()}."
+      )
     self.mesh = jax.make_mesh(*mesh_config, axis_types=(jax.sharding.AxisType.Auto,) * len(mesh_config[0]))
     self.tokenizer = None
     self.model = None
     self.sampler = None
+    self.eos_token_ids: list[int] | None = None
 
     print(f"Initializing {self.model_version} evaluator")
     print(f"Model path: {model_path}")
     print(f"Mesh config: {mesh_config}")
     print(f"Available devices: {jax.devices()}")
+
+  def _resolve_eos_token_ids(self) -> list[int]:
+    if self.tokenizer is None:
+      raise RuntimeError("Tokenizer must be loaded before resolving EOS tokens.")
+
+    candidate_ids = []
+
+    eos_token_id = getattr(self.tokenizer, "eos_token_id", None)
+    if eos_token_id is not None:
+      candidate_ids.append(int(eos_token_id))
+
+    # Keep compatibility with chat tokenizers that expose legacy "<|im_end|>".
+    for tok in ("<|im_end|>", "<｜end▁of▁sentence｜>"):
+      tok_ids = self.tokenizer.encode(tok, add_special_tokens=False)
+      if len(tok_ids) == 1:
+        candidate_ids.append(int(tok_ids[0]))
+
+    eos_ids = list(dict.fromkeys(candidate_ids))
+    if not eos_ids:
+      raise RuntimeError(
+          "Failed to infer EOS token id(s). Check tokenizer special tokens."
+      )
+    return eos_ids
 
   def load_model(self):
     print("Loading model components...")
@@ -202,10 +269,23 @@ class Qwen25MathEvaluator:
     print("Loading tokenizer...")
 
     # Huggingface API doesn't work with gcs, OSS loads from model directly
-    tokenizer_source = self.model_version if NOTEBOOK_ENV != "g3" else self.model_path
-    self.tokenizer = AutoTokenizer.from_pretrained(
-        tokenizer_source, trust_remote_code=True
-    )
+    tokenizer_source = self.tokenizer_source
+    if tokenizer_source is None:
+      tokenizer_source = self.model_version if NOTEBOOK_ENV != "g3" else self.model_path
+    tokenizer_kwargs = {"trust_remote_code": True}
+    if self.hf_token:
+      try:
+        self.tokenizer = AutoTokenizer.from_pretrained(
+            tokenizer_source, token=self.hf_token, **tokenizer_kwargs
+        )
+      except TypeError:
+        self.tokenizer = AutoTokenizer.from_pretrained(
+            tokenizer_source, use_auth_token=self.hf_token, **tokenizer_kwargs
+        )
+    else:
+      self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_source, **tokenizer_kwargs)
+    self.eos_token_ids = self._resolve_eos_token_ids()
+    print(f"Using EOS token ids: {self.eos_token_ids}")
 
     print("Setting up model config...")
 
@@ -344,7 +424,7 @@ class Qwen25MathEvaluator:
           f" long prompt ({max_length} tokens)"
       )
 
-    stop_token_id = self.tokenizer.encode("<|im_end|>")[0]
+    stop_token_ids = self.eos_token_ids or self._resolve_eos_token_ids()
 
     # Generate
     if self.sampler_type == "vanilla":
@@ -355,7 +435,7 @@ class Qwen25MathEvaluator:
           top_k=top_k,
           top_p=top_p,
           echo=False,
-          eos_tokens=[stop_token_id],
+          eos_tokens=stop_token_ids,
           seed=jax.random.PRNGKey(seed) if seed is not None else None,
       )
     elif self.sampler_type == "sglang-jax":
@@ -520,14 +600,16 @@ class Qwen25MathEvaluator:
 # %%
 
 if NOTEBOOK_ENV == "g3":
-    DATA_PATH_PREFIX = "/GOOGLE_INTERNAL_STOAGE_PATH/gg-d/home/qwix-dev"
-    MODEL_PATH_PREFIX = "/GOOGLE_INTERNAL_STOAGE_PATH/gg-d/home/qwix-dev"
+  DATA_PATH_PREFIX = "/GOOGLE_INTERNAL_STOAGE_PATH/gg-d/home/qwix-dev"
+  MODEL_PATH_PREFIX = "/GOOGLE_INTERNAL_STOAGE_PATH/gg-d/home/qwix-dev"
 else:
-    DATA_PATH_PREFIX = "gs://tunix/data"
-    MODEL_PATH_PREFIX = "gs://tunix/models"
+  DATA_PATH_PREFIX = "gs://tunix/data"
+  MODEL_PATH_PREFIX = "gs://tunix/models"
 
 MATH_500_DATA_PATH = os.path.join(DATA_PATH_PREFIX, "MATH-500/test.jsonl")
-AIME_2024_DATA_PATH = os.path.join(DATA_PATH_PREFIX, "HuggingFaceH4/aime_2024/train-00000-of-00001.parquet")
+AIME_2024_DATA_PATH = os.path.join(
+    DATA_PATH_PREFIX, "HuggingFaceH4/aime_2024/train-00000-of-00001.parquet"
+)
 MODEL_MAPPING = {
     "Qwen/Qwen2.5-1.5B-Instruct": (
         qwen2_lib.ModelConfig.qwen2p5_1p5b(),
@@ -542,83 +624,199 @@ MODEL_MAPPING = {
         os.path.join(MODEL_PATH_PREFIX, "DeepScaleR-1.5B-Preview"),
     ),
 }
+DATASET_MAPPING = {
+    "math500": MATH_500_DATA_PATH,
+    "aime2024": AIME_2024_DATA_PATH,
+}
+DEFAULT_MODEL_VERSION = "Qwen/Qwen2.5-1.5B-Instruct"
+DEFAULT_DATASET = "math500"
 
-mesh_config = [[1, 2], ["fsdp", "tp"]]  # 2-way tensor parallelism
-# %%
-# MATH-500
-model_version = "Qwen/Qwen2.5-1.5B-Instruct"
-dataset = MATH_500_DATA_PATH
-model_config, model_path = MODEL_MAPPING[model_version]
 
-evaluator = Qwen25MathEvaluator(
-    model_config=model_config,
-    model_version=model_version,
-    model_path=model_path,
-    dataset=dataset,
-    mesh_config=mesh_config,
-    max_prompt_length=1024,  # Increased
-    max_generation_steps=1024,  # Increased
-)
+def _resolve_mesh_config(mesh_fsdp: int | None, mesh_tp: int | None):
+  device_count = max(1, jax.device_count())
+  if mesh_fsdp is None and mesh_tp is None:
+    return [[1, device_count], ["fsdp", "tp"]]
+  if mesh_fsdp is None or mesh_tp is None:
+    raise ValueError("`--mesh-fsdp` and `--mesh-tp` must be set together.")
+  if mesh_fsdp * mesh_tp != device_count:
+    raise ValueError(
+        f"mesh size mismatch: {mesh_fsdp}x{mesh_tp}={mesh_fsdp * mesh_tp}, "
+        f"but jax.device_count()={device_count}."
+    )
+  return [[mesh_fsdp, mesh_tp], ["fsdp", "tp"]]
 
-evaluator.load_model()
 
-print("\nStarting evaluation...")
-results = evaluator.evaluate(
-    batch_size=8,
-    num_batches=None,
-    temperature=0.6,
-    top_k=50,
-    top_p=0.95,
-    num_passes=1,
-    debug_first_n=5,
-)
+def _resolve_paths(args):
+  model_config, default_model_path = MODEL_MAPPING[args.model_version]
+  model_path = args.model_path if args.model_path else default_model_path
+  dataset_path = args.dataset_path if args.dataset_path else DATASET_MAPPING[args.dataset]
+  tokenizer_source = args.tokenizer_source
+  if tokenizer_source is None:
+    if not _is_remote(model_path):
+      tokenizer_source = model_path
+    elif NOTEBOOK_ENV == "g3":
+      tokenizer_source = model_path
+    else:
+      tokenizer_source = args.model_version
+  return model_config, model_path, dataset_path, tokenizer_source
 
-# Print results
-print("\n" + "=" * 60)
-print("Evaluation Results")
-print("=" * 60)
-print(f"Model: {model_path}")
-print(f"Dataset: {dataset}")
-print(f"Correct: {results['correct']}/{results['total']}")
-print(f"Accuracy: {results['accuracy']:.2f}%")
-print("=" * 60)
-# %%
-# AIME-2024
-model_version = "agentica-org/DeepScaleR-1.5B-Preview"
-dataset = AIME_2024_DATA_PATH
-model_config, model_path = MODEL_MAPPING[model_version]
 
-evaluator = Qwen25MathEvaluator(
-    model_config=model_config,
-    model_version=model_version,
-    model_path=model_path,
-    dataset=dataset,
-    mesh_config=mesh_config,
-    max_prompt_length=2048,  # Increased
-    max_generation_steps=32768,  # Increased
-)
+def _dataset_profile(dataset_name: str, dataset_path: str):
+  path = (dataset_path or "").lower()
+  if dataset_name == "aime2024" or "aime_2024" in path:
+    return {
+        "max_prompt_length": 2048,
+        "max_generation_steps": 32768,
+        "batch_size": 1,
+        "temperature": 0.6,
+        "top_k": -1,
+        "top_p": 0.95,
+        "debug_first_n": 3,
+    }
+  return {
+      "max_prompt_length": 1024,
+      "max_generation_steps": 1024,
+      "batch_size": 8,
+      "temperature": 0.6,
+      "top_k": 50,
+      "top_p": 0.95,
+      "debug_first_n": 3,
+  }
 
-evaluator.load_model()
 
-print("\nStarting evaluation...")
+def _apply_dataset_defaults(args, dataset_path: str):
+  profile = _dataset_profile(args.dataset, dataset_path)
+  if args.max_prompt_length is None:
+    args.max_prompt_length = profile["max_prompt_length"]
+  if args.max_generation_steps is None:
+    args.max_generation_steps = profile["max_generation_steps"]
+  if args.batch_size is None:
+    args.batch_size = profile["batch_size"]
+  if args.temperature is None:
+    args.temperature = profile["temperature"]
+  if args.top_k is None:
+    args.top_k = profile["top_k"]
+  if args.top_p is None:
+    args.top_p = profile["top_p"]
+  if args.debug_first_n is None:
+    args.debug_first_n = profile["debug_first_n"]
 
-results = evaluator.evaluate(
-    batch_size=1,
-    num_batches=None,
-    temperature=0.6,
-    top_k=None,
-    top_p=0.95,
-    num_passes=1,
-    debug_first_n=5,
-)
 
-# Print results
-print("\n" + "=" * 60)
-print("Evaluation Results")
-print("=" * 60)
-print(f"Model: {model_path}")
-print(f"Dataset: {dataset}")
-print(f"Correct: {results['correct']}/{results['total']}")
-print(f"Accuracy: {results['accuracy']:.2f}%")
-print("=" * 60)
-# %%
+def _run_preflight(args, model_path: str, dataset_path: str, tokenizer_source: str):
+  errors = []
+  if not _is_remote(model_path) and not os.path.exists(model_path):
+    errors.append(f"Missing local model path: {model_path}")
+  if not _is_remote(dataset_path) and not os.path.exists(dataset_path):
+    errors.append(f"Missing local dataset path: {dataset_path}")
+  if any(_is_gcs(p) for p in (model_path, dataset_path)) and not _check_gcp_auth():
+    errors.append(
+        "GCS path detected but no Application Default Credentials found. "
+        "Run `gcloud auth application-default login` "
+        "or set `GOOGLE_APPLICATION_CREDENTIALS=/path/to/service-account.json`."
+    )
+  if _is_hf_repo_id(tokenizer_source) and not args.hf_token:
+    print(
+        "INFO: Hugging Face repo id is used without token. "
+        "Public models may still work; gated/private models require `HF_TOKEN`."
+    )
+  if args.require_hf_token and not args.hf_token:
+    errors.append(
+      "`--require-hf-token` was set but no token was provided. "
+      "Use `--hf-token` or export `HF_TOKEN`."
+    )
+  if errors:
+    raise RuntimeError("\n".join(errors))
+
+
+def parse_args(argv: Sequence[str] | None = None):
+  parser_ = argparse.ArgumentParser(description="Evaluate DeepScaler/Qwen math models.")
+  parser_.add_argument("--model-version", default=DEFAULT_MODEL_VERSION, choices=list(MODEL_MAPPING.keys()))
+  parser_.add_argument("--model-path", default=None)
+  parser_.add_argument("--dataset", default=DEFAULT_DATASET, choices=list(DATASET_MAPPING.keys()))
+  parser_.add_argument("--dataset-path", default=None)
+  parser_.add_argument("--tokenizer-source", default=None)
+  parser_.add_argument("--sampler-type", default="vanilla", choices=["vanilla", "sglang-jax"])
+  parser_.add_argument("--max-prompt-length", type=int, default=None)
+  parser_.add_argument("--max-generation-steps", type=int, default=None)
+  parser_.add_argument("--batch-size", type=int, default=None)
+  parser_.add_argument("--num-batches", type=int, default=None)
+  parser_.add_argument("--temperature", type=float, default=None)
+  parser_.add_argument("--top-k", type=int, default=None, help="Set <0 to disable top-k.")
+  parser_.add_argument("--top-p", type=float, default=None)
+  parser_.add_argument("--num-passes", type=int, default=1)
+  parser_.add_argument("--debug-first-n", type=int, default=None)
+  parser_.add_argument("--mesh-fsdp", type=int, default=None)
+  parser_.add_argument("--mesh-tp", type=int, default=None)
+  parser_.add_argument("--hf-token", default=os.environ.get("HF_TOKEN"))
+  parser_.add_argument("--require-hf-token", action="store_true")
+  parser_.add_argument("--skip-preflight", action="store_true")
+  parser_.add_argument("--smoke-test", action="store_true")
+  return parser_.parse_args(argv)
+
+
+def _apply_smoke_test(args):
+  if not args.smoke_test:
+    return
+  args.batch_size = 1
+  args.num_batches = 1
+  args.debug_first_n = 1
+  args.max_generation_steps = min(args.max_generation_steps, 256)
+  args.max_prompt_length = min(args.max_prompt_length, 512)
+
+
+def run_eval(args):
+  model_config, model_path, dataset_path, tokenizer_source = _resolve_paths(args)
+  _apply_dataset_defaults(args, dataset_path=dataset_path)
+  _apply_smoke_test(args)
+  if not args.skip_preflight:
+    _run_preflight(args, model_path=model_path, dataset_path=dataset_path, tokenizer_source=tokenizer_source)
+  mesh_config = _resolve_mesh_config(args.mesh_fsdp, args.mesh_tp)
+
+  print(f"NOTEBOOK_ENV: {NOTEBOOK_ENV}")
+  print(f"model version: {args.model_version}")
+  print(f"model path: {model_path}")
+  print(f"dataset path: {dataset_path}")
+  print(f"mesh config: {mesh_config}")
+  print(f"smoke test: {args.smoke_test}")
+
+  evaluator = Qwen25MathEvaluator(
+      model_config=model_config,
+      model_version=args.model_version,
+      model_path=model_path,
+      dataset=dataset_path,
+      mesh_config=mesh_config,
+      max_prompt_length=args.max_prompt_length,
+      max_generation_steps=args.max_generation_steps,
+      sampler_type=args.sampler_type,
+      tokenizer_source=tokenizer_source,
+      hf_token=args.hf_token,
+  )
+  evaluator.load_model()
+  print("\nStarting evaluation...")
+  results = evaluator.evaluate(
+      batch_size=args.batch_size,
+      num_batches=args.num_batches,
+      temperature=args.temperature,
+      top_k=None if args.top_k is not None and args.top_k < 0 else args.top_k,
+      top_p=args.top_p,
+      num_passes=args.num_passes,
+      debug_first_n=args.debug_first_n,
+  )
+
+  print("\n" + "=" * 60)
+  print("Evaluation Results")
+  print("=" * 60)
+  print(f"Model: {model_path}")
+  print(f"Dataset: {dataset_path}")
+  print(f"Correct: {results['correct']}/{results['total']}")
+  print(f"Accuracy: {results['accuracy']:.2f}%")
+  print("=" * 60)
+
+
+def main(argv: Sequence[str] | None = None):
+  args = parse_args(argv)
+  run_eval(args)
+
+
+if __name__ == "__main__":
+  main()

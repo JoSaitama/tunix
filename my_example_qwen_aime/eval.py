@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from typing import Any, Tuple
 
 from tqdm.auto import tqdm
@@ -9,17 +10,30 @@ from tunix.utils import math_utils
 THOUGHT_DELIMITER_END = "</think>"
 
 
+def _env_flag(name: str, default: bool = False) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _extract_answer_from_response(response: Any) -> str | None:
+    if response is None or response == "":
+        return None
+    response_text = str(response)
+    if THOUGHT_DELIMITER_END in response_text:
+        model_solution = response_text.split(THOUGHT_DELIMITER_END, 1)[1]
+    else:
+        model_solution = response_text
+    return math_utils.extract_answer(model_solution)
+
+
 def evaluate_correctness(response: Any, ground_truths: Any) -> bool:
     """Align with deepscaler AIME correctness logic."""
     if response is None or response == "":
         return False
 
-    if THOUGHT_DELIMITER_END in response:
-        model_solution = response.split(THOUGHT_DELIMITER_END)[1]
-    else:
-        model_solution = response
-
-    model_answer = math_utils.extract_answer(model_solution)
+    model_answer = _extract_answer_from_response(response)
     if model_answer is None:
         return False
     if ground_truths is None:
@@ -61,6 +75,11 @@ def evaluate(
     num_passes: int = 1,
     verbose: bool = False,
 ) -> Tuple[int, int, float]:
+    diag_enabled = _env_flag("TUNIX_QWEN_AIME_DIAG")
+    response_total = 0
+    response_boxed = 0
+    response_parseable = 0
+
     corr = 0
     total = 0
 
@@ -79,6 +98,13 @@ def evaluate(
             )
             for idx, response in enumerate(responses):
                 multiple_call_responses[idx].append(response)
+                if diag_enabled:
+                    response_text = "" if response is None else str(response)
+                    response_total += 1
+                    if "\\boxed" in response_text:
+                        response_boxed += 1
+                    if _extract_answer_from_response(response_text) is not None:
+                        response_parseable += 1
                 if verbose:
                     print(f"Question:\t{questions[idx]}")
                     print(f"Correct Answer:\t{answers[idx]}")
@@ -106,6 +132,14 @@ def evaluate(
                     f"===> corr={corr}, total={total}, "
                     f"corr%={corr / total * 100:.2f}"
                 )
+
+    if diag_enabled and response_total:
+        print(
+            "[eval-diag] "
+            f"response_boxed_rate={response_boxed / response_total:.4f}, "
+            f"response_parseable_rate={response_parseable / response_total:.4f}, "
+            f"responses={response_total}"
+        )
 
     return (
         corr,
