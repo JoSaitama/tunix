@@ -49,6 +49,8 @@ class SglangJaxConfig:
   precompile_token_paddings: Optional[List] = None
   chunked_prefill_size: int = -1
   page_size: int = 64
+  dtype: str = "auto"
+  kv_cache_dtype: str = "auto"
 
 
 class SglangJaxSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
@@ -132,6 +134,8 @@ class SglangJaxSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-nam
     args["precompile_token_paddings"] = config.precompile_token_paddings
     args["chunked_prefill_size"] = config.chunked_prefill_size
     args["page_size"] = config.page_size
+    args["dtype"] = config.dtype
+    args["kv_cache_dtype"] = config.kv_cache_dtype
     return args
 
   @property

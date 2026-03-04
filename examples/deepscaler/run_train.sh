@@ -16,6 +16,17 @@ MESH_FSDP="${MESH_FSDP:-2}"
 MESH_TP="${MESH_TP:-2}"
 GRPO_MAX_CONCURRENCY="${GRPO_MAX_CONCURRENCY:-1}"
 
+# Dtype knobs:
+# - TRAIN_DTYPE options: fp32 | bf16
+# - REWARD_ADVANTAGE_DTYPE options: fp32 | bf16
+# - ROLLOUT_SGLANG_JAX_DTYPE options: auto | float32 | bfloat16 | float16
+#   (also accepts aliases: fp32, bf16, half, float)
+# - ROLLOUT_SGLANG_JAX_KV_CACHE_DTYPE options: auto | bf16 | fp8_e5m2 | fp8_e4m3
+TRAIN_DTYPE="${TRAIN_DTYPE:-bf16}"
+REWARD_ADVANTAGE_DTYPE="${REWARD_ADVANTAGE_DTYPE:-bf16}"
+ROLLOUT_SGLANG_JAX_DTYPE="${ROLLOUT_SGLANG_JAX_DTYPE:-auto}"
+ROLLOUT_SGLANG_JAX_KV_CACHE_DTYPE="${ROLLOUT_SGLANG_JAX_KV_CACHE_DTYPE:-auto}"
+
 for p in "$MODEL_PATH" "$TRAIN_DATA_PATH" "$TEST_DATA_PATH"; do
   if [[ ! -e "$p" ]]; then
     echo "Missing required path: $p" >&2
@@ -33,4 +44,8 @@ python examples/deepscaler/train_deepscaler_nb.py \
   --mesh-fsdp "$MESH_FSDP" \
   --mesh-tp "$MESH_TP" \
   --grpo-max-concurrency "$GRPO_MAX_CONCURRENCY" \
+  --train-dtype "$TRAIN_DTYPE" \
+  --reward-advantage-dtype "$REWARD_ADVANTAGE_DTYPE" \
+  --rollout-sglang-jax-dtype "$ROLLOUT_SGLANG_JAX_DTYPE" \
+  --rollout-sglang-jax-kv-cache-dtype "$ROLLOUT_SGLANG_JAX_KV_CACHE_DTYPE" \
   "$@"

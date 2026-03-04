@@ -142,3 +142,53 @@ This file tracks engineering changes made in this repository.
 - Branch: `my-changes`
 - Remote: `origin` (`yangziao56/tunix`)
 
+---
+
+## 2026-03-04: DeepScaler dtype controls (train + reward/advantage + sglang_jax rollout)
+
+### Scope
+
+- Added configurable dtype controls for DeepScaler training instead of fixed FP32-only behavior.
+- Added a single reward/advantage dtype switch (one parameter, not separate reward/advantage flags).
+- Added sglang_jax rollout dtype and KV-cache dtype controls with safe defaults and alias support.
+
+### Changed files
+
+1. `examples/deepscaler/run_train.sh`
+2. `examples/deepscaler/train_deepscaler_nb.py`
+3. `tunix/rl/experimental/agentic_grpo_learner.py`
+4. `tunix/rl/rollout/base_rollout.py`
+5. `tunix/rl/rollout/sglang_jax_rollout.py`
+6. `tunix/generate/sglang_jax_sampler.py`
+
+### Key behavior changes
+
+- `run_train.sh` adds env-based defaults and passthrough:
+  - `TRAIN_DTYPE` (default `bf16`, options `fp32|bf16`)
+  - `REWARD_ADVANTAGE_DTYPE` (default `bf16`, options `fp32|bf16`)
+  - `ROLLOUT_SGLANG_JAX_DTYPE` (default `auto`, supports `float32|bfloat16|float16|half|float|fp32|bf16`)
+  - `ROLLOUT_SGLANG_JAX_KV_CACHE_DTYPE` (default `auto`, supports `bf16|fp8_e5m2|fp8_e4m3`)
+- `train_deepscaler_nb.py`:
+  - new CLI flags for the four dtype knobs above
+  - normalization/validation helpers for sglang_jax dtype arguments
+  - model load dtype now follows `--train-dtype` instead of hardcoded `jnp.float32`
+  - exports `TUNIX_REWARD_ADVANTAGE_DTYPE` for learner-side reward/advantage casting
+- GRPO learner path now optionally casts rewards and advantages via `TUNIX_REWARD_ADVANTAGE_DTYPE`.
+- sglang_jax rollout config path now forwards `dtype` and `kv_cache_dtype` to sampler engine args.
+
+### Validation
+
+- Syntax/compile check:
+  - `python -m py_compile examples/deepscaler/train_deepscaler_nb.py`
+- CLI surface check:
+  - `python examples/deepscaler/train_deepscaler_nb.py --help`
+  - `./examples/deepscaler/run_train.sh --help`
+- Static verification by diff inspection:
+  - confirmed single reward/advantage dtype switch (`--reward-advantage-dtype`)
+  - confirmed rollout dtype knobs are passed end-to-end into `SglangJaxConfig`
+
+### Known risks / TODO
+
+- Runtime numerics differ when using `bf16` vs `fp32`; this is expected and workload-dependent.
+- `--rollout-sglang-jax-kv-cache-dtype float32` remains unsupported by sglang_jax API surface (no change).
+- End-to-end long-run training validation for all dtype combinations is still pending.

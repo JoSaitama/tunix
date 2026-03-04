@@ -30,6 +30,7 @@ The data flow is designed around an asynchronous producer-consumer pattern:
 from __future__ import annotations
 
 import dataclasses
+import os
 from typing import Any, List, Sequence, TypeVar
 
 from absl import logging
@@ -49,6 +50,21 @@ RewardFn = agentic_rl_learner.RewardFn
 MetricFn = agentic_rl_learner.MetricFn
 
 TrainExample = agentic_rl_learner.TrainExample
+
+
+def _resolve_reward_advantage_dtype() -> jnp.dtype | None:
+  """Gets reward/advantage dtype from env var if configured."""
+  dtype_name = os.environ.get("TUNIX_REWARD_ADVANTAGE_DTYPE", "").strip().lower()
+  if not dtype_name:
+    return None
+  if dtype_name in ("fp32", "float32", "float"):
+    return jnp.float32
+  if dtype_name in ("bf16", "bfloat16"):
+    return jnp.bfloat16
+  raise ValueError(
+      "`TUNIX_REWARD_ADVANTAGE_DTYPE` must be one of: fp32, bf16, "
+      f"float32, bfloat16, float. Got: {dtype_name!r}"
+  )
 
 
 @dataclasses.dataclass(slots=True, kw_only=True)
@@ -161,6 +177,12 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
         algo_config=algo_config,
         chat_parser=chat_parser,
     )
+    self._reward_advantage_dtype = _resolve_reward_advantage_dtype()
+    if self._reward_advantage_dtype is not None:
+      logging.info(
+          "Using reward/advantage dtype override: %s",
+          self._reward_advantage_dtype,
+      )
 
     # Workaround to pass loss fn with algorithm flag
     policy_loss_fn = function_registry.get_policy_loss_fn(
@@ -327,6 +349,8 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
         **reward_kwargs,
         step=step,
     )
+    if self._reward_advantage_dtype is not None:
+      rewards = rewards.astype(self._reward_advantage_dtype)
 
     advantage_estimator = function_registry.get_advantage_estimator(
         self.algo_config.advantage_estimator
@@ -334,6 +358,8 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
     advantages = advantage_estimator(
         rewards=rewards, num_generations=self.algo_config.num_generations
     )
+    if self._reward_advantage_dtype is not None:
+      advantages = advantages.astype(self._reward_advantage_dtype)
 
     policy_versions = jnp.array(policy_versions_list, dtype=jnp.int32)
 

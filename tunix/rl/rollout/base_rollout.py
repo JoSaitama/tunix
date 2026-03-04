@@ -175,6 +175,12 @@ class RolloutConfig:
   # The number of tokens in a page
   rollout_sglang_jax_page_size: int = 64
 
+  # Data type for SG-Lang JAX rollout model.
+  rollout_sglang_jax_dtype: str = "auto"
+
+  # KV cache dtype for SG-Lang JAX rollout model.
+  rollout_sglang_jax_kv_cache_dtype: str = "auto"
+
 
 class BaseRollout(ABC):
   """Base RolloutWorker."""

@@ -62,6 +62,8 @@ SEED = 42
 RANK = 64
 ALPHA = 64.0
 TRAIN_WITH_LORA = False
+TRAIN_DTYPE = "fp32"  # one of "fp32" or "bf16"
+REWARD_ADVANTAGE_DTYPE = "fp32"  # one of "fp32" or "bf16"
 
 # ====== Sharding ======
 MESH = [(2, 4), ("fsdp", "tp")]
@@ -116,6 +118,8 @@ ROLLOUT_SGLANG_JAX_DISABLE_RADIX_CACHE = True
 ROLLOUT_SGLANG_JAX_ENABLE_DETERMINISTIC_SAMPLING = False
 ROLLOUT_SGLANG_JAX_CHUNKED_PREFILL_SIZE = -1
 ROLLOUT_SGLANG_JAX_PAGE_SIZE = 64
+ROLLOUT_SGLANG_JAX_DTYPE = "auto"
+ROLLOUT_SGLANG_JAX_KV_CACHE_DTYPE = "auto"
 
 REMOTE_PREFIXES = ("gs://", "gcs://", "s3://", "http://", "https://", "hf://")
 
@@ -249,6 +253,43 @@ def _normalize_rollout_engine(rollout_engine: str) -> str:
   return normalized
 
 
+def _to_jax_train_dtype(dtype_name: str) -> jnp.dtype:
+  if dtype_name == "fp32":
+    return jnp.float32
+  if dtype_name == "bf16":
+    return jnp.bfloat16
+  raise ValueError(
+      "`--train-dtype` must be one of: fp32, bf16. "
+      f"Got: {dtype_name!r}"
+  )
+
+
+def _normalize_sglang_dtype(dtype_name: str) -> str:
+  normalized = dtype_name.strip().lower()
+  if normalized == "fp32":
+    return "float32"
+  if normalized == "bf16":
+    return "bfloat16"
+  if normalized in ("auto", "half", "float16", "bfloat16", "float", "float32"):
+    return normalized
+  raise ValueError(
+      "`--rollout-sglang-jax-dtype` must be one of: "
+      "auto, float32, bfloat16, float16, half, float, fp32, bf16. "
+      f"Got: {dtype_name!r}"
+  )
+
+
+def _normalize_sglang_kv_cache_dtype(dtype_name: str) -> str:
+  normalized = dtype_name.strip().lower()
+  if normalized in ("auto", "bf16", "fp8_e5m2", "fp8_e4m3"):
+    return normalized
+  raise ValueError(
+      "`--rollout-sglang-jax-kv-cache-dtype` must be one of: "
+      "auto, bf16, fp8_e5m2, fp8_e4m3. "
+      f"Got: {dtype_name!r}"
+  )
+
+
 def _resolve_rollout_model_source(args) -> str:
   if args.rollout_model_source:
     return args.rollout_model_source
@@ -375,6 +416,14 @@ def _run_preflight(args):
         "Install sglang-jax in this runtime or use `--rollout-engine vanilla`."
     )
   if rollout_engine == "sglang_jax":
+    try:
+      _normalize_sglang_dtype(args.rollout_sglang_jax_dtype)
+    except ValueError as exc:
+      errors.append(str(exc))
+    try:
+      _normalize_sglang_kv_cache_dtype(args.rollout_sglang_jax_kv_cache_dtype)
+    except ValueError as exc:
+      errors.append(str(exc))
     if (
         args.rollout_sglang_jax_context_length is not None
         and args.rollout_sglang_jax_context_length <= 0
@@ -467,6 +516,18 @@ def parse_args(argv: Sequence[str] | None = None):
   parser_.add_argument("--model-path", default=MODEL_PATH)
   parser_.add_argument("--model-version", default=MODEL_VERSION)
   parser_.add_argument("--tokenizer-source", default=None)
+  parser_.add_argument(
+      "--train-dtype",
+      default=TRAIN_DTYPE,
+      choices=["fp32", "bf16"],
+      help="Train model dtype for actor/reference weights.",
+  )
+  parser_.add_argument(
+      "--reward-advantage-dtype",
+      default=REWARD_ADVANTAGE_DTYPE,
+      choices=["fp32", "bf16"],
+      help="Dtype for reward and advantage tensors.",
+  )
   parser_.add_argument("--train-dataset-path", default=DEEPSCALER_DATA_PATH)
   parser_.add_argument("--test-dataset-path", default=AIME_2024_DATA_PATH)
   parser_.add_argument("--checkpoint-dir", default=CKPT_DIR)
@@ -564,6 +625,27 @@ def parse_args(argv: Sequence[str] | None = None):
       "--rollout-sglang-jax-page-size",
       type=int,
       default=ROLLOUT_SGLANG_JAX_PAGE_SIZE,
+  )
+  parser_.add_argument(
+      "--rollout-sglang-jax-dtype",
+      default=ROLLOUT_SGLANG_JAX_DTYPE,
+      choices=[
+          "auto",
+          "float32",
+          "bfloat16",
+          "float16",
+          "half",
+          "float",
+          "fp32",
+          "bf16",
+      ],
+      help="sglang-jax rollout model dtype.",
+  )
+  parser_.add_argument(
+      "--rollout-sglang-jax-kv-cache-dtype",
+      default=ROLLOUT_SGLANG_JAX_KV_CACHE_DTYPE,
+      choices=["auto", "bf16", "fp8_e5m2", "fp8_e4m3"],
+      help="sglang-jax KV cache dtype.",
   )
   parser_.add_argument("--num-generations", type=int, default=NUM_GENERATIONS)
   parser_.add_argument("--num-iterations", type=int, default=NUM_ITERATIONS)
@@ -681,6 +763,12 @@ def _build_rollout_config(
         rollout_sglang_jax_enable_deterministic_sampling=args.rollout_sglang_jax_enable_deterministic_sampling,
         rollout_sglang_jax_chunked_prefill_size=args.rollout_sglang_jax_chunked_prefill_size,
         rollout_sglang_jax_page_size=args.rollout_sglang_jax_page_size,
+        rollout_sglang_jax_dtype=_normalize_sglang_dtype(
+            args.rollout_sglang_jax_dtype
+        ),
+        rollout_sglang_jax_kv_cache_dtype=_normalize_sglang_kv_cache_dtype(
+            args.rollout_sglang_jax_kv_cache_dtype
+        ),
     )
 
   raise ValueError(f"Unsupported rollout engine: {rollout_engine}")
@@ -702,6 +790,9 @@ def run_training(args):
   runtime = _build_runtime_values(args)
   rollout_engine = _normalize_rollout_engine(args.rollout_engine)
   rollout_model_source = _resolve_rollout_model_source(args)
+  train_model_dtype = _to_jax_train_dtype(args.train_dtype)
+  reward_advantage_dtype = _to_jax_train_dtype(args.reward_advantage_dtype)
+  os.environ["TUNIX_REWARD_ADVANTAGE_DTYPE"] = args.reward_advantage_dtype
   mesh_shape = _resolve_mesh(args.mesh_fsdp, args.mesh_tp)
   training_mesh = _build_training_mesh(mesh_shape)
   sglang_rollout_tp = args.rollout_tp if rollout_engine == "sglang_jax" and args.rollout_tp > 0 else None
@@ -745,8 +836,10 @@ def run_training(args):
 
   config = model_lib.ModelConfig.deepseek_r1_distill_qwen_1p5b()
   print("model path:", args.model_path)
+  print("train model dtype:", train_model_dtype)
+  print("reward/advantage dtype:", reward_advantage_dtype)
   qwen2_ref = params_lib.create_model_from_safe_tensors(
-      args.model_path, config, training_mesh, dtype=jnp.float32
+      args.model_path, config, training_mesh, dtype=train_model_dtype
   )
 
   if args.train_with_lora:
@@ -755,7 +848,7 @@ def run_training(args):
     )
   else:
     qwen2_actor = params_lib.create_model_from_safe_tensors(
-        args.model_path, config, training_mesh, dtype=jnp.float32
+        args.model_path, config, training_mesh, dtype=train_model_dtype
     )
   show_hbm_usage()
 

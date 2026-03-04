@@ -56,6 +56,8 @@ class SglangJaxRollout(base_rollout.BaseRollout):
             precompile_token_paddings=rollout_config.rollout_sglang_jax_precompile_token_paddings,
             chunked_prefill_size=rollout_config.rollout_sglang_jax_chunked_prefill_size,
             page_size=rollout_config.rollout_sglang_jax_page_size,
+            dtype=rollout_config.rollout_sglang_jax_dtype,
+            kv_cache_dtype=rollout_config.rollout_sglang_jax_kv_cache_dtype,
         ),
     )
     # Keep only trainable params when syncing trainer -> rollout weights.
