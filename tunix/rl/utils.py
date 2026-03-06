@@ -211,6 +211,12 @@ def put_params_on_memory_kind(
     )
   original_shardings = jax.tree.map(lambda x: x.sharding, params)
   logging.info("original_shardings: %s", original_shardings)
+  if not jax.tree_util.tree_leaves(original_shardings):
+    logging.info(
+        "No parameters found in pytree; skipping memory kind transfer to %s.",
+        memory_kind,
+    )
+    return params
   is_on_device = jax.tree_util.tree_reduce(
       operator.or_,
       jax.tree.map(lambda x: x.memory_kind == "device", original_shardings),

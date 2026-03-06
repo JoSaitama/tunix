@@ -227,6 +227,125 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
     prompt_ids = [r.prompt_ids[0] for r in results]
     self.assertEqual(prompt_ids, [0, 0, 0, 0, 1, 1, 1, 1])
 
+  def test_fast_path_producer_chunking_and_queue_count(self):
+    class _MockTrainer(agentic_grpo_learner.GRPOLearner):
+
+      def __init__(self, algo_config):
+        self.algo_config = algo_config
+        self.rl_cluster = mock.Mock()
+        self.rl_cluster.rollout = mock.Mock()
+        self.rl_cluster.rollout.pad_id.return_value = 0
+        self.rl_cluster.buffer_metrics_async = mock.Mock()
+        self.metric_fns = []
+        self.policy_version = 0
+        self.tokenizer = tokenizer_adapter.TokenizerAdapter(
+            test_common.MockVocab()
+        )
+        self.chat_parser = MockChatParser()
+        self.generate_call_sizes = []
+
+        def _mock_generate(
+            prompts: list[str] | list[list[dict[str, str]]],
+            apply_chat_template: bool = False,
+            mode: rl_cluster_lib.Mode = rl_cluster_lib.Mode.TRAIN,
+            micro_batch_size: int | None = None,
+        ):
+          del apply_chat_template, mode, micro_batch_size
+          self.generate_call_sizes.append(len(prompts))
+          batch_size = len(prompts)
+          return base_rollout.RolloutOutput(
+              text=[f"resp-{i}" for i in range(batch_size)],
+              tokens=np.ones((batch_size, 10), dtype=np.int32),
+              left_padded_prompt_tokens=np.ones((batch_size, 8), dtype=np.int32),
+              logits=None,
+              logprobs=None,
+          )
+
+        self.rl_cluster.generate = mock.Mock(side_effect=_mock_generate)
+
+      @override
+      def _batch_to_train_example(
+          self, batch_results, cached_inputs_for_window, mode
+      ):
+        del cached_inputs_for_window, mode
+        assert len(batch_results) == self.algo_config.num_generations
+        return [
+            types.SimpleNamespace(
+                policy_version=np.array([self.policy_version], dtype=np.int32)
+            )
+            for _ in range(self.algo_config.num_generations)
+        ]
+
+    algo_config = agentic_grpo_learner.GRPOConfig(
+        num_generations=2,
+        num_iterations=2,
+        enable_rollout_fast_path=True,
+        rollout_prompt_batch_size=2,
+    )
+    trainer = _MockTrainer(algo_config)
+    train_data_queue = queue_lib.SimpleDataQueue(maxsize=0)
+    dataset = _dummy_dataset(
+        MySource(data=[str(i) for i in range(5)]), batch_size=5
+    )
+
+    asyncio.run(trainer._producer(None, iter(dataset), train_data_queue))
+
+    produced = []
+    while True:
+      item = train_data_queue.get(block=True)
+      if item is None:
+        break
+      produced.append(item)
+
+    # 5 prompts * 2 generations * 2 iterations
+    self.assertLen(produced, 20)
+    # chunk size=2 prompts, each rollout request expands by num_generations=2
+    self.assertEqual(trainer.generate_call_sizes, [4, 4, 2])
+
+  def test_fast_path_producer_memory_error_message(self):
+    class _MockTrainer(agentic_grpo_learner.GRPOLearner):
+
+      def __init__(self, algo_config):
+        self.algo_config = algo_config
+        self.rl_cluster = mock.Mock()
+        self.rl_cluster.rollout = mock.Mock()
+        self.rl_cluster.rollout.pad_id.return_value = 0
+        self.rl_cluster.buffer_metrics_async = mock.Mock()
+        self.metric_fns = []
+        self.policy_version = 0
+        self.tokenizer = tokenizer_adapter.TokenizerAdapter(
+            test_common.MockVocab()
+        )
+        self.chat_parser = MockChatParser()
+        self.rl_cluster.generate = mock.Mock(
+            side_effect=RuntimeError("RESOURCE_EXHAUSTED: out of memory")
+        )
+
+      @override
+      def _batch_to_train_example(
+          self, batch_results, cached_inputs_for_window, mode
+      ):
+        del batch_results, cached_inputs_for_window, mode
+        return []
+
+    algo_config = agentic_grpo_learner.GRPOConfig(
+        num_generations=2,
+        num_iterations=1,
+        enable_rollout_fast_path=True,
+        rollout_prompt_batch_size=2,
+    )
+    trainer = _MockTrainer(algo_config)
+    train_data_queue = queue_lib.SimpleDataQueue(maxsize=0)
+    dataset = _dummy_dataset(
+        MySource(data=[str(i) for i in range(2)]), batch_size=2
+    )
+
+    with self.assertRaisesRegex(
+        RuntimeError,
+        "Rollout fast-path failed due to memory pressure",
+    ):
+      asyncio.run(trainer._producer(None, iter(dataset), train_data_queue))
+
   def test_grpo_config_validation(self):
     with self.assertRaisesRegex(
         ValueError, "num_generations must be greater than 1"

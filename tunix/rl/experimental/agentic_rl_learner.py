@@ -46,6 +46,7 @@ from tunix.sft import utils as sft_utils
 TrainingInputT = Dict[str, List[str] | ArrayLike]
 RewardFn = Callable[..., List[float]]
 MetricFn = Callable[..., rl_cluster_lib.MetricsT]
+_DEFAULT_FAST_PATH_ROLLOUT_PROMPT_BATCH_SIZE = 4
 
 
 @flax.struct.dataclass(frozen=True)
@@ -71,9 +72,19 @@ class AgenticRLConfig(algo_config_lib.AlgorithmConfig):
   off_policy_steps: int = 0
   num_generations: int = 1
   num_iterations: int = 1
+  enable_rollout_fast_path: bool = False
+  rollout_prompt_batch_size: int | None = None
 
 
 TConfig = TypeVar("TConfig", bound=AgenticRLConfig)
+
+
+@dataclasses.dataclass(slots=True)
+class _FastPathTrajectoryItem:
+  """Minimal trajectory item shape consumed by `_batch_to_train_example`."""
+
+  pair_index: int
+  traj: dict[str, Any]
 
 
 class AgenticRLLearner(abc.ABC, Generic[TConfig]):
@@ -156,6 +167,160 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     self.policy_version = 0
     self._rollout_sync_lock = agentic_utils.RolloutSyncLock()
     self._full_batch_size = 0
+
+  def _resolve_rollout_prompt_batch_size(self) -> int:
+    """Returns rollout prompt batch size for fast-path mode."""
+    configured = self.algo_config.rollout_prompt_batch_size
+    if configured is None:
+      return _DEFAULT_FAST_PATH_ROLLOUT_PROMPT_BATCH_SIZE
+    if configured <= 0:
+      raise ValueError(
+          "`rollout_prompt_batch_size` must be a positive integer when"
+          " fast-path is enabled."
+      )
+    return configured
+
+  def _build_fast_path_chat_messages(
+      self, single_example: TrainingInputT
+  ) -> list[dict[str, str]]:
+    """Builds the single-turn chat messages used by rollout fast-path."""
+    question = str(single_example["question"][0])
+    return [
+        {"role": "system", "content": self.algo_config.system_prompt},
+        {"role": "user", "content": question},
+    ]
+
+  def _tokenize_chat_messages(
+      self,
+      messages: list[dict[str, str]],
+      *,
+      contains_first_msg: bool,
+      contains_generation_msg: bool,
+  ) -> list[int]:
+    if self.tokenizer is None or self.chat_parser is None:
+      raise ValueError(
+          "rollout fast-path requires tokenizer and chat_parser to tokenize"
+          " prompt/completion messages."
+      )
+    tokens, _ = agentic_utils.tokenize_and_generate_masks(
+        messages,
+        tokenizer=self.tokenizer,
+        parser=self.chat_parser,
+        contains_first_msg=contains_first_msg,
+        contains_generation_msg=contains_generation_msg,
+    )
+    return tokens
+
+  @staticmethod
+  def _is_memory_exhausted_error(exc: Exception) -> bool:
+    msg = str(exc).lower()
+    return (
+        "resource_exhausted" in msg
+        or "out of memory" in msg
+        or "oom" in msg
+        or "memory exhausted" in msg
+    )
+
+  async def _producer_fast_path(self, dataset_iterator, train_data_queue):
+    """Produces training examples using batched rollout generate calls."""
+    num_generations = self.algo_config.num_generations
+    rollout_prompt_batch_size = self._resolve_rollout_prompt_batch_size()
+    prompt_index = 0
+
+    try:
+      for full_batch in dataset_iterator:
+        single_examples = list(
+            self._create_micro_batch_iterator(iter([full_batch]), 1)
+        )
+        for prompt_slice in rl_utils.chunk_slices_by_size(
+            stop=len(single_examples),
+            step=rollout_prompt_batch_size,
+        ):
+          chunk_examples = single_examples[prompt_slice]
+          chunk_prompt_indices: list[int] = []
+          chunk_chat_messages: list[list[dict[str, str]]] = []
+          chunk_prompt_tokens: list[list[int]] = []
+          expanded_chat_messages: list[list[dict[str, str]]] = []
+
+          for single_example in chunk_examples:
+            messages = self._build_fast_path_chat_messages(single_example)
+            prompt_tokens = self._tokenize_chat_messages(
+                messages,
+                contains_first_msg=True,
+                contains_generation_msg=False,
+            )
+            chunk_prompt_indices.append(prompt_index)
+            chunk_chat_messages.append(messages)
+            chunk_prompt_tokens.append(prompt_tokens)
+            expanded_chat_messages.extend([messages] * num_generations)
+            prompt_index += 1
+
+          try:
+            # Run synchronous rollout generation in a worker thread to avoid
+            # nested event-loop execution conflicts with uvloop-backed engines.
+            rollout_output = await asyncio.to_thread(
+                self.rl_cluster.generate,
+                prompts=expanded_chat_messages,
+                apply_chat_template=True,
+                mode=rl_cluster_lib.Mode.TRAIN,
+            )
+          except Exception as e:
+            if self._is_memory_exhausted_error(e):
+              raise RuntimeError(
+                  "Rollout fast-path failed due to memory pressure. "
+                  f"Current rollout prompt batch size={rollout_prompt_batch_size}. "
+                  "Try reducing `--rollout-prompt-batch-size` or "
+                  "`--total-generation-steps`."
+              ) from e
+            raise
+
+          for local_prompt_i, single_example in enumerate(chunk_examples):
+            pair_index = chunk_prompt_indices[local_prompt_i]
+            base = local_prompt_i * num_generations
+            chat_messages = chunk_chat_messages[local_prompt_i]
+            prompt_tokens = chunk_prompt_tokens[local_prompt_i]
+            batch_results = []
+            for generation_i in range(num_generations):
+              completion_text = rollout_output.text[base + generation_i]
+              completion_message = {
+                  "role": "assistant",
+                  "content": completion_text,
+              }
+              completion_tokens = self._tokenize_chat_messages(
+                  [completion_message],
+                  contains_first_msg=False,
+                  contains_generation_msg=False,
+              )
+              batch_results.append(
+                  _FastPathTrajectoryItem(
+                      pair_index=pair_index,
+                      traj={
+                          "conversation_text": chat_messages
+                          + [completion_message],
+                          "prompt_tokens": prompt_tokens,
+                          "conversation_tokens": completion_tokens,
+                          "policy_version": self.policy_version,
+                      },
+                  )
+              )
+            try:
+              train_examples = self._batch_to_train_example(
+                  batch_results=batch_results,
+                  cached_inputs_for_window=[single_example],
+                  mode=rl_cluster_lib.Mode.TRAIN,
+              )
+              for _ in range(self.algo_config.num_iterations):
+                for train_example in train_examples:
+                  train_data_queue.put(train_example)
+            except Exception as e:
+              if not isinstance(e, RuntimeError):
+                logging.exception(
+                    "Exception in _producer_fast_path while processing batch: %s",
+                    e,
+                )
+              raise
+    finally:
+      train_data_queue.put(None)
 
   def _compute_rewards(
       self,
@@ -529,6 +694,11 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
 
   async def _producer(self, orchestrator, dataset_iterator, train_data_queue):
     """Produces training examples from prompts in the dataset_iterator."""
+    if self.algo_config.enable_rollout_fast_path:
+      await self._producer_fast_path(dataset_iterator, train_data_queue)
+      return
+    if orchestrator is None:
+      raise ValueError("`orchestrator` must be provided for non-fast-path.")
 
     def _iterate_micro_batches():
       for item in dataset_iterator:
@@ -632,7 +802,15 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     train_data_queue = queue_lib.SimpleDataQueue(maxsize=0)
 
     # 1. Start producer thread to generate rollouts and training examples.
-    orchestrator = self._build_orchestrator()
+    orchestrator = None
+    if not self.algo_config.enable_rollout_fast_path:
+      orchestrator = self._build_orchestrator()
+    else:
+      logging.info(
+          "Rollout fast-path enabled. Using batched generate producer with"
+          " rollout_prompt_batch_size=%d.",
+          self._resolve_rollout_prompt_batch_size(),
+      )
     producer_future = self.executor.submit(
         self._run_async,
         self._producer(orchestrator, full_dataset_iterator, train_data_queue),

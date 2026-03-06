@@ -81,6 +81,7 @@ NUM_GENERATIONS = 2
 NUM_ITERATIONS = 1
 BETA = 0.001
 EPSILON = 0.2
+FAST_PATH_DEFAULT_ROLLOUT_PROMPT_BATCH_SIZE = 4
 
 # ====== Training ======
 BATCH_SIZE = 32
@@ -98,6 +99,7 @@ B2 = 0.99
 WEIGHT_DECAY = 0.1
 WARMUP_STEPS = int(0.1 * MAX_STEPS)
 MAX_GRAD_NORM = 0.1
+OFFLOAD_TO_CPU = False
 
 # ====== Checkpoint saving ======
 SAVE_INTERVAL_STEPS = 500
@@ -547,6 +549,12 @@ def parse_args(argv: Sequence[str] | None = None):
   parser_.add_argument("--weight-decay", type=float, default=WEIGHT_DECAY)
   parser_.add_argument("--warmup-steps", type=int, default=None)
   parser_.add_argument("--max-grad-norm", type=float, default=MAX_GRAD_NORM)
+  parser_.add_argument(
+      "--offload-to-cpu",
+      action=argparse.BooleanOptionalAction,
+      default=OFFLOAD_TO_CPU,
+      help="Whether to offload actor/reference/rollout models to CPU between stages.",
+  )
   parser_.add_argument("--mesh-fsdp", type=int, default=None)
   parser_.add_argument("--mesh-tp", type=int, default=None)
   parser_.add_argument("--max-prompt-length", type=int, default=MAX_PROMPT_LENGTH)
@@ -656,6 +664,24 @@ def parse_args(argv: Sequence[str] | None = None):
       help=(
           "Override GRPO rollout orchestration concurrency. "
           "For sglang_jax, default remains 1 when not set."
+      ),
+  )
+  parser_.add_argument(
+      "--enable-rollout-fast-path",
+      action="store_true",
+      help=(
+          "Enable batched rollout fast-path for sglang_jax. "
+          "This bypasses the orchestrator producer path for training rollout."
+      ),
+  )
+  parser_.add_argument(
+      "--rollout-prompt-batch-size",
+      type=int,
+      default=None,
+      help=(
+          "Prompt batch size per rollout generate call in fast-path mode. "
+          "If unset and fast-path is enabled, defaults to "
+          f"{FAST_PATH_DEFAULT_ROLLOUT_PROMPT_BATCH_SIZE}."
       ),
   )
   parser_.add_argument("--beta", type=float, default=BETA)
@@ -790,6 +816,18 @@ def run_training(args):
   runtime = _build_runtime_values(args)
   rollout_engine = _normalize_rollout_engine(args.rollout_engine)
   rollout_model_source = _resolve_rollout_model_source(args)
+  if args.rollout_prompt_batch_size is not None and args.rollout_prompt_batch_size <= 0:
+    raise ValueError("`--rollout-prompt-batch-size` must be a positive integer.")
+  if args.enable_rollout_fast_path and rollout_engine != "sglang_jax":
+    raise ValueError(
+        "`--enable-rollout-fast-path` is only supported when "
+        "`--rollout-engine sglang_jax` is used."
+    )
+  if args.rollout_prompt_batch_size is not None and not args.enable_rollout_fast_path:
+    print(
+        "WARNING: `--rollout-prompt-batch-size` is ignored unless "
+        "`--enable-rollout-fast-path` is set."
+    )
   train_model_dtype = _to_jax_train_dtype(args.train_dtype)
   reward_advantage_dtype = _to_jax_train_dtype(args.reward_advantage_dtype)
   os.environ["TUNIX_REWARD_ADVANTAGE_DTYPE"] = args.reward_advantage_dtype
@@ -886,7 +924,7 @@ def run_training(args):
           rl_cluster_lib.Role.ROLLOUT: rollout_mesh,
       },
       rollout_engine=rollout_engine,
-      offload_to_cpu=False,
+      offload_to_cpu=args.offload_to_cpu,
       training_config=rl_cluster_lib.RLTrainingConfig(
           actor_optimizer=optimizer,
           eval_every_n_steps=runtime["eval_every_n_steps"],
@@ -916,6 +954,21 @@ def run_training(args):
         "sglang_jax rollout sets agentic max_concurrency="
         f"{grpo_max_concurrency} to control concurrent model calls."
     )
+    if args.enable_rollout_fast_path:
+      resolved_rollout_prompt_batch_size = (
+          args.rollout_prompt_batch_size
+          if args.rollout_prompt_batch_size is not None
+          else FAST_PATH_DEFAULT_ROLLOUT_PROMPT_BATCH_SIZE
+      )
+      print(
+          "rollout fast-path enabled: "
+          f"rollout_prompt_batch_size={resolved_rollout_prompt_batch_size}"
+      )
+      if args.grpo_max_concurrency is not None:
+        print(
+            "NOTE: `--grpo-max-concurrency` is ignored when "
+            "`--enable-rollout-fast-path` is enabled."
+        )
 
   grpo_config = GRPOConfig(
       num_generations=args.num_generations,
@@ -924,6 +977,8 @@ def run_training(args):
       epsilon=args.epsilon,
       system_prompt="",
       max_concurrency=grpo_max_concurrency,
+      enable_rollout_fast_path=args.enable_rollout_fast_path,
+      rollout_prompt_batch_size=args.rollout_prompt_batch_size,
   )
 
   with compat.set_mesh(training_mesh):

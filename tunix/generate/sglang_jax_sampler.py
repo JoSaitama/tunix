@@ -17,6 +17,7 @@
 import dataclasses
 import math
 import os
+import threading
 from typing import Any, Dict, Iterator, List, Optional, Tuple, Union
 
 from absl import logging
@@ -77,6 +78,9 @@ class SglangJaxSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-nam
     self.tokenizer = tok_adapter.TokenizerAdapter(tokenizer)
     self.args = self._sglang_jax_config(config)
     self.engine = Engine(**self.args)
+    # sglang-jax Engine owns an internal asyncio loop and is not re-entrant
+    # across concurrent threads. Guard all engine-facing calls with one lock.
+    self._engine_lock = threading.RLock()
 
     self.mappings = config.mapping_config.to_hf_mappings
     self.to_hf_transpose_keys = config.mapping_config.to_hf_transpose_keys
@@ -90,15 +94,16 @@ class SglangJaxSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-nam
       filter_types: Optional[Tuple[Any, ...]] = None,
   ):
     del filter_types
-    new_state = utils.transfer_state_with_mappings(
-        src_state=updated_weights,
-        dst_state=self.transformer_state,
-        key_mappings=self.mappings,
-        transpose_keys=self.to_hf_transpose_keys,
-        reshard_fn=reshard.reshard_pytree,
-    )
-    new_model_state_leaves, _ = jax.tree_util.tree_flatten(new_state)
-    self._model_runner.model_state_leaves = new_model_state_leaves
+    with self._engine_lock:
+      new_state = utils.transfer_state_with_mappings(
+          src_state=updated_weights,
+          dst_state=self.transformer_state,
+          key_mappings=self.mappings,
+          transpose_keys=self.to_hf_transpose_keys,
+          reshard_fn=reshard.reshard_pytree,
+      )
+      new_model_state_leaves, _ = jax.tree_util.tree_flatten(new_state)
+      self._model_runner.model_state_leaves = new_model_state_leaves
 
   def load_checkpoint(self, path_or_weights: str | jaxtyping.PyTree):
     # TODO(b/434741253): Consider support orbax checkpoint loading
@@ -171,6 +176,29 @@ class SglangJaxSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-nam
     )
     return bos_tok + input_ids + eos_tok
 
+  @staticmethod
+  def _normalize_output_ids(
+      output_ids: Any, max_generation_steps: int
+  ) -> np.ndarray:
+    """Normalizes engine output ids into a 1D int32 array."""
+    token_ids = np.asarray(output_ids, dtype=np.int32)
+    while token_ids.ndim > 1:
+      token_ids = np.asarray(token_ids[0], dtype=np.int32)
+    if token_ids.ndim == 0:
+      token_ids = token_ids.reshape(1)
+    if token_ids.shape[0] > max_generation_steps:
+      token_ids = token_ids[:max_generation_steps]
+    return token_ids
+
+  @staticmethod
+  def _normalize_output_text(output_text: Any) -> str:
+    """Normalizes engine output text into a scalar string."""
+    if isinstance(output_text, list):
+      if not output_text:
+        return ""
+      return str(output_text[0])
+    return str(output_text)
+
   def __call__(
       self,
       input_strings: List[str],
@@ -198,19 +226,19 @@ class SglangJaxSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-nam
           f"{self.args['context_length']}."
       )
 
-    self.sampling_params = self.engine.get_default_sampling_params()
-    self.sampling_params.max_new_tokens = max_generation_steps
-    self.sampling_params.n = multi_sampling
-    self.sampling_params.temperature = temperature
-    self.sampling_params.stop_token_ids = [self.tokenizer.eos_id()]
-    self.sampling_params.skip_special_tokens = True
+    sampling_params_template = self.engine.get_default_sampling_params()
+    sampling_params_template.max_new_tokens = max_generation_steps
+    sampling_params_template.n = multi_sampling
+    sampling_params_template.temperature = temperature
+    sampling_params_template.stop_token_ids = [self.tokenizer.eos_id()]
+    sampling_params_template.skip_special_tokens = True
 
     if top_p is not None:
-      self.sampling_params.top_p = top_p
+      sampling_params_template.top_p = top_p
     if top_k is not None:
-      self.sampling_params.top_k = top_k
+      sampling_params_template.top_k = top_k
     sampling_params = [
-        self.sampling_params.convert_to_dict() for _ in input_strings
+        sampling_params_template.convert_to_dict() for _ in input_strings
     ]
     if seed is not None:
       if type(seed) is List:
@@ -224,10 +252,11 @@ class SglangJaxSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-nam
           sampling_params[i]["sampling_seed"] = seed
 
     prompt_ids = [self.tokenize(x) for x in input_strings]
-    outputs = self.engine.generate(
-        input_ids=[ids for ids in prompt_ids],
-        sampling_params=sampling_params,
-    )
+    with self._engine_lock:
+      outputs = self.engine.generate(
+          input_ids=[ids for ids in prompt_ids],
+          sampling_params=sampling_params,
+      )
 
     max_tokens_length = max(len(x) for x in prompt_ids)
 
@@ -246,7 +275,7 @@ class SglangJaxSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-nam
 
     all_output_ids = [
         utils.pad_to_length(
-            np.array(x["output_ids"], dtype=np.int32),
+            self._normalize_output_ids(x["output_ids"], max_generation_steps),
             target_length=max_generation_steps,
             pad_value=self.tokenizer.pad_id(),
             left=False,
@@ -254,7 +283,7 @@ class SglangJaxSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-nam
         for x in outputs
     ]
     all_output_ids = jnp.array(all_output_ids)
-    output_texts = [o["text"] for o in outputs]
+    output_texts = [self._normalize_output_text(o["text"]) for o in outputs]
     # To support multisampling, just return the whole list of SamplerOutput
     return base_sampler.SamplerOutput(
         text=output_texts,
