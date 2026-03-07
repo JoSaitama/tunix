@@ -10,6 +10,504 @@ This file tracks engineering changes made in this repository.
 
 ---
 
+## 2026-03-07: DeepScaler live eval progress inspection
+
+### Scope
+
+- 无代码改动。
+- 检查用户当前正在运行的 `examples/deepscaler/run_eval_pass1_avg16.sh` 日志，读取已完成轮次的准确率与当前进度。
+
+### Changed files
+
+1. `develop.md`
+
+### Validation
+
+- `ps -ef | rg 'run_eval_pass1_avg16.sh|examples/deepscaler/math_eval_nb.py'`
+- `find /tmp -maxdepth 1 -type d -name 'deepscaler_pass1_avg16_*' -printf '%T@ %p\n' | sort -n | tail -1`
+- `rg -n 'Progress:|Correct:|Accuracy:|===== END run=' /tmp/deepscaler_pass1_avg16_20260307_151314/run_*.log`
+- 确认：
+  - 用户当前活跃目录为 `/tmp/deepscaler_pass1_avg16_20260307_151314`
+  - `run_1.log` 结果为 `Correct: 8/30`, `Accuracy: 26.67%`
+  - `run_2.log` 结果为 `Correct: 8/30`, `Accuracy: 26.67%`
+  - `run_3.log` 已创建，但尚未写出最终 `Correct/Accuracy`
+  - 当前 Python 评测进程参数显示 `--seed 2`，与第 3 轮一致
+
+### Known risks / TODO
+
+- 在 `run_3.log` 尚未写出最终 summary 之前，只能确认前两轮结果与当前进程状态，不能把后续均值当成已定结果。
+
+---
+
+## 2026-03-07: DeepScaler sglang-jax fp32 interpretation clarification
+
+### Scope
+
+- 无代码改动。
+- 澄清在当前 `eval + sglang-jax` 路径下，“模型权重 fp32 + engine dtype float32”与 `auto` 的关系，以及为什么这里不应混用 `rollout` 概念。
+
+### Changed files
+
+1. `develop.md`
+
+### Validation
+
+- `nl -ba examples/deepscaler/math_eval_nb.py | sed -n '314,335p'`
+- `nl -ba tunix/generate/sglang_jax_sampler.py | sed -n '68,123p'`
+- `nl -ba tunix/generate/sglang_jax_sampler.py | sed -n '140,143p'`
+- `nl -ba tunix/generate/sglang_jax_sampler.py | sed -n '91,113p'`
+- 确认：
+  - 当前讨论对象是 eval 路径，不是 training rollout 路径。
+  - 当前 eval 的 `sglang-jax` 生成实际由 `Engine(**self.args)` 驱动，`args["model_path"] = config.model_version`。
+  - Python 侧加载的 `self.model` 只用于构造 mapping；当前 eval 代码没有调用 `update_params()` / `load_checkpoint()` 把这份权重同步到 engine。
+  - 因此，若保留 `sglang-jax`，真正决定生成精度的是 engine 侧 `dtype` / `kv_cache_dtype`；`auto` 表示交给 backend 自行选择，并不等于 fp32。
+
+### Known risks / TODO
+
+- 我此前把“模型权重 fp32 + engine dtype float32”说得过于简化；在当前 eval 实现里，更关键的是 engine 侧 dtype，因为 Python 侧权重默认并不直接参与 `sglang-jax` 生成。
+- 若不改当前 eval 代码去同步权重到 engine，单独把 Python 侧 `self.model` cast 到 fp32，不足以保证实际生成路径变成 fp32。
+
+---
+
+## 2026-03-07: DeepScaler eval fp32 path feasibility clarification
+
+### Scope
+
+- 无代码改动。
+- 说明当前评测链路若要“保证 fp32”，是否可以只通过修改 `examples/deepscaler/run_eval_pass1_avg16.sh` 实现。
+
+### Changed files
+
+1. `develop.md`
+
+### Validation
+
+- `nl -ba examples/deepscaler/math_eval_nb.py | sed -n '292,340p'`
+- `nl -ba examples/deepscaler/math_eval_nb.py | sed -n '735,810p'`
+- `nl -ba tunix/models/safetensors_loader.py | sed -n '216,223p'`
+- `nl -ba tunix/generate/sglang_jax_sampler.py | sed -n '37,55p'`
+- `nl -ba tunix/generate/sglang_jax_sampler.py | sed -n '120,143p'`
+- `nl -ba examples/deepscaler/train_deepscaler_nb.py | sed -n '269,292p'`
+- `nl -ba examples/deepscaler/train_deepscaler_nb.py | sed -n '638,656p'`
+- 确认：
+  - 当前 eval CLI 没有 `--model-dtype`、`--sglang-jax-dtype` 或 `--sglang-jax-kv-cache-dtype` 参数。
+  - `run_eval_pass1_avg16.sh` 只能传递下游已支持的参数；单独在该脚本写“相关参数”如果下游不识别，不会生效。
+  - 若要把模型权重强制转成 fp32，需要在 `create_model_from_safe_tensors(..., dtype=...)` 这层显式传入 `jnp.float32`。
+  - 若要把 `sglang-jax` engine dtype 显式设为 fp32，需要在 eval 侧增加类似训练侧的 dtype 参数，并传给 `SglangJaxConfig(dtype=\"float32\")`。
+  - 训练侧已有规范表明：`sglang-jax` model dtype 可设为 `float32` / `fp32`，但 `kv_cache_dtype` 选项不包含 fp32，仅有 `auto` / `bf16` / `fp8_*`。
+
+### Known risks / TODO
+
+- 因为 `sglang-jax` 的 `kv_cache_dtype` 当前不支持 fp32，且 backend 仍可能有内部混合精度实现，所以在 `sglang-jax` 路径下很难宣称“严格全链路 fp32”。
+- 若目标是尽量严格的 fp32 评测，优先级更高的方案通常是：模型权重显式 cast 到 fp32，并使用 `vanilla` sampler，而不是 `sglang-jax`。
+
+---
+
+## 2026-03-07: DeepScaler eval dtype clarification
+
+### Scope
+
+- 无代码改动。
+- 核对当前 `examples/deepscaler/run_eval_pass1_avg16.sh` 通过 `sglang-jax` 路径运行时，模型权重和 sampler backend 的 dtype 实际来源。
+
+### Changed files
+
+1. `develop.md`
+
+### Validation
+
+- `nl -ba examples/deepscaler/math_eval_nb.py | sed -n '293,336p'`
+- `nl -ba tunix/models/qwen2/params.py | sed -n '84,99p'`
+- `nl -ba tunix/models/safetensors_loader.py | sed -n '216,223p'`
+- `nl -ba tunix/generate/sglang_jax_sampler.py | sed -n '37,54p'`
+- `nl -ba tunix/generate/sglang_jax_sampler.py | sed -n '120,143p'`
+- 解析本地 safetensors header，确认模型快照 `/home/lhf_hongfu_gmail_com/.cache/huggingface/hub/models--deepseek-ai--DeepSeek-R1-Distill-Qwen-1.5B/.../model.safetensors` 中 `339` 个张量全部标记为 `BF16`。
+- 确认：
+  - `math_eval_nb.py` 调用 `create_model_from_safe_tensors(..., dtype=None)`。
+  - `safetensors_loader.py` 仅在 `dtype is not None` 时才会强制 cast。
+  - `sglang-jax` 配置里的 `dtype` 和 `kv_cache_dtype` 当前都是默认 `"auto"`。
+
+### Known risks / TODO
+
+- 从当前代码能明确确认“权重没有被改成 fp32，且本地 safetensors 原始 dtype 是 BF16”；`sglang-jax` 的 `"auto"` 在具体底层 kernel 上仍可能对少量内部计算采用更高精度。
+- 因此结论应表述为“当前这条命令以 BF16 权重 / BF16 导向配置运行，不是纯 fp32 路径；但某些内部算子可能局部用 float32 计算以保证数值稳定性”。
+
+---
+
+## 2026-03-07: User-run command handoff for DeepScaler eval
+
+### Scope
+
+- 无代码改动。
+- 记录交接给用户自行运行 `examples/deepscaler/run_eval_pass1_avg16.sh` 的命令，包括当前 `sglang-jax` eval 路径所需的临时运行时 shim。
+
+### Changed files
+
+1. `develop.md`
+
+### Validation
+
+- 复核当前可运行命令依赖：
+  - `.venv_sglang312`
+  - `/tmp/tunix_eval_shim/sitecustomize.py`
+- 确认当前仓库源码下，若不注入该 shim，`sglang-jax` eval 路径会因缺失 `tunix.google.stubs.sglang_jax_sampler_stub` 模块别名而失败。
+
+### Known risks / TODO
+
+- `/tmp/tunix_eval_shim/sitecustomize.py` 是本地临时运行时文件，不属于仓库内容；若被删除，需要重新创建后才能直接复现当前命令。
+- 完整 `NUM_RUNS=16` 会耗时较长。
+
+---
+
+## 2026-03-07: DeepScaler pass1_avg16 runtime check and result analysis
+
+### Scope
+
+- 无仓库代码改动。
+- 实际运行 `examples/deepscaler/run_eval_pass1_avg16.sh` 的当前评测链路，记录当前非 smoke 全量 AIME 结果，并与官方公开分数口径做对比分析。
+
+### Changed files
+
+1. `develop.md`
+
+### Validation
+
+- 运行环境检查：
+  - `source .venv_sglang312/bin/activate && python -c "import sgl_jax, jax; print('sgl_jax_ok'); print(jax.devices())"`
+- 发现当前仓库源码的 `sglang-jax` eval 路径缺少 `tunix.google.stubs.sglang_jax_sampler_stub` 模块别名，直接运行失败：
+  - `ModuleNotFoundError: No module named 'tunix.google'`
+- 为避免改动仓库代码，使用 `/tmp/tunix_eval_shim/sitecustomize.py` 注入临时运行时 alias，仅用于本次执行。
+- smoke 验证：
+  - `export PYTHONPATH=/tmp/tunix_eval_shim${PYTHONPATH:+:$PYTHONPATH}; source .venv_sglang312/bin/activate && NUM_RUNS=1 SMOKE_TEST=1 ./examples/deepscaler/run_eval_pass1_avg16.sh`
+- 全量非 smoke 单轮执行：
+  - `export PYTHONPATH=/tmp/tunix_eval_shim${PYTHONPATH:+:$PYTHONPATH}; source .venv_sglang312/bin/activate && LOG_DIR=/tmp/deepscaler_pass1_avg16_current_full NUM_RUNS=1 ./examples/deepscaler/run_eval_pass1_avg16.sh`
+- 本次实际结果：
+  - `Correct: 8/30`
+  - `Accuracy: 26.67%`
+  - `Sampler: sglang-jax`
+  - `Seeds: 0..0`
+  - 日志目录：`/tmp/deepscaler_pass1_avg16_current_full`
+
+### Known risks / TODO
+
+- 本次拿到的是当前脚本口径下的单轮全量结果；没有完整跑完默认 `NUM_RUNS=16`，因此不能把 `26.67%` 直接当成严格的 16-run average。
+- 运行依赖 `/tmp` 下的临时 import shim；它不修改仓库代码，但说明当前仓库的 `sglang-jax` eval 路径仍存在运行时模块别名问题。
+- 官方公开分数是多次 sample 平均口径；单轮结果本身会有显著方差。
+
+---
+
+## 2026-03-07: DeepScaler eval seed plumbing for pass1_avg16
+
+### Scope
+
+- 为 DeepScaler 评测入口增加显式 seed 参数。
+- 让 `examples/deepscaler/run_eval_pass1_avg16.sh` 在 16 轮运行中明确使用不同 seed，而不是重复使用同一个默认 seed。
+
+### Changed files
+
+1. `examples/deepscaler/math_eval_nb.py`
+2. `examples/deepscaler/run_eval.sh`
+3. `examples/deepscaler/run_eval_pass1_avg16.sh`
+4. `develop.md`
+
+### Validation
+
+- `python -m py_compile examples/deepscaler/math_eval_nb.py`
+- `bash -n examples/deepscaler/run_eval.sh`
+- `bash -n examples/deepscaler/run_eval_pass1_avg16.sh`
+- `sed -n '456,520p' examples/deepscaler/math_eval_nb.py`
+- `sed -n '731,805p' examples/deepscaler/math_eval_nb.py`
+- `sed -n '1,80p' examples/deepscaler/run_eval.sh`
+- `sed -n '1,120p' examples/deepscaler/run_eval_pass1_avg16.sh`
+- 确认：
+  - `math_eval_nb.py` 新增 `--seed` 参数，默认值为 `0`。
+  - 每次采样使用 `sample_seed = seed + pass_idx`，因此默认行为与原来保持一致，而调用方也可以显式构造不同 seed。
+  - `run_eval.sh` 新增 `EVAL_SEED` 环境变量透传到 `--seed`。
+  - `run_eval_pass1_avg16.sh` 现在为第 `N` 轮设置 `EVAL_SEED=N-1`，即默认使用 seed `0..15`。
+
+### Known risks / TODO
+
+- `sglang-jax` 当前仍配置为 `enable_deterministic_sampling=False`，不同 seed 会提升“独立样本”语义，但不保证跨运行严格可复现。
+- 这次只修正了 eval seed 语义，没有去对齐官方完整评测协议中的所有其他细节（例如长度预算、模型版本、backend 差异）。
+
+---
+
+## 2026-03-07: DeepScaler eval seed flow clarification
+
+### Scope
+
+- 无代码改动。
+- 说明 `run_eval_pass1_avg16.sh` 当前评测链路里 seed 的实际来源，以及 `run_idx` 为什么尚未参与采样 seed。
+
+### Changed files
+
+1. `develop.md`
+
+### Validation
+
+- `nl -ba examples/deepscaler/run_eval_pass1_avg16.sh | sed -n '24,40p'`
+- `nl -ba examples/deepscaler/run_eval.sh | sed -n '31,46p'`
+- `nl -ba examples/deepscaler/math_eval_nb.py | sed -n '501,509p'`
+- `nl -ba tunix/generate/sampler.py | sed -n '719,723p'`
+- `nl -ba tunix/generate/sglang_jax_sampler.py | sed -n '243,252p'`
+- 确认：
+  - wrapper 里的 `run_idx` 当前只用于循环轮次、日志文件名和日志输出。
+  - `run_eval.sh` 没有单独的 seed 参数透传。
+  - `math_eval_nb.py` 里实际采样 seed 来自 `pass_idx`。
+  - 当 `EVAL_NUM_PASSES=1` 时，`pass_idx` 恒为 `0`，因此当前每轮实际传给采样器的 seed 都是 `0`。
+
+### Known risks / TODO
+
+- 当前 wrapper 的“16 次平均”仍未显式构造 16 个不同 seed；若需要严格独立采样，应新增 seed 参数并将 `run_idx` 接入该参数。
+
+---
+
+## 2026-03-07: DeepScaler eval wrapper switched to sglang-jax
+
+### Scope
+
+- 将 `examples/deepscaler/run_eval_pass1_avg16.sh` 固定切换到 `sglang-jax` 采样 backend。
+- 在 wrapper 日志和最终汇总中输出所用 sampler，避免误读评测口径。
+
+### Changed files
+
+1. `examples/deepscaler/run_eval_pass1_avg16.sh`
+2. `develop.md`
+
+### Validation
+
+- `sed -n '1,120p' examples/deepscaler/run_eval_pass1_avg16.sh`
+- `bash -n examples/deepscaler/run_eval_pass1_avg16.sh`
+- 确认 wrapper 调用 `run_eval.sh` 时固定追加 `--sampler-type sglang-jax`。
+- 确认开始日志、结束日志和最终汇总都会显示 `sampler=sglang-jax` / `Sampler: sglang-jax`。
+
+### Known risks / TODO
+
+- 这次修改只切换了 sampler backend，没有显式为每轮 run 注入不同 seed；“16 次独立采样平均”的语义仍不严格。
+- 当前 `math_eval_nb.py` 中 `sglang-jax` 配置显式设置 `enable_deterministic_sampling=False`，因此结果可能比 `vanilla` 更容易出现 run-to-run 波动，但这不等价于严格受控的 16 个不同随机 seed。
+- 运行该 wrapper 依赖 `sgl_jax` 及其运行时环境可用；若环境缺失，评测会直接失败。
+
+---
+
+## 2026-03-07: DeepScaler repeated-seed determinism clarification
+
+### Scope
+
+- 无代码改动。
+- 核对 `run_eval_pass1_avg16.sh` 在默认 `vanilla` 采样 backend 下是否会因固定 `seed=0` 而得到重复结果。
+
+### Changed files
+
+1. `develop.md`
+
+### Validation
+
+- `nl -ba examples/deepscaler/run_eval_pass1_avg16.sh | sed -n '1,120p'`
+- `nl -ba examples/deepscaler/math_eval_nb.py | sed -n '495,510p'`
+- `nl -ba tunix/generate/sampler.py | sed -n '632,740p'`
+- `nl -ba tunix/generate/sampler.py | sed -n '436,452p'`
+- `nl -ba tunix/generate/sglang_jax_sampler.py | sed -n '202,255p'`
+- `rg -n "sampler_type|vanilla|sglang-jax" examples/deepscaler/math_eval_nb.py`
+- 确认：
+  - `run_eval_pass1_avg16.sh` 每轮都固定 `EVAL_NUM_PASSES=1`。
+  - `math_eval_nb.py` 在 `num_passes=1` 时每轮都用 `seed=0`。
+  - 默认 `sampler_type` 为 `vanilla`。
+  - `vanilla` 采样器会将整数 seed 转成 `jax.random.PRNGKey(seed)`，并在每个 decoding step 通过 `jax.random.fold_in(sampler_state.seed, decoding_step)` 取样，因此相同模型、相同输入、相同 seed 下属于确定性采样路径。
+
+### Known risks / TODO
+
+- 若调用方改成 `sglang-jax` 或其他 backend，或底层运行时存在非确定性，重复运行结果可能不完全一致。
+- 当前结论基于代码路径推断，未在本机对完整大模型评测做 16 次重复实测。
+
+---
+
+## 2026-03-07: DeepScaleR baseline metric interpretation follow-up
+
+### Scope
+
+- 无代码改动。
+- 继续核对官方 `22.9%` 与 `28.8%` 的含义差异，确认二者不应被视为“同一模型同一评测预算下仅因 8K/长上下文不同而严格一一对应”的公开结论。
+
+### Changed files
+
+1. `develop.md`
+
+### Validation
+
+- 查阅官方模型卡：
+  - `https://huggingface.co/agentica-org/DeepScaleR-1.5B-Preview`
+- 查阅官方讨论：
+  - `https://huggingface.co/agentica-org/DeepScaleR-1.5B-Preview/discussions/13`
+- 复核本地评测脚本：
+  - `nl -ba examples/deepscaler/run_eval.sh | sed -n '1,120p'`
+  - `nl -ba examples/deepscaler/run_eval_pass1_avg16.sh | sed -n '1,120p'`
+- 确认：
+  - 模型卡公开给出 `22.9% -> 33%` 的描述仅标注为 `Initial 8K Context (0-1040 steps)` 训练曲线阶段。
+  - 模型卡公开给出 `28.8%` 时仅标注为汇总评测表中的 `DeepSeek-R1-Distill-Qwen-1.5B`，并说明该表为 `Pass@1 accuracy averaged over 16 samples for each problem`。
+  - 官方讨论中作者建议复现其公开结果时使用 `max length 2**15, temperature 0.6, top_p 0.95`，这说明公开表分数更接近长推理预算评测，而不是本地 `run_eval.sh` 当前默认的 `8192` 生成上限。
+
+### Known risks / TODO
+
+- 官方公开材料没有把 `22.9%` 与 `28.8%` 的评测脚本、采样次数、长度限制逐项并排写清，因此两者差异来源只能做有限推断，不能当成官方明示结论。
+
+---
+
+## 2026-03-07: DeepScaleR 22.9 vs 28.8 vs 43.1 metric mapping clarification
+
+### Scope
+
+- 无代码改动。
+- 进一步核对 DeepScaleR 官方公开数字 `22.9%`、`28.8%`、`33%`、`43.1%` 各自对应的模型/训练阶段，并与本仓库默认评测脚本的默认模型和参数做映射。
+
+### Changed files
+
+1. `develop.md`
+
+### Validation
+
+- `nl -ba examples/deepscaler/run_eval.sh | sed -n '1,120p'`
+- `nl -ba examples/deepscaler/run_eval_pass1_avg16.sh | sed -n '1,120p'`
+- `nl -ba examples/deepscaler/math_eval_nb.py | sed -n '420,520p'`
+- 查阅官方 Hugging Face 模型卡与讨论：
+  - `https://huggingface.co/agentica-org/DeepScaleR-1.5B-Preview`
+  - `https://huggingface.co/agentica-org/DeepScaleR-1.5B-Preview/discussions/13`
+- 确认：
+  - `22.9% -> 33%` 对应的是官方 RL 训练的 `Initial 8K Context (0-1040 steps)` 阶段内，同一训练过程从早期到后期的提升，并非默认基座模型分数。
+  - `28.8%` 对应官方表格中的基座模型 `DeepSeek-R1-Distill-Qwen-1.5B`。
+  - `43.1%` 对应最终公开模型 `DeepScaleR-1.5B-Preview`。
+  - 本地 `run_eval.sh` 默认模型仍是 `DeepSeek-R1-Distill-Qwen-1.5B`，不是官方 8K 阶段中间 checkpoint，也不是最终 DeepScaleR preview checkpoint。
+
+### Known risks / TODO
+
+- 即使切换到相同模型，若评测采样实现与官方“多次独立 pass@1 取平均”不一致，结果仍可能与官方数字有系统偏差。
+
+---
+
+## 2026-03-07: DeepScaleR official eval comparison clarification
+
+### Scope
+
+- 无代码改动。
+- 核对 DeepScaleR 官方公开评测口径，并与仓库内 `examples/deepscaler/run_eval_pass1_avg16.sh` / `examples/deepscaler/eval_all.sh` 的实现语义做对比。
+
+### Changed files
+
+1. `develop.md`
+
+### Validation
+
+- `nl -ba examples/deepscaler/run_eval.sh | sed -n '1,120p'`
+- `nl -ba examples/deepscaler/run_eval_pass1_avg16.sh | sed -n '1,120p'`
+- `nl -ba examples/deepscaler/math_eval_nb.py | sed -n '420,548p'`
+- `nl -ba examples/deepscaler/eval_all.sh | sed -n '1,120p'`
+- 查阅官方 Hugging Face 模型卡与项目博客：
+  - `https://huggingface.co/agentica-org/DeepScaleR-1.5B-Preview`
+  - `https://pretty-radio-b75.notion.site/DeepScaleR-Surpassing-O1-Preview-with-a-1-5B-Model-by-Scaling-RL-19681902c1468005bed8ca303013a4e2`
+- 确认官方模型卡写明：
+  - 最终 `DeepScaleR-1.5B-Preview` 在 AIME 2024 上为 `43.1%`
+  - 基座 `DeepSeek-R1-Distill-Qwen-1.5B` 为 `28.8%`
+  - 指标口径为 `Pass@1 accuracy averaged over 16 samples for each problem`
+  - 8K 上下文训练阶段写明 `22.9% -> 33% Pass@1 on AIME 2024`
+- 确认本地 `run_eval_pass1_avg16.sh` 默认沿用 `run_eval.sh` 的基座模型 `DeepSeek-R1-Distill-Qwen-1.5B`，并非默认评测 `DeepScaleR-1.5B-Preview`。
+- 确认本地 `run_eval_pass1_avg16.sh` 每轮都强制 `EVAL_NUM_PASSES=1`，而 `math_eval_nb.py` 在 `num_passes=1` 时固定使用 `seed=0`，因此“16 次平均”未显式引入 16 个不同采样 seed。
+
+### Known risks / TODO
+
+- 如果底层采样器在相同 seed 下仍存在非确定性，`run_eval_pass1_avg16.sh` 可能仍会出现轻微波动；但从实现看，它并没有显式构造官方口径所需的 16 个不同样本。
+- 官方 8K 数字来自训练阶段曲线描述，不应直接等同于“最终公开模型在本仓库 `8192` 生成上限配置下的可复现分数”。
+
+---
+
+## 2026-03-07: DeepScaler pass1_avg16 wrapper clarification
+
+### Scope
+
+- 无代码改动。
+- 复核 `examples/deepscaler/run_eval_pass1_avg16.sh` 的评测语义，确认它是否等价于 `pass@1` 独立运行 16 次后取平均。
+
+### Changed files
+
+1. `develop.md`
+
+### Validation
+
+- `nl -ba examples/deepscaler/run_eval_pass1_avg16.sh | sed -n '1,120p'`
+- 确认默认 `NUM_RUNS="${NUM_RUNS:-16}"`。
+- 确认脚本在每轮强制设置 `EVAL_NUM_PASSES=1` 后调用 `run_eval.sh`。
+- 确认脚本逐轮解析 `Correct:` 与 `Accuracy:`，并在结束时输出 `Metric: Pass@1 averaged over ${completed_runs} independent runs`。
+
+### Known risks / TODO
+
+- 汇总逻辑依赖当前评测输出中的 `Correct:` 和 `Accuracy:` 固定文本；若输出格式变更，脚本解析会失效。
+
+---
+
+## 2026-03-07: DeepScaler eval semantics clarification only
+
+### Scope
+
+- 无代码改动。
+- 核对 `examples/deepscaler/run_eval.sh`、`examples/deepscaler/math_eval_nb.py` 与 `examples/deepscaler/run_eval_pass1_avg16.sh` 的评测语义，确认 `pass@1` 与 `16` 的含义。
+
+### Changed files
+
+1. `develop.md`
+
+### Validation
+
+- `sed -n '1,220p' examples/deepscaler/run_eval.sh`
+- `sed -n '430,640p' examples/deepscaler/math_eval_nb.py`
+- `sed -n '1,260p' examples/deepscaler/run_eval_pass1_avg16.sh`
+- 确认 `run_eval.sh` 默认 `EVAL_NUM_PASSES="${EVAL_NUM_PASSES:-1}"`，即默认单次采样评测。
+- 确认 `math_eval_nb.py` 对每道题执行 `num_passes` 次生成，并在任一次回答正确时将该题记为正确；这是单次评测内的 pass@k 语义，不是多次独立运行求平均。
+- 确认 `run_eval_pass1_avg16.sh` 才是固定 `EVAL_NUM_PASSES=1` 并默认独立运行 `16` 次后汇总平均结果的脚本。
+
+### Known risks / TODO
+
+- 结论依赖当前脚本实现；如果后续评测脚本输出格式或 `num_passes` 逻辑变化，需要重新核对。
+
+---
+
+## 2026-03-06: DeepScaler eval default model switch
+
+### Scope
+
+- Switched the default evaluation model in `examples/deepscaler/run_eval.sh` from DeepScaleR preview to DeepSeek R1 Distill Qwen 1.5B.
+- Changed the default evaluation `num_passes` in `examples/deepscaler/run_eval.sh` from `16` to `1`.
+- Changed the default evaluation `max_generation_steps` in `examples/deepscaler/run_eval.sh` from `32768` to `8192`.
+- Added a new wrapper script to run pass@1 evaluation 16 times and report the average over runs.
+- Made the averaging wrapper tolerate environments without `rg` by falling back to `grep`.
+
+### Changed files
+
+1. `examples/deepscaler/run_eval.sh`
+2. `examples/deepscaler/run_eval_pass1_avg16.sh`
+3. `develop.md`
+
+### Validation
+
+- `sed -n '1,40p' examples/deepscaler/run_eval.sh`
+- `bash -n examples/deepscaler/run_eval.sh`
+- `bash -n examples/deepscaler/run_eval_pass1_avg16.sh`
+- Confirmed default values now point to:
+  - `deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B`
+  - local HF cache snapshot `models--deepseek-ai--DeepSeek-R1-Distill-Qwen-1.5B/...`
+- Confirmed `EVAL_NUM_PASSES="${EVAL_NUM_PASSES:-1}"`.
+- Confirmed `EVAL_MAX_GENERATION_STEPS="${EVAL_MAX_GENERATION_STEPS:-8192}"`.
+- Confirmed the new wrapper forces `EVAL_NUM_PASSES=1`, runs `NUM_RUNS` times (default `16`), and parses `Correct:` / `Accuracy:` lines from each run log.
+- Confirmed the wrapper now uses `rg` if available and falls back to `grep` otherwise.
+
+### Known risks / TODO
+
+- This only changes the default model selection for `run_eval.sh`; callers that explicitly set `MODEL_PATH` or `MODEL_VERSION` are unchanged.
+- This only changes the default `num_passes`; callers that explicitly set `EVAL_NUM_PASSES` are unchanged.
+- This only changes the default `max_generation_steps`; callers that explicitly set `EVAL_MAX_GENERATION_STEPS` are unchanged.
+- The averaging wrapper assumes each run finishes with `Correct:` and `Accuracy:` summary lines; if the Python evaluator output format changes, parsing will break.
+- `grep` fallback matches the current fixed summary lines; if those labels change, parsing still breaks.
+- The default local snapshot path is machine-specific and will fail on hosts where that HF cache entry does not exist.
+
+---
+
 ## 2026-03-04: DeepScaler rollout backend integration + sglang_jax stability work
 
 ### Scope
@@ -1520,3 +2018,368 @@ This file tracks engineering changes made in this repository.
 ### Known risks / TODO
 
 - Full TPU end-to-end validation still depends on runtime availability and absence of external TPU lock/process interference.
+
+## 2026-03-07 - DeepScaler eval progress inspection
+
+### Scope
+
+- No code changes.
+- Inspected the live `run_eval_pass1_avg16.sh` evaluation progress and extracted completed-run accuracies from the active log directory.
+
+### Changed files
+
+1. `develop.md`
+
+### Validation
+
+- `ls -td /tmp/deepscaler_pass1_avg16_* | head`
+- `ps -eo pid,etimes,cmd | rg 'run_eval_pass1_avg16.sh|examples/deepscaler/math_eval_nb.py'`
+- `rg -n 'Correct:|Accuracy:' /tmp/deepscaler_pass1_avg16_20260307_151314/run_1.log /tmp/deepscaler_pass1_avg16_20260307_151314/run_2.log`
+- `tail -n 40 /tmp/deepscaler_pass1_avg16_20260307_151314/run_3.log`
+
+### Validation results
+
+- Active log directory detected: `/tmp/deepscaler_pass1_avg16_20260307_151314`.
+- Completed runs so far:
+  - `run_1.log`: `Correct: 8/30`, `Accuracy: 26.67%`
+  - `run_2.log`: `Correct: 8/30`, `Accuracy: 26.67%`
+- `run_3.log` exists and is currently in progress (`--seed 2`); no final accuracy written yet at inspection time.
+
+### Known risks / TODO
+
+- The live results can change while the script is still running; check the active log directory again for updated averages after more runs complete.
+
+## 2026-03-07 - DeepScaler run_1 vs run_2 output comparison
+
+### Scope
+
+- No code changes.
+- Compared the first two completed `run_eval_pass1_avg16.sh` logs to determine whether identical accuracies came from different answer sets or from identical generations.
+
+### Changed files
+
+1. `develop.md`
+
+### Validation
+
+- `sha256sum /tmp/deepscaler_pass1_avg16_20260307_151314/run_1.log /tmp/deepscaler_pass1_avg16_20260307_151314/run_2.log`
+- `diff -u /tmp/deepscaler_pass1_avg16_20260307_151314/run_1.log /tmp/deepscaler_pass1_avg16_20260307_151314/run_2.log`
+- Compared full logs again after removing the `Base seed:` line.
+- Parsed each log's 30 `model_answer ... IS CORRECT/NOT CORRECT` lines and compared the full sequence.
+
+### Validation results
+
+- `run_1.log` and `run_2.log` differ in the raw file hash, but the only textual diff found was:
+  - `Base seed: 0`
+  - `Base seed: 1`
+- After removing the `Base seed:` line, the two logs are byte-for-byte identical at the line level.
+- The full per-problem answer/correctness sequence is identical across both runs.
+- Correct positions in dataset order are identical: `1, 7, 8, 9, 10, 16, 20, 25`.
+
+### Known risks / TODO
+
+- This strongly suggests the current `sglang-jax` eval path is effectively deterministic for these runs, or the backend is not varying outputs with the provided `sampling_seed`; confirm after more runs complete before drawing a final conclusion.
+
+## 2026-03-07 - DeepScaler sglang-jax identical-run root cause analysis
+
+### Scope
+
+- No code changes.
+- Traced why `run_eval_pass1_avg16.sh` produced identical outputs for `run_1` and `run_2` despite different wrapper-level seeds.
+
+### Changed files
+
+1. `develop.md`
+
+### Validation
+
+- Read [examples/deepscaler/math_eval_nb.py](/home/lhf_hongfu_gmail_com/tunix/examples/deepscaler/math_eval_nb.py) around sampler construction and eval seed usage.
+- Read [tunix/generate/sglang_jax_sampler.py](/home/lhf_hongfu_gmail_com/tunix/tunix/generate/sglang_jax_sampler.py) around engine args and `sampling_seed` request wiring.
+- Read local installed `sgl_jax` sources under `/tmp/sglang-jax/python/sgl_jax/`:
+  - `srt/sampling/sampling_batch_info.py`
+  - `srt/layers/sampler.py`
+  - `srt/server_args.py`
+  - `srt/model_executor/model_runner.py`
+
+### Validation results
+
+- Eval constructs `SglangJaxConfig(enable_deterministic_sampling=False)`.
+- The wrapper seed is written into per-request `sampling_seed`, but `sgl_jax` only materializes `sampling_seeds` when `enable_deterministic_sampling=True`; otherwise it sets `sampling_seeds=None`.
+- When `sampling_seeds=None`, the sampler falls back to engine RNG-based multinomial sampling instead of request-seeded sampling.
+- Engine RNG is initialized from `server_args.random_seed`; if not provided, `sgl_jax` defaults it to `42`.
+- Because each eval run starts a fresh engine with the same default RNG seed, same prompts, same order, and same batch size, the random stream is replayed identically and outputs match exactly across runs.
+
+### Known risks / TODO
+
+- If later runs also remain identical, the current `avg16` result should be treated as repeated single-run measurement rather than independent-sample averaging unless engine-level randomness is re-plumbed.
+
+## 2026-03-07 - DeepScaler sglang-jax eval seeding recommendation
+
+### Scope
+
+- No code changes.
+- Recorded the recommended fix direction for making `run_eval_pass1_avg16.sh` produce meaningful independent samples while keeping `sglang-jax`.
+
+### Changed files
+
+1. `develop.md`
+
+### Recommendation
+
+- Preferred path if keeping `sglang-jax`:
+  - Turn `enable_deterministic_sampling=True` in eval.
+  - Keep per-run seed plumbing (`run_idx -> EVAL_SEED`) and let request `sampling_seed` drive sampling.
+- Why this is preferred:
+  - It makes each run reproducible.
+  - Different seeds then map to intentionally different samples, instead of relying on engine-global RNG side effects.
+  - It is closer to a defensible `pass@1` averaged-over-runs protocol.
+- Less preferred fallback:
+  - Keep deterministic sampling off, but plumb `run_idx` into engine/server `random_seed`.
+  - This can make runs differ, but the randomness is engine-global and more sensitive to batching/order/runtime details.
+
+### Known risks / TODO
+
+- Even with deterministic sampling enabled, verify at least two adjacent runs produce different logs before treating `avg16` as independent-sample averaging.
+
+## 2026-03-07 - DeepScaler eval enable deterministic sampling for sglang-jax
+
+### Scope
+
+- Enabled deterministic sampling in the `sglang-jax` eval path so per-run `EVAL_SEED` / request `sampling_seed` actually controls sampling.
+- Kept the existing `run_eval_pass1_avg16.sh` seed plumbing unchanged.
+
+### Changed files
+
+1. `examples/deepscaler/math_eval_nb.py`
+2. `develop.md`
+
+### Validation
+
+- `python -m py_compile examples/deepscaler/math_eval_nb.py`
+- `bash -n examples/deepscaler/run_eval.sh`
+- `bash -n examples/deepscaler/run_eval_pass1_avg16.sh`
+- `export PYTHONPATH=/tmp/tunix_eval_shim${PYTHONPATH:+:$PYTHONPATH}`
+- `source .venv_sglang312/bin/activate`
+- `LOG_DIR=/tmp/deepscaler_pass1_avg16_detcheck_20260307_161338 NUM_RUNS=2 EVAL_NUM_BATCHES=5 EVAL_MAX_PROMPT_LENGTH=512 EVAL_MAX_GENERATION_STEPS=512 ./examples/deepscaler/run_eval_pass1_avg16.sh`
+- Compared `/tmp/deepscaler_pass1_avg16_detcheck_20260307_161338/run_1.log` and `run_2.log`
+
+### Validation results
+
+- Syntax checks passed.
+- Short 2-run validation completed successfully with `sglang-jax`.
+- Both runs reported `0/5`, `0.00%`, but the raw generations are no longer identical:
+  - `run_1.log` and `run_2.log` differ even after removing the `Base seed:` line.
+  - All `5/5` recorded raw response entries differ across the two runs.
+- This confirms that different eval seeds are now affecting generation, even when the tiny validation slice happens to produce the same final accuracy.
+
+### Known risks / TODO
+
+- The short validation used only 5 questions and a reduced token budget, so equal `acc` there is not meaningful by itself.
+- A full `16`-run AIME evaluation is still needed to estimate the new averaged metric under the corrected seeding behavior.
+
+## 2026-03-07 - DeepScaler batch size vs avg16 metric clarification
+
+### Scope
+
+- No code changes.
+- Clarified the difference between increasing `EVAL_BATCH_SIZE` and averaging `pass@1` over 16 independent runs.
+
+### Changed files
+
+1. `develop.md`
+
+### Clarification
+
+- `EVAL_BATCH_SIZE=16` only changes how many different questions are processed in parallel inside a single eval run.
+- It does not create 16 samples per question and does not replace `NUM_RUNS=16`.
+- If the goal is `avg16 pass@1`, the correct setup is still:
+  - `run_eval_pass1_avg16.sh`
+  - `NUM_RUNS=16`
+  - optionally set `EVAL_BATCH_SIZE=16` to speed up each run
+
+### Known risks / TODO
+
+- Larger eval batch sizes may change throughput or memory pressure, but they do not change the metric definition.
+
+## 2026-03-07 - DeepScaler single-run batch16 vs avg16 clarification
+
+### Scope
+
+- No code changes.
+- Clarified why a single eval run with `EVAL_BATCH_SIZE=16` is not the same metric as averaging `pass@1` over 16 independent runs.
+
+### Changed files
+
+1. `develop.md`
+
+### Clarification
+
+- `EVAL_BATCH_SIZE` controls how many different questions are processed in parallel within one run.
+- `NUM_RUNS=16` in `run_eval_pass1_avg16.sh` controls how many independent seeded runs are averaged.
+- A single run with `EVAL_BATCH_SIZE=16` still samples each question once.
+- `avg16 pass@1` samples each question 16 times across different runs and averages the resulting accuracies.
+- Under ideal batch-invariant sampling, one-run accuracy and avg16 accuracy target the same expectation, but avg16 has much lower variance and is therefore more stable.
+
+### Known risks / TODO
+
+- If the backend is not perfectly batch-invariant, changing `EVAL_BATCH_SIZE` may also slightly change outputs, but that still does not make one run equivalent to 16-run averaging.
+
+## 2026-03-07 - DeepScaler batch1 run command clarification
+
+### Scope
+
+- No code changes.
+- Clarified the exact command for `EVAL_BATCH_SIZE=1` with `NUM_RUNS=16`.
+
+### Changed files
+
+1. `develop.md`
+
+### Clarification
+
+- If the desired protocol is `pass@1` averaged over 16 independent runs while keeping per-run eval batch size at 1, use:
+  - `EVAL_BATCH_SIZE=1`
+  - `NUM_RUNS=16`
+  - `./examples/deepscaler/run_eval_pass1_avg16.sh`
+
+### Known risks / TODO
+
+- None beyond the existing long runtime of the full 16-run evaluation.
+
+## 2026-03-07 - PYTHONPATH command clarification for DeepScaler eval
+
+### Scope
+
+- No code changes.
+- Clarified the meaning of `export PYTHONPATH=/tmp/tunix_eval_shim${PYTHONPATH:+:$PYTHONPATH}` and why it is needed for the current `sglang-jax` eval path.
+
+### Changed files
+
+1. `develop.md`
+
+### Clarification
+
+- The command prepends `/tmp/tunix_eval_shim` to Python's module search path for the current shell and child processes.
+- `${PYTHONPATH:+:$PYTHONPATH}` means:
+  - if `PYTHONPATH` is already non-empty, append `:$PYTHONPATH`
+  - otherwise append nothing
+- In this workspace it is used so Python can find the temporary shim at `/tmp/tunix_eval_shim/sitecustomize.py`, which works around the current missing `tunix.google...` import alias for `sglang-jax` eval.
+
+### Known risks / TODO
+
+- The command relies on the temporary shim existing at `/tmp/tunix_eval_shim`; if that directory is removed, the export no longer helps.
+
+## 2026-03-07 - /tmp/tunix_eval_shim purpose clarification
+
+### Scope
+
+- No code changes.
+- Inspected the temporary `/tmp/tunix_eval_shim` directory and clarified what it does and when it is required.
+
+### Changed files
+
+1. `develop.md`
+
+### Validation
+
+- `find /tmp/tunix_eval_shim -maxdepth 2 -type f -o -type d | sort`
+- `nl -ba /tmp/tunix_eval_shim/sitecustomize.py`
+
+### Validation results
+
+- `/tmp/tunix_eval_shim` currently contains `sitecustomize.py` plus Python bytecode cache files.
+- The shim injects a runtime alias:
+  - `tunix.google.stubs.sglang_jax_sampler_stub`
+  - mapped to `tunix.generate.sglang_jax_sampler`
+- This is a temporary workaround so the current `examples/deepscaler/math_eval_nb.py` import path can resolve without editing repository code.
+
+### Known risks / TODO
+
+- It is required for the current `sglang-jax` eval command path as long as the repo still imports the missing `tunix.google.stubs...` alias.
+- It would stop being necessary if that import path were fixed in-repo or if an equivalent real module were added.
+
+## 2026-03-07 - Missing sglang-jax import path clarification
+
+### Scope
+
+- No code changes.
+- Clarified the exact missing module path behind the temporary `/tmp/tunix_eval_shim` workaround.
+
+### Changed files
+
+1. `develop.md`
+
+### Validation
+
+- `rg --files | rg '(^tunix/google/|sglang_jax_sampler)'`
+- Checked import resolution for:
+  - `tunix.google`
+  - `tunix.google.stubs`
+  - `tunix.google.stubs.sglang_jax_sampler_stub`
+  - `tunix.generate.sglang_jax_sampler`
+
+### Validation results
+
+- The eval code imports:
+  - `from tunix.google.stubs import sglang_jax_sampler_stub`
+- The repository currently has:
+  - `tunix/generate/sglang_jax_sampler.py`
+- The repository does not currently have:
+  - `tunix/google/`
+  - `tunix/google/stubs/`
+  - `tunix/google/stubs/sglang_jax_sampler_stub.py`
+- Therefore the missing piece is a Python module path / compatibility alias, not a model asset or third-party package.
+
+### Known risks / TODO
+
+- The `/tmp` shim is only a temporary workaround; the cleaner long-term fix is in-repo import cleanup or adding a real compatibility stub module.
+
+## 2026-03-07 - One-line fix clarification for sglang-jax import
+
+### Scope
+
+- No code changes.
+- Clarified whether the current missing-module issue can be fixed by editing `tunix/generate/sglang_jax_sampler.py`.
+
+### Changed files
+
+1. `develop.md`
+
+### Clarification
+
+- The missing-module issue is not inside `tunix/generate/sglang_jax_sampler.py`.
+- The broken import site is in `examples/deepscaler/math_eval_nb.py`, which currently imports `tunix.google.stubs.sglang_jax_sampler_stub`.
+- Therefore, the clean one-line fix is to change that import to `from tunix.generate import sglang_jax_sampler`.
+
+### Known risks / TODO
+
+- If other files also depend on the `tunix.google.stubs...` alias, they should be checked before removing the workaround globally.
+
+## 2026-03-07 - DeepScaler one-line sglang-jax import fix
+
+### Scope
+
+- Replaced the broken `tunix.google.stubs...` import in the DeepScaler eval path with the real in-repo `tunix.generate.sglang_jax_sampler` module.
+
+### Changed files
+
+1. `examples/deepscaler/math_eval_nb.py`
+2. `develop.md`
+
+### Validation
+
+- `python -m py_compile examples/deepscaler/math_eval_nb.py`
+- `source .venv_sglang312/bin/activate && unset PYTHONPATH && python - <<'PY'`
+  `from tunix.generate import sglang_jax_sampler`
+  `print(sglang_jax_sampler.__file__)`
+  `PY`
+
+### Validation results
+
+- Python syntax check passed.
+- Direct import of `tunix.generate.sglang_jax_sampler` succeeded without relying on `/tmp/tunix_eval_shim`.
+- This fixes the specific missing-module issue caused by `from tunix.google.stubs import sglang_jax_sampler_stub`.
+
+### Known risks / TODO
+
+- I did not rerun a full end-to-end eval after this one-line import cleanup; the fix specifically addresses the previously missing module path.

@@ -312,7 +312,7 @@ class Qwen25MathEvaluator:
           cache_config=cache_config,
       )
     elif self.sampler_type == "sglang-jax":
-      from tunix.google.stubs import sglang_jax_sampler_stub as sglang_jax_sampler  # pylint: disable=g-import-not-at-top
+      from tunix.generate import sglang_jax_sampler  # pylint: disable=g-import-not-at-top
 
       mapping_config = mappings.MappingConfig.build(
           mapping_obj=None,
@@ -330,7 +330,9 @@ class Qwen25MathEvaluator:
               mem_fraction_static=0.4,
               init_with_random_weights=False,
               disable_radix_cache=True,
-              enable_deterministic_sampling=False,
+              # Keep runs reproducible while allowing per-request sampling_seed
+              # to generate different samples across eval seeds.
+              enable_deterministic_sampling=True,
               mapping_config=mapping_config,
           ),
       )
@@ -462,6 +464,7 @@ class Qwen25MathEvaluator:
       top_k: Optional[int] = 50,
       top_p: Optional[float] = 0.95,
       num_passes: int = 1,
+      seed: int = 0,
       debug_first_n: int = 3,  # NEW: Debug first N examples
   ) -> Dict[str, Any]:
     print("=" * 60)
@@ -474,6 +477,7 @@ class Qwen25MathEvaluator:
     print(f"  Top-k: {top_k}")
     print(f"  Top-p: {top_p}")
     print(f"  Passes per question: {num_passes}")
+    print(f"  Base seed: {seed}")
     print(f"  Debug first N examples: {debug_first_n}")
     print("=" * 60)
 
@@ -500,12 +504,13 @@ class Qwen25MathEvaluator:
 
       responses_collection = [[] for _ in range(len(prompts))]
       for pass_idx in range(num_passes):
+        sample_seed = seed + pass_idx
         batch_response = self.generate(
             prompts=prompts,
             temperature=temperature,
             top_k=top_k,
             top_p=top_p,
-            seed=pass_idx,
+            seed=sample_seed,
         )
         for i, r in enumerate(batch_response):
           responses_collection[i].append(r)
@@ -593,6 +598,7 @@ class Qwen25MathEvaluator:
         "top_k": top_k,
         "top_p": top_p,
         "num_passes": num_passes,
+        "seed": seed,
         "detailed_results": results,
     }
 
@@ -744,6 +750,12 @@ def parse_args(argv: Sequence[str] | None = None):
   parser_.add_argument("--top-k", type=int, default=None, help="Set <0 to disable top-k.")
   parser_.add_argument("--top-p", type=float, default=None)
   parser_.add_argument("--num-passes", type=int, default=1)
+  parser_.add_argument(
+      "--seed",
+      type=int,
+      default=0,
+      help="Base sampling seed. Effective per-pass seed is `seed + pass_idx`.",
+  )
   parser_.add_argument("--debug-first-n", type=int, default=None)
   parser_.add_argument("--mesh-fsdp", type=int, default=None)
   parser_.add_argument("--mesh-tp", type=int, default=None)
@@ -800,6 +812,7 @@ def run_eval(args):
       top_k=None if args.top_k is not None and args.top_k < 0 else args.top_k,
       top_p=args.top_p,
       num_passes=args.num_passes,
+      seed=args.seed,
       debug_first_n=args.debug_first_n,
   )
 
