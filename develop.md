@@ -2383,3 +2383,90 @@ This file tracks engineering changes made in this repository.
 ### Known risks / TODO
 
 - I did not rerun a full end-to-end eval after this one-line import cleanup; the fix specifically addresses the previously missing module path.
+
+## 2026-03-08 - DeepScaler README add avg16 eval result
+
+### Scope
+
+- Added the local `sglang-jax` `pass@1` averaged-over-16-runs eval command and the observed AIME 2024 result to the DeepScaler README.
+
+### Changed files
+
+1. `examples/deepscaler/README.md`
+2. `develop.md`
+
+### Validation
+
+- `rg -n 'pass@1 averaged over 16|Average Accuracy: 18.9594|run_eval_pass1_avg16.sh' examples/deepscaler/README.md`
+- `git diff -- examples/deepscaler/README.md`
+
+### Validation results
+
+- README now includes the `run_eval_pass1_avg16.sh` repro command.
+- README now includes the recorded local summary:
+  - `Runs: 16`
+  - `Average Correct: 5.6875/30.0000`
+  - `Average Accuracy: 18.9594%`
+
+### Known risks / TODO
+
+- The recorded result is environment-specific and reflects the local run logged at `/tmp/deepscaler_pass1_avg16_20260307_171010`.
+
+## 2026-03-08 - DeepScaler avg16 command path clarification
+
+### Scope
+
+- No code changes.
+- Confirmed the exact command written in the DeepScaler README for the recorded `avg16 pass@1` result and summarized the underlying code path.
+
+### Changed files
+
+1. `develop.md`
+
+### Validation
+
+- `nl -ba examples/deepscaler/README.md | sed -n '114,140p'`
+- `nl -ba examples/deepscaler/run_eval_pass1_avg16.sh | sed -n '1,80p'`
+- `nl -ba examples/deepscaler/run_eval.sh | sed -n '1,60p'`
+- `nl -ba examples/deepscaler/math_eval_nb.py | sed -n '312,338p'`
+
+### Validation results
+
+- README includes the exact repro command for the recorded result.
+- The code path is:
+  - `examples/deepscaler/run_eval_pass1_avg16.sh`
+  - `examples/deepscaler/run_eval.sh`
+  - `examples/deepscaler/math_eval_nb.py`
+
+### Known risks / TODO
+
+- None beyond the existing environment dependence of the recorded local result.
+
+## 2026-03-08 - DeepScaler README simplify avg16 command
+
+### Scope
+
+- Simplified the DeepScaler README `avg16 pass@1` command to rely on the existing default values for `EVAL_BATCH_SIZE=1` and `NUM_RUNS=16`.
+
+### Changed files
+
+1. `examples/deepscaler/README.md`
+2. `develop.md`
+
+### Validation
+
+- `nl -ba examples/deepscaler/README.md | sed -n '117,124p'`
+- `git diff -- examples/deepscaler/README.md`
+
+### Validation results
+
+- README now shows the shorter command:
+  - `source .venv_sglang312/bin/activate`
+  - `LOG_DIR=/tmp/deepscaler_pass1_avg16_$(date +%Y%m%d_%H%M%S) ./examples/deepscaler/run_eval_pass1_avg16.sh`
+- The removed environment variables were redundant because:
+  - `EVAL_BATCH_SIZE` already defaults to `1`
+  - `NUM_RUNS` already defaults to `16`
+
+### Known risks / TODO
+
+- None beyond the existing environment dependence of the recorded local result.

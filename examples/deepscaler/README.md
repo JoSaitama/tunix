@@ -114,6 +114,27 @@ METRICS_LOG_DIR=/tmp/deepscaler_tb_${RUN_TS} \
 ./examples/deepscaler/run_train.sh --rollout-engine sglang_jax --rollout-tp 2
 ```
 
+Run `pass@1` averaged over 16 independent `sglang-jax` eval runs:
+
+```bash
+source .venv_sglang312/bin/activate
+LOG_DIR=/tmp/deepscaler_pass1_avg16_$(date +%Y%m%d_%H%M%S) \
+./examples/deepscaler/run_eval_pass1_avg16.sh
+```
+
+Observed local result on this machine (`2026-03-07`, AIME 2024, seeds `0..15`):
+
+```text
+===== FINAL SUMMARY =====
+Runs: 16
+Sampler: sglang-jax
+Seeds: 0..15
+Metric: Pass@1 averaged over 16 independent runs
+Average Correct: 5.6875/30.0000
+Average Accuracy: 18.9594%
+Logs saved to: /tmp/deepscaler_pass1_avg16_20260307_171010
+```
+
 If non-smoke run fails with `RESOURCE_EXHAUSTED` at `jit__train_step`, start with
 this lower-memory profile (verified in this environment):
 
