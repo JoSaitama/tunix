@@ -3434,3 +3434,26 @@ This file tracks engineering changes made in this repository.
 ### Known risks / TODO
 
 - The untracked virtual environment and local artifact directories are large and should usually not be committed.
+
+## 2026-03-09 - DeepScaler wrapper total generation steps default
+
+### Scope
+
+- Updated the `examples/deepscaler/run_train.sh` wrapper default `TOTAL_GENERATION_STEPS` from `7680` to `8192` to match the Python entrypoint default.
+
+### Changed files
+
+1. `examples/deepscaler/run_train.sh`
+2. `develop.md`
+
+### Validation
+
+- `nl -ba examples/deepscaler/run_train.sh | sed -n '20,30p'`
+
+### Validation results
+
+- `run_train.sh` now defaults `TOTAL_GENERATION_STEPS` to `8192`.
+
+### Known risks / TODO
+
+- This change updates the wrapper default only; callers that explicitly export `TOTAL_GENERATION_STEPS` or pass `--total-generation-steps` still override it.
