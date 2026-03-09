@@ -114,6 +114,20 @@ METRICS_LOG_DIR=/tmp/deepscaler_tb_${RUN_TS} \
 ./examples/deepscaler/run_train.sh --rollout-engine sglang_jax --rollout-tp 2
 ```
 
+Run `self-inf-group` DBC on the current default DeepScaler geometry
+(`num_generations=2` by default):
+
+```bash
+RUN_TS=$(date +%Y%m%d_%H%M%S)
+CHECKPOINT_DIR=/tmp/deepscaler_ckpt_${RUN_TS} \
+METRICS_LOG_DIR=/tmp/deepscaler_tb_${RUN_TS} \
+./examples/deepscaler/run_train.sh \
+  --rollout-engine sglang_jax \
+  --rollout-tp 2 \
+  --use-dynamic-batch-curation \
+  --use-dbc-self-inf-group
+```
+
 Run `pass@1` averaged over 16 independent `sglang-jax` eval runs:
 
 ```bash

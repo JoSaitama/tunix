@@ -195,7 +195,7 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
 
     # Log the string representation of the callable
     logging.info("repr(policy_loss_fn): %r", policy_loss_fn)
-    loss_fn = lambda model, train_example, algo_config: policy_loss_fn(
+    loss_fn = lambda model, train_example: policy_loss_fn(
         model,
         train_example,
         algo_config=self.algo_config,
@@ -208,12 +208,19 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
         has_aux=True,
     )
     self.rl_cluster.actor_trainer.with_gen_model_input_fn(
-        lambda x: {
-            "train_example": x,
-            "algo_config": self.algo_config,
+        lambda x: {"train_example": x}
+    )
+    self.rl_cluster.actor_trainer.with_rl_metrics_to_log(
+        {
+            "kl": np.mean,
+            "skipped_samples": np.mean,
+            "grad_norm_mean": np.mean,
+            "grad_norm_std": np.mean,
+            "self_inf_dot_mean": np.mean,
+            "self_inf_dot_std": np.mean,
+            "self_inf_kept_fraction": np.mean,
         }
     )
-    self.rl_cluster.actor_trainer.with_rl_metrics_to_log({"kl": np.mean})
     self.rl_cluster.actor_trainer.with_tqdm_metrics_to_display([
         lambda: "kl" if self.algo_config.beta != 0.0 else None,
     ])
@@ -452,28 +459,35 @@ def grpo_loss_fn(
   )
   loss_aggregation_mode = algo_config.loss_agg_mode
 
-  completion_ids, completion_mask = (
-      train_example.completion_ids,
-      train_example.completion_mask,
+  completion_ids = jnp.atleast_2d(train_example.completion_ids)
+  completion_mask = jnp.atleast_2d(train_example.completion_mask)
+  prompt_ids = jnp.atleast_2d(train_example.prompt_ids)
+  advantages = jnp.atleast_1d(train_example.advantages)
+  ref_per_token_logps = (
+      None
+      if train_example.ref_per_token_logps is None
+      else jnp.atleast_2d(train_example.ref_per_token_logps)
+  )
+  old_per_token_logps = (
+      None
+      if train_example.old_per_token_logps is None
+      else jnp.atleast_2d(train_example.old_per_token_logps)
   )
 
   # TODO(yangmu): trace this part as "actor_inference_and_training".
   # with perf_tracer.span("...", list(completion_ids.devices())):
   per_token_logps = common.compute_per_token_logps(
       model,
-      prompt_tokens=train_example.prompt_ids,
+      prompt_tokens=prompt_ids,
       completion_tokens=completion_ids,
       pad_id=pad_id,
       eos_id=eos_id,
       stop_gradient=False,
       return_logits=False,
   )
-  advantages = train_example.advantages
 
-  if train_example.old_per_token_logps is None:
+  if old_per_token_logps is None:
     old_per_token_logps = jax.lax.stop_gradient(per_token_logps)
-  else:
-    old_per_token_logps = train_example.old_per_token_logps
 
   seq_importance_ratio = per_token_logps - old_per_token_logps
   # TODO(sizhi): Refactor this to a separate function.
@@ -500,7 +514,7 @@ def grpo_loss_fn(
   aux = {"kl": 0.0}
   if beta is not None and beta != 0.0:
     kl = common.compute_kl_divergence(
-        per_token_logps, train_example.ref_per_token_logps
+        per_token_logps, ref_per_token_logps
     )
     per_token_loss = per_token_loss + beta * kl
 

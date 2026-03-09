@@ -2470,3 +2470,967 @@ This file tracks engineering changes made in this repository.
 ### Known risks / TODO
 
 - None beyond the existing environment dependence of the recorded local result.
+
+## 2026-03-08 - DeepScaler DBC micro-batch analysis
+
+### Scope
+
+- No code changes.
+- Analyzed whether DeepScaler GRPO training would apply dynamic batch curation over the outer `batch_size=128` or over the inner training micro-batch.
+- Confirmed the effective DBC screening window is controlled by `train_micro_batch_size * num_generations`, not by the outer `batch_size`.
+
+### Changed files
+
+1. `develop.md`
+
+### Validation
+
+- `nl -ba examples/deepscaler/run_train.sh | sed -n '1,120p'`
+- `nl -ba tunix/rl/rl_learner.py | sed -n '240,520p'`
+- `nl -ba tunix/rl/robust_trainer.py | sed -n '1,180p'`
+- `nl -ba tunix/rl/self_inf_trainer.py | sed -n '1,220p'`
+
+### Validation results
+
+- `examples/deepscaler/run_train.sh` defaults confirm:
+  - `BATCH_SIZE=128`
+  - `MINI_BATCH_SIZE=128`
+  - `TRAIN_MICRO_BATCH_SIZE=1`
+  - `NUM_GENERATIONS=2`
+- `tunix/rl/rl_learner.py` confirms GRPO:
+  - splits the outer batch into training micro-batches,
+  - repeats each micro-batch by `num_generations`,
+  - may merge for rollout/inference efficiency,
+  - then splits back to original micro-batch boundaries before actor training.
+- `tunix/rl/robust_trainer.py` and `tunix/rl/self_inf_trainer.py` both apply per-sample filtering inside a single `_train_step`, so they only see the post-split micro-batch.
+- For the current DeepScaler defaults, the effective DBC screening window is `1 * 2 = 2` samples per actor train step, not `128`.
+
+### Known risks / TODO
+
+- With an effective screening window of `2`, outlier-L2 filtering is unlikely to be useful because the mean/std estimate is too small to robustly identify outliers.
+- With `train_micro_batch_size=1`, self-influence `batch` and `group` scopes are expected to behave very similarly, because each actor step contains only one GRPO group.
+- If stronger DBC behavior is desired, increase `train_micro_batch_size`; this will also increase per-step memory and compile cost because DBC computes per-sample gradients via `jax.vmap`.
+
+## 2026-03-08 - DeepScaler normal gradient accumulation walkthrough
+
+### Scope
+
+- 无代码改动。
+- Traced the standard DeepScaler GRPO actor training path to explain exactly how gradients are accumulated and when model weights are updated under the current defaults.
+
+### Changed files
+
+1. `develop.md`
+
+### Validation
+
+- `nl -ba examples/deepscaler/run_train.sh | sed -n '1,120p'`
+- `nl -ba tunix/rl/rl_cluster.py | sed -n '100,150p'`
+- `nl -ba tunix/rl/rl_learner.py | sed -n '550,760p'`
+- `nl -ba tunix/sft/peft_trainer.py | sed -n '180,240p'`
+- `nl -ba tunix/sft/peft_trainer.py | sed -n '300,340p'`
+- `nl -ba tunix/sft/peft_trainer.py | sed -n '650,720p'`
+
+### Validation results
+
+- `run_train.sh` defaults confirm the active DeepScaler training shape is:
+  - `batch_size=128`
+  - `mini_batch_size=128`
+  - `train_micro_batch_size=1`
+  - `num_generations=2`
+- `RLTrainingConfig` derives `gradient_accumulation_steps = mini_batch_size // train_micro_batch_size`, so the current setup accumulates for `128` micro-steps before counting one optimizer update.
+- `PeftTrainer` wraps the optimizer with `optax.MultiSteps(...)`, which means `optimizer.update(...)` is called every micro-step but the real parameter update is deferred until the accumulation boundary.
+- `RLLearner` splits the outer batch into training micro-batches, repeats each micro-batch by `num_generations`, and feeds those micro-batches one by one into actor training.
+- With current defaults, each actor micro-step trains on `1 prompt * 2 generations = 2 trajectories`, and `128` such micro-steps make one actor optimizer step.
+
+### Known risks / TODO
+
+- The outer `batch_size=128` can be misleading: it is not the size of a single actor gradient computation under the current defaults.
+- If future work changes `train_micro_batch_size`, it will change both the DBC screening window and the memory/compile behavior of each actor micro-step.
+
+## 2026-03-08 - my_example DBC hyperparameter and activation analysis
+
+### Scope
+
+- 无代码改动。
+- Inspected `my_example` DBC-related flags, defaults, wrapper scripts, and trainer selection path.
+- Confirmed which knobs actually control screening behavior and which metrics verify that screening logic executed.
+
+### Changed files
+
+1. `develop.md`
+
+### Validation
+
+- `rg -n "dbc|dynamic batch curation|curation|self_inf|use_dynamic_batch_curation|use-dbc|skipped_samples|grad_norm_mean|self_inf_kept_fraction" my_example tunix/rl`
+- `nl -ba my_example/config.py | sed -n '1,320p'`
+- `nl -ba my_example/train.py | sed -n '1,260p'`
+- `nl -ba my_example/run_grpo_gemma.sh | sed -n '1,220p'`
+- `nl -ba my_example/run_dbc_outlier_l2.sh | sed -n '1,220p'`
+- `nl -ba my_example/run_dbc_self_inf_batch.sh | sed -n '1,220p'`
+- `nl -ba my_example/run_dbc_self_inf_group.sh | sed -n '1,220p'`
+- `nl -ba my_example/main.py | sed -n '81,240p'`
+- `nl -ba tunix/rl/grpo/grpo_learner.py | sed -n '160,260p'`
+
+### Validation results
+
+- `my_example` exposes three DBC variants:
+  - outlier-L2: `--use-dbc-outlier-l2`
+  - self-influence batch: `--use-dbc-self-inf-batch`
+  - self-influence group: `--use-dbc-self-inf-group`
+- The only exposed DBC numeric threshold is `--curation-threshold` with default `3.0`, and it is used by outlier-L2 only.
+- Self-influence does not expose a CLI threshold in `my_example`; it relies on `SelfInfTrainer` default `dot_threshold=0.0`.
+- `run_grpo_gemma.sh` defaults to:
+  - `--train-micro-batch-size 4`
+  - `--num-generations 4`
+- `my_example/train.py` sets both `mini_batch_size` and `train_micro_batch_size` to the same value, so `gradient_accumulation_steps=1` and DBC runs on the full prompt micro-batch rather than on a smaller accumulated sub-batch.
+- Under those defaults, the effective DBC screening window is `4 prompts * 4 generations = 16` trajectories per actor train step.
+- `GRPOLearner` always registers DBC metrics (`skipped_samples`, `grad_norm_mean`, `grad_norm_std`, `self_inf_dot_mean`, `self_inf_dot_std`, `self_inf_kept_fraction`) so TensorBoard/exported logs can confirm whether filtering logic ran and whether any samples were actually dropped.
+
+### Known risks / TODO
+
+- Enabling DBC guarantees the filtering code path runs, but it does not guarantee that any sample will be removed on every step; that still depends on the observed gradient statistics and the chosen threshold.
+- If `train_micro_batch_size` or `num_generations` is reduced, the effective DBC window shrinks and filtering becomes less informative.
+
+## 2026-03-08 - my_example DBC screening window breakdown
+
+### Scope
+
+- 无代码改动。
+- Broke down the exact screening window for each DBC variant in `my_example`, distinguishing the scoring/comparison window from the final gradient aggregation window.
+
+### Changed files
+
+1. `develop.md`
+
+### Validation
+
+- `nl -ba tunix/rl/robust_trainer.py | sed -n '39,110p'`
+- `nl -ba tunix/rl/self_inf_trainer.py | sed -n '50,140p'`
+- `nl -ba my_example/run_grpo_gemma.sh | sed -n '103,122p'`
+- `nl -ba my_example/train.py | sed -n '101,121p'`
+- `nl -ba tunix/rl/rl_cluster.py | sed -n '519,549p'`
+
+### Validation results
+
+- In `my_example`, the default actor-step batch entering DBC is:
+  - `train_micro_batch_size=4`
+  - `num_generations=4`
+  - therefore `4 * 4 = 16` trajectory-level samples per actor step.
+- Outlier-L2 (`RobustTrainer`) computes gradient norms, mean, std, and cutoff over all `16` trajectories in the actor step.
+- Self-inf batch computes one mean gradient over all `16` trajectories, then scores each trajectory against that same batch mean.
+- Self-inf group reshapes the `16` trajectories into `4` prompt groups of size `4`, then scores each trajectory only against its own group mean.
+- Even in self-inf group mode, after masking, the final gradient is still averaged over all kept trajectories in the full actor step, not separately per group.
+
+### Known risks / TODO
+
+- The phrase “screening window” is ambiguous for self-inf group because its local scoring window is `4`, but its final update still aggregates across up to `16` kept trajectories from the whole actor step.
+- If `batch_size` is not divisible by `num_generations`, self-inf group falls back to batch-scope scoring.
+
+## 2026-03-08 - DeepScaler default-config DBC method recommendation
+
+### Scope
+
+- 无代码改动。
+- Evaluated which DBC variants are meaningful under the current DeepScaler defaults (`train_micro_batch_size=1`, `num_generations=2`) and summarized the recommended usage for baseline, outlier-L2, self-inf-batch, and self-inf-group.
+
+### Changed files
+
+1. `develop.md`
+
+### Validation
+
+- `nl -ba examples/deepscaler/run_train.sh | sed -n '19,38p'`
+- `nl -ba tunix/rl/robust_trainer.py | sed -n '65,91p'`
+- `nl -ba tunix/rl/self_inf_trainer.py | sed -n '78,126p'`
+- `nl -ba tunix/rl/rl_cluster.py | sed -n '519,549p'`
+
+### Validation results
+
+- DeepScaler defaults imply an actor-step DBC window of `1 * 2 = 2` trajectories.
+- Under a 2-sample window, outlier-L2 with `curation_threshold=3.0` is effectively non-operative for filtering, because the cutoff is at least the larger of the two norms.
+- Under the same defaults, self-inf batch and self-inf group are equivalent because there is only one GRPO group per actor step (`train_micro_batch_size=1`, `num_generations=2`).
+- Therefore, under strict current defaults:
+  - baseline remains the main control run,
+  - outlier-L2 should not be prioritized,
+  - only one self-inf variant needs to be tried because batch/group collapse to the same behavior.
+
+### Known risks / TODO
+
+- If future DeepScaler experiments increase `train_micro_batch_size`, these conclusions no longer hold: outlier-L2 becomes viable and self-inf batch/group diverge.
+- If the user wants DBC to reflect its intended batch-level behavior rather than a 2-sample within-prompt filter, `train_micro_batch_size` must be increased.
+
+## 2026-03-08 - DeepScaler DBC knob distinction: train_micro_batch_size vs num_generations
+
+### Scope
+
+- 无代码改动。
+- Clarified which DBC windows are controlled by `train_micro_batch_size` versus `num_generations`, and when each knob should be preferred under DeepScaler defaults.
+
+### Changed files
+
+1. `develop.md`
+
+### Validation
+
+- `nl -ba tunix/rl/robust_trainer.py | sed -n '39,110p'`
+- `nl -ba tunix/rl/self_inf_trainer.py | sed -n '50,140p'`
+- `nl -ba examples/deepscaler/run_train.sh | sed -n '19,38p'`
+
+### Validation results
+
+- For outlier-L2 and self-inf-batch, the actor-step scoring window scales with `train_micro_batch_size * num_generations`.
+- For self-inf-group, the local group-scoring window scales with `num_generations`, while the number of groups scales with `train_micro_batch_size`.
+- With DeepScaler defaults (`train_micro_batch_size=1`, `num_generations=2`), increasing only `num_generations` enlarges the within-prompt window but does not create cross-prompt grouping; self-inf-group still collapses to self-inf-batch as long as `train_micro_batch_size=1`.
+- Increasing `train_micro_batch_size` is therefore the necessary change when the goal is to recover batch-level behavior or to make self-inf batch/group differ.
+
+### Known risks / TODO
+
+- Increasing either knob raises per-step trajectory count and therefore DBC compute cost.
+- Increasing `num_generations` also changes the GRPO algorithmic shape, not just the batching geometry, so it is a less isolated DBC-only intervention than increasing `train_micro_batch_size`.
+
+## 2026-03-08 - DeepScaler focus recommendation for self-inf-group
+
+### Scope
+
+- 无代码改动。
+- Clarified the recommended comparison setup when prioritizing only `baseline` and `self-inf-group` for DeepScaler, including the need for matched `num_generations`.
+
+### Changed files
+
+1. `develop.md`
+
+### Validation
+
+- `nl -ba my_example/run_grpo_gemma.sh | sed -n '103,122p'`
+- `nl -ba tunix/rl/self_inf_trainer.py | sed -n '88,102p'`
+- `nl -ba examples/deepscaler/run_train.sh | sed -n '19,38p'`
+
+### Validation results
+
+- `my_example`’s packaged training script uses `num_generations=4`.
+- `self-inf-group` uses `num_generations` as its local group size.
+- Therefore, if the goal is to transfer the best-performing `self-inf-group` setup into DeepScaler with minimal moving parts, raising DeepScaler `num_generations` from `2` to `4` is the most direct first knob.
+- A fair DBC ablation requires matched GRPO geometry, so the baseline run must also use the same `num_generations=4`; otherwise the result confounds curation with a changed GRPO sampling configuration.
+
+### Known risks / TODO
+
+- With `train_micro_batch_size=1`, `self-inf-group` still remains equivalent to `self-inf-batch`; this is acceptable only if the experiment goal is baseline-vs-group, not group-vs-batch.
+- If the matched `num_generations=4` pair shows promise, the next step is to increase `train_micro_batch_size` to make group-vs-batch behavior meaningfully diverge.
+
+## 2026-03-08 - DeepScaler baseline num_generations=4 minimal run
+
+### Scope
+
+- 无代码改动。
+- Ran a minimal DeepScaler baseline validation with `num_generations=4`, `num_batches=1`, `num_epochs=1`, and `max_steps=1` to check whether the matched baseline shape fits before trying self-inf-group.
+
+### Changed files
+
+1. `develop.md`
+
+### Validation
+
+- `source .venv_sglang312/bin/activate && RUN_TS=$(date +%Y%m%d_%H%M%S) && CHECKPOINT_DIR=/tmp/deepscaler_ckpt_${RUN_TS} METRICS_LOG_DIR=/tmp/deepscaler_tb_${RUN_TS} ./examples/deepscaler/run_train.sh --rollout-engine sglang_jax --rollout-tp 2 --num-generations 4 --num-batches 1 --num-epochs 1 --max-steps 1`
+- `ps -ef | rg 'train_deepscaler_nb|run_train.sh|sglang|python examples/deepscaler'`
+- `python - <<'PY' ... EventAccumulator('/tmp/deepscaler_tb_20260308_011741') ... PY`
+
+### Validation results
+
+- `sglang_jax` extend/decode precompile completed successfully.
+- The run reached rollout generation, reward evaluation, and actor training startup.
+- The run failed on the actor train-step compile path with:
+  - `jax.errors.JaxRuntimeError: RESOURCE_EXHAUSTED`
+  - `XLA:TPU compile permanent error`
+  - `Ran out of memory in memory space sflag`
+- The failure occurred in `partial_train_step(train_example)` after actor training began, not during rollout-engine precompile.
+- TensorBoard output was created, but only compile-duration tags were present; no successful actor training scalar was committed before failure.
+
+### Known risks / TODO
+
+- This failure indicates the matched `num_generations=4` baseline is already too large for the current DeepScaler actor-step compile shape, even with only `1` batch and `1` optimizer step.
+- The next levers to try should reduce actor-step compile pressure, e.g. lower `total_generation_steps`, lower `max_prompt_length`, or lower the actor-step trajectory count before comparing baseline and self-inf-group.
+
+## 2026-03-08 - DeepScaler alternative sharding checks for num_generations=4
+
+### Scope
+
+- 无代码改动。
+- Tested whether changing only the actor training mesh could preserve `num_generations=4` without changing `total_generation_steps`.
+
+### Changed files
+
+1. `develop.md`
+
+### Validation
+
+- `source .venv_sglang312/bin/activate && ... ./examples/deepscaler/run_train.sh --mesh-fsdp 1 --mesh-tp 4 --rollout-engine sglang_jax --rollout-tp 2 --num-generations 4 --num-batches 1 --num-epochs 1 --max-steps 1`
+- `source .venv_sglang312/bin/activate && ... ./examples/deepscaler/run_train.sh --mesh-fsdp 4 --mesh-tp 1 --rollout-engine sglang_jax --rollout-tp 2 --num-generations 4 --num-batches 1 --num-epochs 1 --max-steps 1`
+
+### Validation results
+
+- `mesh=(1,4)` failed immediately during model loading with an invalid sharding error because one parameter had full shape `(1536, 2, 128)` and its dimension `2` is not divisible by `tp=4`.
+- `mesh=(4,1)` was valid and progressed through rollout precompile and into actor training, but it failed at the same actor compile stage with a worse TPU `sflag` compile OOM:
+  - previous `2x2` run: about `2.3K / 2.0K sflag`
+  - `4x1` run: about `6.2K / 2.0K sflag`
+- Conclusion: changing only the training mesh does not solve the matched `num_generations=4` baseline in this environment.
+
+### Known risks / TODO
+
+- The remaining viable levers, without changing `total_generation_steps`, are now mostly algorithmic or training-regime changes rather than simple sharding changes:
+  - revert `num_generations`
+  - change prompt count geometry
+  - switch to LoRA / lighter trainable state
+  - alter the comparison protocol rather than forcing the exact matched baseline shape
+
+## 2026-03-08 - DeepScaler quantization / QLoRA feasibility review
+
+### Scope
+
+- 无代码改动。
+- Reviewed whether the current `examples/deepscaler` training path can use quantization to mitigate the `num_generations=4` actor compile HBM/sflag issue without changing `total_generation_steps`.
+
+### Changed files
+
+1. `develop.md`
+
+### Validation
+
+- `rg -n "train-with-lora|lora-rank|lora-alpha|weight_qtype|tile_size|LoraProvider|qwix|quant|qlora|nf4|int8" examples/deepscaler tunix tests -S`
+- `sed -n '470,520p' examples/deepscaler/train_deepscaler_nb.py`
+- `sed -n '640,760p' examples/deepscaler/train_deepscaler_nb.py`
+- `sed -n '840,930p' examples/deepscaler/train_deepscaler_nb.py`
+- `sed -n '1,140p' tunix/cli/base_config.yaml`
+- `sed -n '1,220p' tunix/cli/utils/model.py`
+- `sed -n '55,95p' tests/cli/utils/model_test.py`
+
+### Validation results
+
+- `examples/deepscaler/train_deepscaler_nb.py` currently exposes only standard LoRA flags:
+  - `--train-with-lora`
+  - `--lora-rank`
+  - `--lora-alpha`
+- Its `get_lora_model(...)` helper constructs `qwix.LoraProvider` with only `module_path`, `rank`, and `alpha`; it does not pass quantization-related kwargs such as `weight_qtype` or `tile_size`.
+- The repository does have a QLoRA-style path in the generic CLI stack:
+  - `tunix/cli/base_config.yaml` defines `lora_config.weight_qtype: "nf4"` and `tile_size: 256`
+  - `tunix/cli/utils/model.py` forwards `weight_qtype` and `tile_size` into `qwix.LoraProvider`
+  - `tests/cli/utils/model_test.py` covers a quantized case using `weight_qtype: "int8"`
+- Conclusion: quantized LoRA support exists in the repo in general, but it is not wired into the current DeepScaler example entrypoint.
+
+### Known risks / TODO
+
+- The only no-code-change lever already available in DeepScaler is `--train-with-lora`; true QLoRA for this path would require a new branch in the DeepScaler LoRA model creation path.
+- Even with quantized LoRA, this may reduce trainable-state / weight representation pressure but does not guarantee the actor train-step compile issue disappears; the failure was in actor-step TPU compile (`sflag`), not rollout initialization.
+
+## 2026-03-08 - DeepScaler LoRA sanity check under sglang_jax
+
+### Scope
+
+- 无代码改动。
+- Tested the only currently exposed lightweight DeepScaler training path (`--train-with-lora`) to see whether it can serve as an immediate substitute for quantized training under `num_generations=4`.
+
+### Changed files
+
+1. `develop.md`
+
+### Validation
+
+- `source .venv_sglang312/bin/activate && ... ./examples/deepscaler/run_train.sh --rollout-engine sglang_jax --rollout-tp 2 --num-generations 4 --num-batches 1 --num-epochs 1 --max-steps 1 --train-with-lora`
+
+### Validation results
+
+- The run did not reach the previous actor compile OOM point.
+- It failed earlier during `RLCluster` rollout initialization with:
+  - `RuntimeError: sglang_jax mappings not available for Qwen2.`
+- This indicates that the currently exposed DeepScaler LoRA path is not yet compatible with the `sglang_jax` rollout setup used by the DeepScaler example.
+
+### Known risks / TODO
+
+- As of this check, `--train-with-lora` is not an immediate no-code workaround for the `num_generations=4` DeepScaler configuration under `sglang_jax`.
+- If quantized LoRA is desired here, the practical path is still code changes in the DeepScaler entrypoint, likely together with rollout/model-mapping compatibility work for the LoRA-wrapped actor.
+
+## 2026-03-08 - DeepScaler built-in dtype / quant knob analysis
+
+### Scope
+
+- 无代码改动。
+- Reviewed only the existing DeepScaler script knobs related to dtype / quantization-like settings, without using LoRA and without code changes.
+
+### Changed files
+
+1. `develop.md`
+
+### Validation
+
+- `rg -n "dtype|bf16|float16|fp8|auto|reward_advantage|train_model_dtype|rollout.*dtype|kv-cache" examples/deepscaler/train_deepscaler_nb.py examples/deepscaler/run_train.sh -S`
+- `sed -n '600,730p' examples/deepscaler/train_deepscaler_nb.py`
+- `sed -n '730,860p' examples/deepscaler/train_deepscaler_nb.py`
+- `sed -n '1,140p' examples/deepscaler/run_train.sh`
+
+### Validation results
+
+- The current DeepScaler script exposes these precision knobs:
+  - `--train-dtype fp32|bf16`
+  - `--reward-advantage-dtype fp32|bf16`
+  - `--rollout-sglang-jax-dtype auto|float32|bfloat16|float16`
+  - `--rollout-sglang-jax-kv-cache-dtype auto|bf16|fp8_e5m2|fp8_e4m3`
+- Only `rollout-sglang-jax-kv-cache-dtype=fp8_*` is an actual lower-precision / quantization-like setting in the current no-code DeepScaler path.
+- The actor/reference training path does not expose int8/nf4/fp8 weight quantization; it is limited to `fp32` or `bf16`, and the shell default already uses `bf16`.
+- Therefore, the current no-code dtype levers mostly help rollout memory, not the actor train-step compile path that previously failed.
+
+### Known risks / TODO
+
+- Because the observed failure was in the actor train-step TPU compile (`sflag`), changing only rollout dtype or rollout KV-cache dtype is unlikely to resolve the core issue.
+- The only actor-side precision improvement already available without code changes is ensuring `--train-dtype bf16` and `--reward-advantage-dtype bf16`, which are already the shell defaults.
+
+## 2026-03-08 - DeepScaler rollout vs actor resource-control knob review
+
+### Scope
+
+- 无代码改动。
+- Reviewed which existing DeepScaler flags actually change rollout-vs-actor resource usage, versus those that only change rollout throughput.
+
+### Changed files
+
+1. `develop.md`
+
+### Validation
+
+- `rg -n "mesh-fsdp|mesh-tp|rollout-tp|rollout-dp|grpo-max-concurrency|rollout-prompt-batch-size|fast-path|offload-to-cpu|colocated|share" examples/deepscaler/train_deepscaler_nb.py tunix/rl tunix/generate -S`
+- `rg -n "mem_fraction_static|rollout_sglang_jax_mem_fraction_static|hbm_utilization|swap_space|rollout_tp_override|create_device_mesh\\(|role_to_mesh" examples/deepscaler/train_deepscaler_nb.py tunix/rl tunix/generate -S`
+- `sed -n '190,260p' examples/deepscaler/train_deepscaler_nb.py`
+- `sed -n '360,460p' examples/deepscaler/train_deepscaler_nb.py`
+- `sed -n '560,640p' examples/deepscaler/train_deepscaler_nb.py`
+- `sed -n '770,810p' examples/deepscaler/train_deepscaler_nb.py`
+- `sed -n '220,320p' tunix/rl/rl_cluster.py`
+
+### Validation results
+
+- The closest existing "rollout vs actor proportion" knobs for the current `sglang_jax` path are:
+  - `--rollout-sglang-jax-mem-fraction-static` with default `0.2`
+  - `--rollout-tp`
+- `--rollout-sglang-jax-mem-fraction-static` controls how much static memory the `sglang_jax` rollout side reserves.
+- `--rollout-tp` controls how many devices are used in the rollout mesh; DeepScaler builds the rollout mesh from a subset of the training-mesh devices.
+- `--mesh-fsdp` and `--mesh-tp` change the actor/reference training mesh geometry, not a direct rollout/actor split ratio.
+- `--rollout-prompt-batch-size` and `--grpo-max-concurrency` mainly affect rollout pressure / throughput, not the actor train-step compile shape.
+
+### Known risks / TODO
+
+- These rollout-side knobs can reduce rollout memory pressure, but the previously observed failure was in the actor train-step TPU compile (`sflag`), so they may not fix the core issue by themselves.
+- If a minimal no-code experiment is desired, the lowest-risk rollout-side levers are lowering `--rollout-sglang-jax-mem-fraction-static` and possibly lowering `--rollout-prompt-batch-size`.
+
+## 2026-03-08 - DeepScaler rollout memory-fraction / prompt-batch experiment
+
+### Scope
+
+- 无代码改动。
+- Tested whether reducing rollout-side static memory reservation and rollout prompt batch size helps the `num_generations=4` DeepScaler actor compile failure.
+
+### Changed files
+
+1. `develop.md`
+
+### Validation
+
+- `source .venv_sglang312/bin/activate && ... ./examples/deepscaler/run_train.sh --rollout-engine sglang_jax --rollout-tp 2 --num-generations 4 --rollout-sglang-jax-mem-fraction-static 0.1 --rollout-prompt-batch-size 2 --num-batches 1 --num-epochs 1 --max-steps 1`
+
+### Validation results
+
+- The run completed `sglang_jax` extend/decode precompile and entered rollout/reward computation.
+- It also reached `Actor Training: 0/1`, so the reduced rollout settings did not break the training pipeline.
+- However, the run still failed in the same actor train-step compile location:
+  - `partial_train_step(train_example)`
+  - `jax.errors.JaxRuntimeError: RESOURCE_EXHAUSTED`
+  - `Ran out of memory in memory space sflag`
+- The reported compile pressure was effectively unchanged from the previous baseline:
+  - `Used 2.3K of 2.0K sflag`
+  - exceeded by `344B`
+
+### Known risks / TODO
+
+- Lowering `rollout_sglang_jax_mem_fraction_static` from `0.2` to `0.1` and lowering rollout prompt batch size from `4` to `2` did not change the actor compile bottleneck.
+- This suggests the core issue is actor-step compile shape rather than rollout-side reserved memory.
+
+## 2026-03-08 - DeepScaler rollout_tp=1 experiment
+
+### Scope
+
+- 无代码改动。
+- Tested whether reducing the `sglang_jax` rollout mesh from two devices to one device changes the `num_generations=4` actor compile failure.
+
+### Changed files
+
+1. `develop.md`
+
+### Validation
+
+- `source .venv_sglang312/bin/activate && ... ./examples/deepscaler/run_train.sh --rollout-engine sglang_jax --rollout-tp 1 --num-generations 4 --rollout-sglang-jax-mem-fraction-static 0.1 --rollout-prompt-batch-size 2 --num-batches 1 --num-epochs 1 --max-steps 1`
+
+### Validation results
+
+- The run used `rollout mesh shape: (1, 1)` and completed `sglang_jax` extend/decode precompile successfully.
+- It progressed through rollout/reward computation and reached `Actor Training: 0/1`.
+- It then failed at the same actor train-step compile point with the same TPU `sflag` compile OOM:
+  - `partial_train_step(train_example)`
+  - `Used 2.3K of 2.0K sflag`
+  - exceeded by `344B`
+- Therefore, reducing rollout device count did not materially change the failure mode.
+
+### Known risks / TODO
+
+- The current evidence indicates that shrinking rollout-side resource usage is not enough to make `num_generations=4 + total_generation_steps=7680` fit in the current actor compile shape.
+- The next viable levers are likely actor-side or algorithm-shape changes rather than further rollout-side resource tuning.
+
+## 2026-03-08 - DeepScaler next-step recommendation after rollout-side experiments
+
+### Scope
+
+- 无代码改动。
+- Summarized the practical next steps after confirming that rollout-side resource knobs do not change the `num_generations=4` actor compile failure.
+
+### Changed files
+
+1. `develop.md`
+
+### Validation
+
+- No new command was run in this step.
+- Recommendation is based on the earlier `num_generations=4` DeepScaler runs, including:
+  - baseline compile failure
+  - alternative mesh checks
+  - rollout memory-fraction / prompt-batch reduction
+  - `rollout_tp=1`
+
+### Validation results
+
+- All tested rollout-side reductions preserved rollout precompile and training-pipeline progress, but none changed the actor train-step compile error.
+- The compile failure remained at the same location with the same TPU `sflag` pressure (`2.3K / 2.0K`, exceeded by `344B`).
+- Therefore, further rollout-side tuning is unlikely to solve the problem.
+
+### Known risks / TODO
+
+- The remaining promising no-code lever is actor-shape reduction that does not change `total_generation_steps`, e.g. reducing `max_prompt_length`.
+- If `num_generations=4` must be kept and actor-shape reduction still fails, the likely conclusion is that this setup is not feasible in the current full-finetune DeepScaler path without changing the training regime or adding new code support.
+
+## 2026-03-08 - DeepScaler official-8k constraint assessment
+
+### Scope
+
+- 无代码改动。
+- Re-assessed the remaining options under the stricter user constraint:
+  - keep official 8k-aligned sequence setting
+  - keep full finetune
+  - keep `num_generations=4`
+  - no code changes
+
+### Changed files
+
+1. `develop.md`
+
+### Validation
+
+- No new command was run in this step.
+- Recommendation is based on all earlier DeepScaler runs and on the current script defaults / argument semantics.
+
+### Validation results
+
+- Under these constraints, the actor-side single-step shape is already near its minimum:
+  - `train_micro_batch_size=1` cannot be reduced further
+  - `num_generations=4` is fixed by experiment design
+  - the official 8k-aligned prompt+generation length is fixed by user requirement
+- The previously tested no-code levers have all failed to change the actor compile bottleneck:
+  - rollout-side memory fraction
+  - rollout prompt batch size
+  - rollout TP
+  - training mesh reshaping
+  - existing dtype knobs
+- Therefore, there is no credible remaining no-code path in the current DeepScaler full-finetune script to make this exact setup fit.
+
+### Known risks / TODO
+
+- If the exact `official-8k + full-finetune + num_generations=4` setup must be preserved, the next step necessarily moves into code or regime changes rather than shell-level tuning.
+- The most practical fallback without code changes remains reverting the comparison to `num_generations=2`.
+
+## 2026-03-08 - DeepScaler DBC choice under num_generations=2
+
+### Scope
+
+- 无代码改动。
+- Re-evaluated which DBC variant is worth testing after reverting DeepScaler back to `num_generations=2`.
+
+### Changed files
+
+1. `develop.md`
+
+### Validation
+
+- `sed -n '500,560p' tunix/rl/rl_cluster.py`
+- `sed -n '1,180p' tunix/rl/self_inf_trainer.py`
+- `sed -n '1,140p' tunix/rl/robust_trainer.py`
+
+### Validation results
+
+- `rl_cluster.py` selects:
+  - `SelfInfTrainer` only when `use_dynamic_batch_curation` is enabled and `TUNIX_DBC_VARIANT=self_inf`
+  - otherwise `RobustTrainer` for standard DBC
+- Under the current DeepScaler default geometry:
+  - `train_micro_batch_size=1`
+  - `num_generations=2`
+  - actor-step DBC window size is `2`
+- In this geometry:
+  - `outlier-l2` has very weak filtering power because it computes `cutoff = mean + threshold * std` over only two samples
+  - `self-inf-batch` and `self-inf-group` collapse to the same behavior, because group scope reshapes the two trajectories into exactly one group of size `2`
+- Therefore, the only meaningful experiment pair is:
+  - `baseline`
+  - one self-influence variant (preferably labeled `self-inf-group` for continuity with prior experiments)
+
+### Known risks / TODO
+
+- With only two trajectories per actor step, even self-influence curation is testing a very local signal: agreement between the two generations from the same prompt.
+- Running both `self-inf-batch` and `self-inf-group` would be redundant in the current geometry.
+
+## 2026-03-08 - Self-inf-group filtering behavior at group size 2
+
+### Scope
+
+- 无代码改动。
+- Clarified whether `self-inf-group` can actually filter samples when `num_generations=2`, i.e. each GRPO group contains only two trajectories.
+
+### Changed files
+
+1. `develop.md`
+
+### Validation
+
+- No new command was run in this step.
+- Analysis is based on the existing `SelfInfTrainer` implementation already inspected in `tunix/rl/self_inf_trainer.py`.
+
+### Validation results
+
+- `self-inf-group` computes each sample score as the dot product between that sample gradient and its group-mean gradient.
+- With group size `2`, if the two per-sample gradients are `g1` and `g2`, then the group mean is:
+  - `m = (g1 + g2) / 2`
+- The two keep/drop scores become:
+  - `score1 = g1 · m = (||g1||^2 + g1·g2) / 2`
+  - `score2 = g2 · m = (||g2||^2 + g1·g2) / 2`
+- Because the default threshold is `0.0`, a sample is dropped only when its score is negative.
+- Therefore, filtering is still possible with group size `2`, but it requires strong anti-alignment between the two gradients, especially when their norms are similar.
+- If the two gradients have equal norm, both scores are always non-negative, so no filtering happens.
+- In practice, with group size `2`, `self-inf-group` behaves more like a detector for highly contradictory generation pairs than a broad batch-curation mechanism.
+
+### Known risks / TODO
+
+- Under the current DeepScaler geometry, `self-inf-group` can filter, but the skip rate may be low unless the two generations for a prompt produce sharply conflicting gradients.
+- This reinforces the recommendation to compare only `baseline` vs one self-influence variant, and to inspect `skipped_samples` / `self_inf_kept_fraction` rather than assuming the curation is active.
+
+## 2026-03-08 - DeepScaler self-inf-group command feasibility check
+
+### Scope
+
+- 无代码改动。
+- Verified whether the current `examples/deepscaler` entrypoint can enable `self-inf-group` purely via command-line arguments or environment variables.
+
+### Changed files
+
+1. `develop.md`
+
+### Validation
+
+- `rg -n "use_dynamic_batch_curation|curation_threshold|TUNIX_DBC_VARIANT|TUNIX_DBC_SELF_INF_SCOPE|TUNIX_GRPO_NUM_GENERATIONS|SelfInfTrainer|RobustTrainer" examples/deepscaler/train_deepscaler_nb.py my_example/train.py my_example/config.py tunix/rl/rl_cluster.py -S`
+- `sed -n '900,980p' examples/deepscaler/train_deepscaler_nb.py`
+- `sed -n '100,140p' my_example/train.py`
+- `sed -n '150,180p' my_example/config.py`
+
+### Validation results
+
+- `examples/deepscaler/train_deepscaler_nb.py` currently does not expose DBC CLI flags.
+- Its `RLTrainingConfig(...)` construction does not pass:
+  - `use_dynamic_batch_curation`
+  - `curation_threshold`
+- `rl_cluster.py` only selects `SelfInfTrainer` when both conditions are true:
+  - `use_dynamic_batch_curation=True`
+  - `TUNIX_DBC_VARIANT=self_inf`
+- Therefore, setting only environment variables is insufficient for DeepScaler today; the entrypoint never turns on `use_dynamic_batch_curation`.
+
+### Known risks / TODO
+
+- The current DeepScaler example cannot run `self-inf-group` by command alone.
+- To make the comparison runnable, the DeepScaler entrypoint needs additional wiring similar to `my_example`, but this requires code changes.
+
+## 2026-03-08 - DeepScaler DBC CLI wiring and agentic GRPO compatibility fixes
+
+### Scope
+
+- 代码改动。
+- Implemented `self-inf-group` CLI wiring for `examples/deepscaler`.
+- Added the minimum agentic GRPO compatibility fixes required for DeepScaler DBC to run end-to-end.
+- Added a DeepScaler README example for the new DBC command.
+
+### Changed files
+
+1. `examples/deepscaler/train_deepscaler_nb.py`
+2. `tunix/rl/experimental/agentic_grpo_learner.py`
+3. `examples/deepscaler/README.md`
+4. `develop.md`
+
+### Validation
+
+- `source .venv_sglang312/bin/activate && python -m py_compile examples/deepscaler/train_deepscaler_nb.py tunix/rl/experimental/agentic_grpo_learner.py`
+- `source .venv_sglang312/bin/activate && python examples/deepscaler/train_deepscaler_nb.py --help | rg "use-dynamic-batch-curation|use-dbc-outlier-l2|use-dbc-self-inf-batch|use-dbc-self-inf-group|curation-threshold" -n`
+- `source .venv_sglang312/bin/activate && python examples/deepscaler/train_deepscaler_nb.py --use-dbc-self-inf-batch --use-dbc-self-inf-group`
+- `source .venv_sglang312/bin/activate && python examples/deepscaler/train_deepscaler_nb.py --model-path <local model> --train-dataset-path <local train data> --test-dataset-path <local test data> --checkpoint-dir /tmp/deepscaler_ckpt_20260308_035419 --metrics-log-dir /tmp/deepscaler_tb_20260308_035419 --mesh-fsdp 2 --mesh-tp 2 --rollout-engine vanilla --smoke-test --use-dynamic-batch-curation --use-dbc-self-inf-group`
+- `source .venv_sglang312/bin/activate && python - <<'PY' ... EventAccumulator('/tmp/deepscaler_tb_20260308_035419') ... PY`
+- `source .venv_sglang312/bin/activate && python examples/deepscaler/train_deepscaler_nb.py --model-path <local model> --train-dataset-path <local train data> --test-dataset-path <local test data> --checkpoint-dir /tmp/deepscaler_ckpt_20260308_035838 --metrics-log-dir /tmp/deepscaler_tb_20260308_035838 --mesh-fsdp 2 --mesh-tp 2 --rollout-engine vanilla --smoke-test`
+
+### Validation results
+
+- `examples/deepscaler/train_deepscaler_nb.py` now exposes DBC flags and enforces expected mutual exclusion for self-inf variants.
+- DeepScaler now forwards:
+  - `use_dynamic_batch_curation`
+  - `curation_threshold`
+  into `RLTrainingConfig`.
+- DeepScaler now sets and clears the self-inf environment variables needed by `rl_cluster.py`:
+  - `TUNIX_DBC_VARIANT`
+  - `TUNIX_DBC_SELF_INF_SCOPE`
+  - `TUNIX_GRPO_NUM_GENERATIONS`
+- `agentic_grpo_learner.py` was aligned with standard GRPO behavior by:
+  - passing only `train_example` into the actor trainer input dict
+  - normalizing single-sample tensors with `jnp.atleast_2d/1d` in agentic GRPO loss
+  - registering DBC-related metrics in `with_rl_metrics_to_log(...)`
+- The DeepScaler DBC smoke run completed successfully with exit code `0`.
+- The resulting event file contained the expected self-inf metrics:
+  - `actor/train/self_inf_dot_mean`
+  - `actor/train/self_inf_dot_std`
+  - `actor/train/self_inf_kept_fraction`
+  - `actor/train/skipped_samples`
+- A matching vanilla baseline smoke run also completed successfully with exit code `0`, confirming the non-DBC path still works after the compatibility fixes.
+
+### Known risks / TODO
+
+- `examples/deepscaler/run_train.sh` still unconditionally passes `--enable-rollout-fast-path`, so using that wrapper with `--rollout-engine vanilla` remains incompatible; validation therefore used direct `train_deepscaler_nb.py` invocations for vanilla smoke.
+- The new DeepScaler CLI also exposes outlier-L2 flags, but this turn only fully validated the `self-inf-group` path that the user requested.
+
+## 2026-03-08 - DeepScaler standard wrapper self-inf-group sanity check
+
+### Scope
+
+- 无代码改动。
+- Performed an additional sanity check using the actual user-facing wrapper command shape (`run_train.sh` with `sglang_jax`) after the DBC fixes landed.
+
+### Changed files
+
+1. `develop.md`
+
+### Validation
+
+- `source .venv_sglang312/bin/activate && RUN_TS=$(date +%Y%m%d_%H%M%S) && CHECKPOINT_DIR=/tmp/deepscaler_ckpt_${RUN_TS} METRICS_LOG_DIR=/tmp/deepscaler_tb_${RUN_TS} ./examples/deepscaler/run_train.sh --smoke-test --use-dynamic-batch-curation --use-dbc-self-inf-group`
+
+### Validation results
+
+- The wrapper path successfully passed:
+  - argument parsing
+  - model / dataset loading
+  - `sglang_jax` extend precompile
+  - `sglang_jax` decode precompile
+  - rollout / reward computation
+  - entry into actor training
+- The run was then manually interrupted to avoid executing the full `315` steps currently implied by the wrapper defaults.
+- This interruption was intentional; it does not indicate a DBC regression.
+
+### Known risks / TODO
+
+- `run_train.sh --smoke-test` still inherits `MAX_STEPS=315` from the wrapper defaults, so it is not currently a true one-step smoke through the wrapper path.
+- The strongest completion proof remains the successful direct `train_deepscaler_nb.py --rollout-engine vanilla --smoke-test` runs, which verified both:
+  - `self-inf-group` end-to-end completion
+  - baseline end-to-end completion
+
+## 2026-03-09 - GitHub sync status check
+
+### Scope
+
+- 无代码改动。
+- Checked whether the current working tree contents are fully reflected on GitHub for the active branch.
+
+### Changed files
+
+1. `develop.md`
+
+### Validation
+
+- `git fetch origin`
+- `git rev-list --left-right --count origin/my-changes...HEAD`
+- `git status --short`
+- `git log --oneline --decorate -n 5 HEAD`
+
+### Validation results
+
+- `HEAD` and `origin/my-changes` are at the same commit: `1a357f7c15a1a6ad3582a97dc983698d414a6405`.
+- The working tree is not clean, so the current local contents are not fully on GitHub.
+- Modified tracked files currently not pushed as committed content:
+  - `develop.md`
+  - `examples/deepscaler/README.md`
+  - `examples/deepscaler/train_deepscaler_nb.py`
+  - `tunix/rl/experimental/agentic_grpo_learner.py`
+- Untracked paths also exist locally and are not on GitHub unless added and pushed later.
+
+### Known risks / TODO
+
+- Any conclusion about "already synced to GitHub" only applies to committed history on `origin/my-changes`; local uncommitted and untracked content remains outside GitHub.
+
+## 2026-03-09 - DeepScaler max prompt length behavior analysis
+
+### Scope
+
+- 无代码改动。
+- Analyzed what happens in `examples/deepscaler` training when a prompt exceeds `--max-prompt-length`, and whether skipping such samples is feasible.
+
+### Changed files
+
+1. `develop.md`
+
+### Validation
+
+- `rg -n "max-prompt-length|max_prompt_length|prompt length|prompt_length" examples/deepscaler tunix -S`
+- `sed -n '458,490p' examples/deepscaler/train_deepscaler_nb.py`
+- `sed -n '742,800p' examples/deepscaler/train_deepscaler_nb.py`
+- `sed -n '896,910p' examples/deepscaler/train_deepscaler_nb.py`
+- `sed -n '695,718p' tunix/generate/sampler.py`
+- `sed -n '25,55p' tunix/rl/agentic/utils.py`
+
+### Validation results
+
+- The DeepScaler training entrypoint does not currently filter overlong prompts before batching.
+- Overlong prompts can reach rollout, where sampler/cache constraints may fail first.
+- If execution proceeds, the training-side agentic padding path truncates prompts from the left to `max_prompt_length`.
+- Skipping such samples is feasible by adding a DeepScaler-specific filtering branch before batching, without changing baseline CLI structure.
+
+### Known risks / TODO
+
+- Any future fix should preserve the existing baseline command behavior and only add a branch for the new filtering behavior, per repo instructions.
+
+## 2026-03-09 - DeepScaler skip overlong prompts
+
+### Scope
+
+- Added a DeepScaler-specific data filtering branch so prompts longer than `--max-prompt-length` are skipped before batching and rollout.
+- Kept the existing CLI shape and did not touch `tunix/rl/robust_trainer.py` or `RLTrainingConfig`.
+
+### Changed files
+
+1. `examples/deepscaler/train_deepscaler_nb.py`
+2. `develop.md`
+
+### Validation
+
+- `python -m py_compile examples/deepscaler/train_deepscaler_nb.py`
+- `git diff -- examples/deepscaler/train_deepscaler_nb.py`
+- `nl -ba examples/deepscaler/train_deepscaler_nb.py | sed -n '458,525p'`
+
+### Validation results
+
+- Syntax check passed.
+- `create_datasets()` now computes each prompt's token length after chat templating, filters out rows whose `prompt_length` exceeds `max_prompt_length`, prints skip counts, removes the temporary `prompt_length` column, and only then converts the data to `grain.MapDataset`.
+- `run_training()` now passes `runtime["max_prompt_length"]` into `create_datasets()`, so the filter follows the effective runtime value, including smoke-test clamping.
+
+### Known risks / TODO
+
+- I did not run a full DeepScaler training smoke after this change; only syntax and local diff validation were completed.
+- If a dataset split is fully filtered out by a very small `max_prompt_length`, downstream training/eval may still fail due to empty batches.
+
+## 2026-03-09 - DeepScaler prompt filter scope clarification
+
+### Scope
+
+- 无代码改动。
+- Clarified when the DeepScaler overlong-prompt filter is active and which runtime knobs affect it.
+
+### Changed files
+
+1. `develop.md`
+
+### Validation
+
+- `nl -ba examples/deepscaler/train_deepscaler_nb.py | sed -n '458,518p'`
+- `nl -ba examples/deepscaler/train_deepscaler_nb.py | sed -n '742,777p'`
+- `nl -ba examples/deepscaler/train_deepscaler_nb.py | sed -n '922,927p'`
+
+### Validation results
+
+- The filter is active in the standard `run_training()` path whenever `max_prompt_length` is set to a positive value.
+- In the current CLI, that means it applies for normal runs and smoke runs; smoke mode only changes the effective threshold by clamping it to at most `512`.
+- The filter is independent of DBC flags, rollout engine choice, and most other training hyperparameters.
+
+### Known risks / TODO
+
+- A custom caller that bypasses `run_training()` or passes `max_prompt_length=None` / `<=0` into `create_datasets()` would bypass the filter.
+
+## 2026-03-09 - DeepScaler overlong-prompt smoke test
+
+### Scope
+
+- 无代码改动。
+- Ran a smoke test to validate that the new overlong-prompt filtering branch executes in the real DeepScaler training path.
+
+### Changed files
+
+1. `develop.md`
+
+### Validation
+
+- Prompt-length distribution probe:
+  - `source .venv_sglang312/bin/activate && python - <<'PY' ... PY`
+- Direct CPU smoke command:
+  - `source .venv_jax081/bin/activate && export JAX_PLATFORMS=cpu && export TOKENIZERS_PARALLELISM=false && python -u examples/deepscaler/train_deepscaler_nb.py --model-path /home/lhf_hongfu_gmail_com/.cache/huggingface/hub/models--deepseek-ai--DeepSeek-R1-Distill-Qwen-1.5B/snapshots/ad9f0ae0864d7fbcd1cd905e3c6c5b069cc8b562 --train-dataset-path /home/lhf_hongfu_gmail_com/.cache/huggingface/hub/datasets--agentica-org--DeepScaleR-Preview-Dataset/snapshots/b6ae8c60f5c1f2b594e2140b91c49c9ad0949e29/deepscaler.json --test-dataset-path /home/lhf_hongfu_gmail_com/.cache/huggingface/hub/datasets--HuggingFaceH4--aime_2024/snapshots/2fe88a2f1091d5048c0f36abc874fb997b3dd99a/data/train-00000-of-00001.parquet --checkpoint-dir /tmp/deepscaler_ckpt_filter_smoke_$(date +%Y%m%d_%H%M%S) --metrics-log-dir /tmp/deepscaler_tb_filter_smoke_$(date +%Y%m%d_%H%M%S) --mesh-fsdp 1 --mesh-tp 1 --rollout-engine vanilla --batch-size 1 --mini-batch-size 1 --train-micro-batch-size 1 --num-batches 1 --num-test-batches 1 --num-epochs 1 --max-steps 1 --eval-every-n-steps 1 --num-generations 2 --max-prompt-length 128 --total-generation-steps 8 --top-p 1.0 --top-k 50 --smoke-test`
+
+### Validation results
+
+- TPU-backed smoke could not be used in this session because TPU initialization failed in both local environments:
+  - one path reported `libtpu` multi-process lockfile initialization failure
+  - another path reported `/dev/vfio/0` busy
+- CPU fallback smoke completed successfully with exit code `0`.
+- The new filter branch executed in the real training path and printed:
+  - `Filtered overlong prompts (max_prompt_length=128): train skipped 7907/40315, test skipped 10/30.`
+- The run progressed through:
+  - dataset preprocessing
+  - overlong prompt filtering
+  - model loading
+  - rollout / actor training initialization
+  - one actor training step
+  - normal process exit
+- An earlier CPU smoke attempt failed before completion because `--num-generations 1` violates the GRPO config requirement (`num_generations > 1`).
+- Another earlier CPU smoke attempt reached rollout and exposed an unrelated vanilla sampling issue with `top_k=-1`; switching to `--top-k 50` resolved that for the smoke path.
+
+### Known risks / TODO
+
+- This validation used a CPU fallback and a deliberately reduced geometry (`mesh 1x1`, `batch-size 1`, `total-generation-steps 8`, `max_prompt_length 128`), so it proves the filter branch and end-to-end control flow, not TPU performance characteristics.
+- `run_train.sh` still defaults `TOP_K=-1`; for direct vanilla rollout smoke in the current code, that value is not accepted by the vanilla sampler.
+
+## 2026-03-09 - Pending push status check
+
+### Scope
+
+- 无代码改动。
+- Checked which local changes are currently pending commit/push.
+
+### Changed files
+
+1. `develop.md`
+
+### Validation
+
+- `git status --short --branch`
+- `git diff --name-only`
+- `git ls-files --others --exclude-standard`
+
+### Validation results
+
+- Modified tracked files pending commit/push:
+  - `develop.md`
+  - `examples/deepscaler/README.md`
+  - `examples/deepscaler/train_deepscaler_nb.py`
+  - `tunix/rl/experimental/agentic_grpo_learner.py`
+- Untracked content also exists locally, including virtual environments, local model/data directories, and test files.
+
+### Known risks / TODO
+
+- The untracked virtual environment and local artifact directories are large and should usually not be committed.

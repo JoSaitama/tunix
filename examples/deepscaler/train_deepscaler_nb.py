@@ -455,7 +455,12 @@ def _run_preflight(args):
     raise RuntimeError("\n".join(errors))
 
 
-def create_datasets(tokenizer, train_ds_path: str, test_ds_path: str):
+def create_datasets(
+    tokenizer,
+    train_ds_path: str,
+    test_ds_path: str,
+    max_prompt_length: int | None = None,
+):
   def preprocess_fn(example, index):
     del index
     return {
@@ -481,14 +486,35 @@ def create_datasets(tokenizer, train_ds_path: str, test_ds_path: str):
         tokenize=False,
         add_generation_prompt=True,
     )
+    prompt_length = len(tokenizer.tokenize(prompt))
     return {
         "prompts": prompt,
         "question": question,
         "answer": answer,
+        "prompt_length": prompt_length,
     }
 
-  train_ds = grain.MapDataset.source(train_ds).map(process_item)
-  test_ds = grain.MapDataset.source(test_ds).map(process_item)
+  train_ds = train_ds.map(process_item)
+  test_ds = test_ds.map(process_item)
+
+  if max_prompt_length is not None and max_prompt_length > 0:
+    train_before = len(train_ds)
+    test_before = len(test_ds)
+    train_ds = train_ds.filter(lambda x: x["prompt_length"] <= max_prompt_length)
+    test_ds = test_ds.filter(lambda x: x["prompt_length"] <= max_prompt_length)
+    train_skipped = train_before - len(train_ds)
+    test_skipped = test_before - len(test_ds)
+    print(
+        "Filtered overlong prompts "
+        f"(max_prompt_length={max_prompt_length}): "
+        f"train skipped {train_skipped}/{train_before}, "
+        f"test skipped {test_skipped}/{test_before}."
+    )
+
+  train_ds = train_ds.remove_columns(["prompt_length"])
+  test_ds = test_ds.remove_columns(["prompt_length"])
+  train_ds = grain.MapDataset.source(train_ds)
+  test_ds = grain.MapDataset.source(test_ds)
   return train_ds, test_ds
 
 
@@ -688,6 +714,11 @@ def parse_args(argv: Sequence[str] | None = None):
   parser_.add_argument("--epsilon", type=float, default=EPSILON)
   parser_.add_argument("--save-interval-steps", type=int, default=SAVE_INTERVAL_STEPS)
   parser_.add_argument("--max-to-keep", type=int, default=MAX_TO_KEEP)
+  parser_.add_argument("--use-dynamic-batch-curation", action="store_true")
+  parser_.add_argument("--use-dbc-outlier-l2", action="store_true")
+  parser_.add_argument("--use-dbc-self-inf-batch", action="store_true")
+  parser_.add_argument("--use-dbc-self-inf-group", action="store_true")
+  parser_.add_argument("--curation-threshold", type=float, default=3.0)
   parser_.add_argument("--train-with-lora", action="store_true", default=TRAIN_WITH_LORA)
   parser_.add_argument("--lora-rank", type=int, default=RANK)
   parser_.add_argument("--lora-alpha", type=float, default=ALPHA)
@@ -696,7 +727,40 @@ def parse_args(argv: Sequence[str] | None = None):
   parser_.add_argument("--enable-wandb", action="store_true")
   parser_.add_argument("--skip-preflight", action="store_true")
   parser_.add_argument("--smoke-test", action="store_true")
-  return parser_.parse_args(argv)
+  args = parser_.parse_args(argv)
+
+  if args.use_dbc_self_inf_batch and args.use_dbc_self_inf_group:
+    parser_.error(
+        "choose only one: --use-dbc-self-inf-batch or --use-dbc-self-inf-group"
+    )
+
+  args.use_dynamic_batch_curation = bool(
+      args.use_dynamic_batch_curation
+      or args.use_dbc_outlier_l2
+      or args.use_dbc_self_inf_batch
+      or args.use_dbc_self_inf_group
+  )
+
+  use_self_inf = bool(
+      args.use_dbc_self_inf_batch or args.use_dbc_self_inf_group
+  )
+  if use_self_inf and args.use_dbc_outlier_l2:
+    parser_.error(
+        "cannot combine --use-dbc-outlier-l2 with self-inf; use only one DBC variant"
+    )
+
+  if use_self_inf:
+    os.environ["TUNIX_DBC_VARIANT"] = "self_inf"
+    os.environ["TUNIX_DBC_SELF_INF_SCOPE"] = (
+        "batch" if args.use_dbc_self_inf_batch else "group"
+    )
+    os.environ["TUNIX_GRPO_NUM_GENERATIONS"] = str(args.num_generations)
+  else:
+    os.environ.pop("TUNIX_DBC_VARIANT", None)
+    os.environ.pop("TUNIX_DBC_SELF_INF_SCOPE", None)
+    os.environ.pop("TUNIX_GRPO_NUM_GENERATIONS", None)
+
+  return args
 
 
 def _build_runtime_values(args):
@@ -859,6 +923,7 @@ def run_training(args):
       tokenizer=tokenizer,
       train_ds_path=args.train_dataset_path,
       test_ds_path=args.test_dataset_path,
+      max_prompt_length=runtime["max_prompt_length"],
   )
 
   train_dataset = train_dataset.batch(args.batch_size)[: runtime["num_batches"]]
@@ -934,6 +999,8 @@ def run_training(args):
           metrics_logging_options=metrics_logging_options,
           checkpoint_root_directory=args.checkpoint_dir,
           checkpointing_options=checkpointing_options,
+          use_dynamic_batch_curation=args.use_dynamic_batch_curation,
+          curation_threshold=args.curation_threshold,
       ),
       rollout_config=_build_rollout_config(
           args=args,
