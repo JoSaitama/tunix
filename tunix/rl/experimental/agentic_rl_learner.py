@@ -74,6 +74,7 @@ class AgenticRLConfig(algo_config_lib.AlgorithmConfig):
   num_iterations: int = 1
   enable_rollout_fast_path: bool = False
   rollout_prompt_batch_size: int | None = None
+  actor_generation_chunk_size: int | None = None
 
 
 TConfig = TypeVar("TConfig", bound=AgenticRLConfig)
@@ -179,6 +180,83 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
           " fast-path is enabled."
       )
     return configured
+
+  def _resolve_actor_generation_chunk_size(self) -> int:
+    """Returns actor-side generation chunk size for training updates."""
+    configured = self.algo_config.actor_generation_chunk_size
+    if configured is None:
+      return self._num_generations()
+    if configured <= 0:
+      raise ValueError(
+          "`actor_generation_chunk_size` must be a positive integer when set."
+      )
+    if configured > self._num_generations():
+      raise ValueError(
+          "`actor_generation_chunk_size` must be <= num_generations. Received:"
+          f" {configured} > {self._num_generations()}"
+      )
+    if self._num_generations() % configured != 0:
+      raise ValueError(
+          "`actor_generation_chunk_size` must divide num_generations exactly."
+          f" Received: actor_generation_chunk_size={configured},"
+          f" num_generations={self._num_generations()}"
+      )
+    return configured
+
+  def _num_actor_chunks_per_prompt_group(self) -> int:
+    """Returns how many actor chunks each prompt group is split into."""
+    return self._num_generations() // self._resolve_actor_generation_chunk_size()
+
+  @staticmethod
+  def _merge_train_examples(train_examples: list[TrainExample]) -> TrainExample:
+    """Concatenates per-sequence train examples into one actor batch."""
+    if not train_examples:
+      raise ValueError("Cannot merge an empty train example list.")
+    if len(train_examples) == 1:
+      return train_examples[0]
+    return jax.tree.map(
+        lambda *xs: jnp.concatenate(xs, axis=0), *train_examples
+    )
+
+  def _chunk_and_merge_train_micro_batch(
+      self,
+      train_micro_batch: list[TrainExample],
+      prompts_per_train_micro_batch: int,
+  ) -> list[TrainExample]:
+    """Splits a prompt micro-batch into smaller actor-side sequence chunks."""
+    chunk_size = self._resolve_actor_generation_chunk_size()
+    num_generations = self._num_generations()
+    if chunk_size >= num_generations:
+      return [self._merge_train_examples(train_micro_batch)]
+
+    if len(train_micro_batch) % num_generations != 0:
+      logging.warning(
+          "Train micro-batch size %d is not divisible by num_generations=%d. "
+          "Falling back to sequential actor chunking.",
+          len(train_micro_batch),
+          num_generations,
+      )
+      batch_chunk_size = max(1, prompts_per_train_micro_batch * chunk_size)
+      return [
+          self._merge_train_examples(train_micro_batch[i : i + batch_chunk_size])
+          for i in range(0, len(train_micro_batch), batch_chunk_size)
+      ]
+
+    grouped_examples = [
+        train_micro_batch[i : i + num_generations]
+        for i in range(0, len(train_micro_batch), num_generations)
+    ]
+    merged_batches = []
+    for generation_slice_start in range(0, num_generations, chunk_size):
+      chunk_examples = []
+      for prompt_group in grouped_examples:
+        chunk_examples.extend(
+            prompt_group[
+                generation_slice_start : generation_slice_start + chunk_size
+            ]
+        )
+      merged_batches.append(self._merge_train_examples(chunk_examples))
+    return merged_batches
 
   def _build_fast_path_chat_messages(
       self, single_example: TrainingInputT
@@ -767,6 +845,8 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     train_micro_batch_size = (
         self._training_config.train_micro_batch_size or mini_batch_size
     )
+    actor_generation_chunk_size = self._resolve_actor_generation_chunk_size()
+    actor_chunks_per_prompt_group = self._num_actor_chunks_per_prompt_group()
     self._rollout_micro_batch_size = 1
     self._compute_logps_micro_batch_size = 1
     for v, n in [
@@ -781,11 +861,15 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     grad_acc_steps = self._training_config.get_with_default(
         "gradient_accumulation_steps", 1
     )
+    effective_actor_grad_acc_steps = grad_acc_steps * actor_chunks_per_prompt_group
 
     logging.info(  # pylint: disable=logging-fstring-interpolation
         f"Training with {full_batch_size=}, {mini_batch_size=},"
         f" {train_micro_batch_size=}, {self._rollout_micro_batch_size=},"
-        f" {self._compute_logps_micro_batch_size=}, {grad_acc_steps=}"
+        f" {self._compute_logps_micro_batch_size=},"
+        f" actor_generation_chunk_size={actor_generation_chunk_size},"
+        f" actor_chunks_per_prompt_group={actor_chunks_per_prompt_group},"
+        f" effective_actor_grad_acc_steps={effective_actor_grad_acc_steps}"
     )
 
     logging.info("Starting AgenticRLLearner training loop.")
@@ -821,7 +905,11 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         train_data_queue, train_micro_batch_size * self._num_generations()
     )
     micro_batches_since_last_sync = 0
-    micro_batches_per_full_batch = full_batch_size // train_micro_batch_size
+    micro_batches_per_full_batch = (
+        full_batch_size
+        // train_micro_batch_size
+        * actor_chunks_per_prompt_group
+    )
     for train_micro_batch in train_data_gen:
       if self.rl_cluster.global_steps >= self._training_config.max_steps:
         logging.info(
@@ -859,8 +947,9 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         continue
       train_micro_batch = filtered_train_micro_batch
 
-      merged_train_micro_batch = jax.tree.map(
-          lambda *xs: jnp.concatenate(xs, axis=0), *train_micro_batch
+      actor_train_batches = self._chunk_and_merge_train_micro_batch(
+          train_micro_batch=train_micro_batch,
+          prompts_per_train_micro_batch=train_micro_batch_size,
       )
 
       # --- Evaluation Logic ---
@@ -898,7 +987,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
 
       # --- Training Step ---
       self.rl_cluster.update_actor(
-          [merged_train_micro_batch], current_eval_dataset, skip_jit
+          actor_train_batches, current_eval_dataset, skip_jit
       )
       if hasattr(self.rl_cluster, "critic_trainer"):
         self.rl_cluster.update_critic(
@@ -906,8 +995,8 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         )
 
       # --- Weight Sync Logic ---
-      micro_batches_since_last_sync += 1
-      if micro_batches_since_last_sync == micro_batches_per_full_batch:
+      micro_batches_since_last_sync += len(actor_train_batches)
+      if micro_batches_since_last_sync >= micro_batches_per_full_batch:
         if self.should_sync_weights:
           logging.info("Requesting sync lock to sync weights...")
           self._rollout_sync_lock.acquire_weight_sync()

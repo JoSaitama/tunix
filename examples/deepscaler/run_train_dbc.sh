@@ -79,6 +79,11 @@ if [[ -n "$ACTOR_GENERATION_CHUNK_SIZE" ]]; then
   )
 fi
 
+DBC_ARGS=(
+  --use-dynamic-batch-curation
+  --use-dbc-self-inf-group
+)
+
 python examples/deepscaler/train_deepscaler_nb.py \
   --model-path "$MODEL_PATH" \
   --train-dataset-path "$TRAIN_DATA_PATH" \
@@ -114,4 +119,5 @@ python examples/deepscaler/train_deepscaler_nb.py \
   --save-interval-steps "$SAVE_INTERVAL_STEPS" \
   --max-to-keep "$MAX_TO_KEEP" \
   "$OFFLOAD_TO_CPU_FLAG" \
+  "${DBC_ARGS[@]}" \
   "$@"

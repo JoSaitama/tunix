@@ -114,8 +114,9 @@ METRICS_LOG_DIR=/tmp/deepscaler_tb_${RUN_TS} \
 ./examples/deepscaler/run_train.sh --rollout-engine sglang_jax --rollout-tp 2
 ```
 
-Run `self-inf-group` DBC on the current default DeepScaler geometry
-(`num_generations=2` by default):
+The wrapper currently defaults to `NUM_GENERATIONS=8` and
+`ACTOR_GENERATION_CHUNK_SIZE=2`. Run `self-inf-group` DBC on that default
+geometry:
 
 ```bash
 RUN_TS=$(date +%Y%m%d_%H%M%S)
@@ -127,6 +128,29 @@ METRICS_LOG_DIR=/tmp/deepscaler_tb_${RUN_TS} \
   --use-dynamic-batch-curation \
   --use-dbc-self-inf-group
 ```
+
+Run `num_generations=4` with actor-side generation chunking to keep the actor
+update peak below the default `G=8` path:
+
+```bash
+RUN_TS=$(date +%Y%m%d_%H%M%S)
+CHECKPOINT_DIR=/tmp/deepscaler_ckpt_${RUN_TS} \
+METRICS_LOG_DIR=/tmp/deepscaler_tb_${RUN_TS} \
+NUM_GENERATIONS=4 \
+ACTOR_GENERATION_CHUNK_SIZE=2 \
+ROLLOUT_PROMPT_BATCH_SIZE=2 \
+./examples/deepscaler/run_train.sh \
+  --rollout-engine sglang_jax \
+  --rollout-tp 2
+```
+
+Notes:
+
+- `ACTOR_GENERATION_CHUNK_SIZE` only chunks actor-side training. Reward and
+  advantage are still computed over the full `NUM_GENERATIONS` group.
+- Start with `NUM_GENERATIONS=4`, `ACTOR_GENERATION_CHUNK_SIZE=2`, and
+  `ROLLOUT_PROMPT_BATCH_SIZE=2` if you need a safer profile than the wrapper
+  default `ROLLOUT_PROMPT_BATCH_SIZE=4`, `NUM_GENERATIONS=8`.
 
 Run `pass@1` averaged over 16 independent `sglang-jax` eval runs:
 

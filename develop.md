@@ -232,6 +232,251 @@ This file tracks engineering changes made in this repository.
 
 ---
 
+## 2026-03-09: DeepScaler cross-batch reward feasibility review
+
+### Scope
+
+- 无代码改动。
+- 审阅 `examples/deepscaler/` 当前训练链路，确认 `num_generations=2` 时 reward/advantage 的计算位置与形态，并评估是否适合增加 cross-batch reward / advantage 分支。
+
+### Changed files
+
+1. `develop.md`
+
+### Validation
+
+- `nl -ba examples/deepscaler/train_deepscaler_nb.py | sed -n '980,1085p'`
+- `nl -ba examples/deepscaler/train_deepscaler_nb.py | sed -n '60,140p'`
+- `nl -ba examples/deepscaler/train_deepscaler_nb.py | sed -n '540,770p'`
+- `nl -ba examples/deepscaler/run_train.sh | sed -n '1,220p'`
+- `nl -ba tunix/rl/experimental/agentic_grpo_learner.py | sed -n '1,620p'`
+- `nl -ba tunix/rl/experimental/agentic_rl_learner.py | sed -n '1,1100p'`
+- `nl -ba tunix/utils/math_rewards.py | sed -n '1,260p'`
+- `nl -ba tunix/rl/algorithm_config.py | sed -n '1,180p'`
+- `nl -ba tunix/rl/function_registry.py | sed -n '1,260p'`
+- 确认：
+  - DeepScaler 训练入口当前使用的是 `tunix/rl/experimental/agentic_grpo_learner.py`，不是主线 `tunix/rl/grpo/grpo_learner.py`。
+  - `math_reward` 是按 completion 独立计算的 0/1 标量奖励。
+  - 当前 `agentic_grpo` advantage 仍是严格按单个 prompt 的 `num_generations` 分组做均值/标准差归一化，没有跨 prompt 统计。
+  - `examples/deepscaler/run_train.sh` 默认开启 `--enable-rollout-fast-path`，因此在 fast-path 下天然存在一个 `rollout_prompt_batch_size` 级别的跨 prompt 窗口，可作为未来 cross-batch 分支的最小接入点。
+
+### Known risks / TODO
+
+- 若直接把不同 prompt 的 reward 混到同一个 baseline/std 中，算法语义会从“group-relative”偏移到“batch-relative”；对难度分布不均的数据会引入偏差。
+- 更稳妥的做法是优先考虑“per-prompt center + cross-batch scale”这类分支，而不是直接用全局 batch mean 替代 group mean。
+- 当前未做实现与跑数，结论仅覆盖代码可接入性与训练信号形态，不代表该方案一定优于调 `beta`、长度约束或 reward 设计。
+
+---
+
+## 2026-03-09: DeepScaler cross-batch advantage explanation
+
+### Scope
+
+- 无代码改动。
+- 进一步解释 DeepScaler 在 `num_generations=2`、二值数学 reward 下，保守版与激进版 cross-batch advantage 的区别、收益与风险。
+
+### Changed files
+
+1. `develop.md`
+
+### Validation
+
+- 复用上一条审阅结论，无新增代码执行。
+- 关键依据：
+  - `tunix/rl/experimental/agentic_grpo_learner.py`
+  - `tunix/rl/experimental/agentic_rl_learner.py`
+  - `tunix/utils/math_rewards.py`
+- 确认：
+  - 当前 raw reward 仍是逐 completion 的 `0/1`。
+  - 讨论对象是 advantage 的 baseline / scale 设计，而不是修改 reward 定义本身。
+
+### Known risks / TODO
+
+- 保守版主要解决的是 `G=2` 下标准差估计太跳，不解决 `[1,1]` / `[0,0]` 两类组 advantage 为零的问题。
+- 激进版能让更多样本带梯度，但更容易把 prompt 难度差异折叠进 advantage，偏离原始 GRPO 的相对比较语义。
+
+---
+
+## 2026-03-09: DeepScaler cross-batch memory impact clarification
+
+### Scope
+
+- 无代码改动。
+- 结合当前 DeepScaler fast-path 训练实现，说明为什么把 `num_generations` 从 `2` 提到 `4` 容易 OOM，而 cross-batch advantage 方案在正确实现下通常不会触发同级别显存增长。
+
+### Changed files
+
+1. `develop.md`
+
+### Validation
+
+- `nl -ba tunix/rl/experimental/agentic_rl_learner.py | sed -n '224,324p'`
+- `nl -ba tunix/rl/experimental/agentic_grpo_learner.py | sed -n '282,430p'`
+- `nl -ba tunix/rl/experimental/agentic_rl_learner.py | sed -n '820,910p'`
+- 确认：
+  - fast-path rollout 一次会生成 `rollout_prompt_batch_size * num_generations` 条 completion，`num_generations` 直接放大 rollout 侧工作集。
+  - 训练消费阶段会按 `train_micro_batch_size * num_generations` 收集样本，再拼成一个 `merged_train_micro_batch` 送入 actor update，`num_generations` 直接放大训练侧 token batch。
+  - 若 cross-batch 只额外缓存 reward / completion-level 统计量，而不把更多 prompt 的 token 序列并进单次 actor/ref 前向，则显存主路径不变。
+
+### Known risks / TODO
+
+- 如果实现时为了做 cross-batch 统计而把多个 prompt group 的 `prompt_ids` / `completion_ids` / `logps` 合并后再统一前向，仍然可能 OOM。
+- 因此实现上应优先使用“小窗口标量统计 + 原始 group 粒度发射 train example”的方式，避免把 cross-batch 设计误写成更大的 token batch。
+
+---
+
+## 2026-03-09: DeepScaler `num_generations=4` no-OOM feasibility review
+
+### Scope
+
+- 无代码改动。
+- 结合当前 DeepScaler fast-path 训练实现，分析把 `num_generations` 从 `2` 提到 `4` 时，哪些参数能真实降低 actor / rollout 显存占用，哪些参数不会改变 OOM 主因。
+
+### Changed files
+
+1. `develop.md`
+
+### Validation
+
+- `rg -n "def update_actor|gradient_accumulation_steps|train_micro_batch_size|mini_batch_size|rollout_micro_batch_size|compute_logps_micro_batch_size" tunix -g '!**/__pycache__/**'`
+- `nl -ba tunix/rl/experimental/agentic_rl_learner.py | sed -n '224,324p'`
+- `nl -ba tunix/rl/experimental/agentic_rl_learner.py | sed -n '820,910p'`
+- `nl -ba tunix/rl/experimental/agentic_grpo_learner.py | sed -n '282,430p'`
+- `nl -ba tunix/rl/rl_cluster.py | sed -n '84,150p'`
+- `nl -ba tunix/sft/peft_trainer.py | sed -n '180,230p'`
+- `nl -ba tunix/sft/peft_trainer.py | sed -n '560,705p'`
+- 确认：
+  - RL 训练里的梯度累积由 `mini_batch_size // train_micro_batch_size` 自动推导。
+  - fast-path rollout 的一次生成规模是 `rollout_prompt_batch_size * num_generations`。
+  - actor 训练侧一次送入 train step 的样本数是 `train_micro_batch_size * num_generations`。
+  - 因此要让 `num_generations=4` 不 OOM，优先要缩的是这两个乘积，而不是只改逻辑层统计。
+
+### Known risks / TODO
+
+- 当前 `examples/deepscaler/train_deepscaler_nb.py` 在 agentic fast-path 下把 `_rollout_micro_batch_size` 和 `_compute_logps_micro_batch_size` 固定成 `1`，因此额外调这两个值对当前路径帮助有限。
+- 如果 `num_generations=4` 后 completion 长度也变长，即使把 `train_micro_batch_size` / `rollout_prompt_batch_size` 降低，仍可能因长序列导致 compile 或 runtime OOM。
+
+---
+
+## 2026-03-09: DeepScaler actor-side chunking explanation
+
+### Scope
+
+- 无代码改动。
+- 进一步解释在保持 `num_generations=4` 语义不变的前提下，为什么“actor-side generation chunking / sequence microbatching”能比单纯调参更稳地降低 OOM 风险。
+
+### Changed files
+
+1. `develop.md`
+
+### Validation
+
+- 复用前一条关于 DeepScaler fast-path 训练路径的代码审阅结果，无新增代码执行。
+- 关键依据：
+  - `tunix/rl/experimental/agentic_rl_learner.py`
+  - `tunix/rl/experimental/agentic_grpo_learner.py`
+  - `tunix/sft/peft_trainer.py`
+- 确认：
+  - 当前实现先对一个 prompt 的 `num_generations` 条 completion 算完 reward/advantage，再把这些序列直接拼成一个 `merged_train_micro_batch` 做单次 actor update。
+  - 更稳的降内存思路不是减少逻辑组大小，而是把同一组里的多条 completion 分几次前向/反向，再通过现有梯度累积维持等价更新。
+
+### Known risks / TODO
+
+- 这种改法会增加 wall-clock time，因为同一逻辑更新被拆成更多次前向/反向。
+- 若实现时没有正确保留“4 条 completion 共用同一组 reward/advantage 统计”，就会把 `num_generations=4` 退化成语义不同的训练。
+
+---
+
+## 2026-03-10: DeepScaler actor-side chunking hyperparameter count clarification
+
+### Scope
+
+- 无代码改动。
+- 说明若为 DeepScaler `num_generations=4` 增加 actor-side generation chunking，最小实现需要新增多少超参数，以及哪些参数可以保持内部常量而不暴露给用户。
+
+### Changed files
+
+1. `develop.md`
+
+### Validation
+
+- 无新增代码执行。
+- 复用前序对 `tunix/rl/experimental/agentic_rl_learner.py`、`tunix/rl/experimental/agentic_grpo_learner.py`、`tunix/sft/peft_trainer.py` 的审阅结论。
+
+### Known risks / TODO
+
+- 如果后续把过多调度细节都暴露成 CLI，会增加使用复杂度并抬高误配风险。
+- 更合适的做法通常是只暴露 1 个主开关或 1 个 chunk 大小参数，其余行为由代码按 `num_generations` 和现有 batch 参数自动推导。
+
+---
+
+## 2026-03-10: DeepScaler actor-side generation chunking for `num_generations=4`
+
+### Scope
+
+- 为 `examples/deepscaler` 增加可选的 actor-side generation chunking。
+- 保持 reward / advantage 仍按完整 `num_generations` 分组计算，只在 actor 训练更新阶段按更小的 completion chunk 分批送入前向/反向。
+- 同步放大 actor trainer 的梯度累积步数与 weight sync 计数，避免 chunking 改变 optimizer step 频率。
+
+### Changed files
+
+1. `tunix/rl/experimental/agentic_rl_learner.py`
+2. `tunix/rl/rl_cluster.py`
+3. `examples/deepscaler/train_deepscaler_nb.py`
+4. `examples/deepscaler/run_train.sh`
+5. `examples/deepscaler/README.md`
+6. `develop.md`
+
+### Validation
+
+- `python -m py_compile examples/deepscaler/train_deepscaler_nb.py tunix/rl/experimental/agentic_rl_learner.py tunix/rl/rl_cluster.py`
+- `bash -n examples/deepscaler/run_train.sh`
+- `source .venv_sglang312/bin/activate && python examples/deepscaler/train_deepscaler_nb.py --help | rg -n "actor-generation-chunk-size|num-generations|rollout-prompt-batch-size"`
+- 确认：
+  - 新参数 `--actor-generation-chunk-size` 已出现在 DeepScaler CLI help 中。
+  - `agentic` 训练循环会把每个 prompt micro-batch 按 `actor_generation_chunk_size` 切成多个 actor train batch。
+  - `RLCluster` 会在 actor trainer 初始化时按 chunk 因子放大 `gradient_accumulation_steps`，只影响 actor 分支，不改 critic / baseline 路径。
+  - `run_train.sh` 已支持通过环境变量 `ACTOR_GENERATION_CHUNK_SIZE` 传递该新参数。
+
+### Known risks / TODO
+
+- 这次只做了静态验证，没有在当前机器上跑完整 `num_generations=4` 训练，因此还不能宣称已实测消除所有 OOM。
+- 若 rollout 侧仍然 OOM，仍需同时降低 `ROLLOUT_PROMPT_BATCH_SIZE`；actor-side chunking 只缓解 actor 训练峰值。
+- 当前实现要求 `actor_generation_chunk_size` 必须整除 `num_generations`，这是为了保持 chunk 形状稳定并避免额外 JIT 形状分叉。
+
+---
+
+## 2026-03-10: DeepScaler `G=4` chunking smoke-test status clarification
+
+### Scope
+
+- 无代码改动。
+- 回答本次 actor-side chunking 改动是否已经实际跑过 smoke test，并记录当前最接近真实运行态的验证进度。
+
+### Changed files
+
+1. `develop.md`
+
+### Validation
+
+- 运行：
+  - `source .venv_sglang312/bin/activate && RUN_TS=$(date +%Y%m%d_%H%M%S) CHECKPOINT_DIR=/tmp/deepscaler_ckpt_${RUN_TS} METRICS_LOG_DIR=/tmp/deepscaler_tb_${RUN_TS} NUM_GENERATIONS=4 ACTOR_GENERATION_CHUNK_SIZE=2 ROLLOUT_PROMPT_BATCH_SIZE=2 ./examples/deepscaler/run_train.sh --smoke-test --rollout-engine sglang_jax --rollout-tp 2`
+- 观测到：
+  - 启动日志打印了 `actor_generation_chunk_size=2` 与 `actor_grad_acc_factor=2`
+  - 数据预处理完成
+  - `sglang_jax` 的 extend/decode precompile 完成
+  - 进度条进入 `Actor Training: 0%|...| 0/315`
+- 后续处理：
+  - 未等待该 smoke test 完整收尾；在确认新参数链路已进入真实 actor training 入口后停止继续等待
+  - 运行目录已创建：`/tmp/deepscaler_ckpt_20260310_012727`、`/tmp/deepscaler_tb_20260310_012727`
+
+### Known risks / TODO
+
+- 这说明“参数解析 -> rollout precompile -> actor training 入口”是通的，但还不等于完整 smoke test 成功退出。
+- 若要把结论升级成“smoke test passed”，还需要再跑一次并等待完整退出码与首步/收尾日志。
+
+---
+
 ## 2026-03-07: DeepScaler eval seed flow clarification
 
 ### Scope
@@ -3457,3 +3702,209 @@ This file tracks engineering changes made in this repository.
 ### Known risks / TODO
 
 - This change updates the wrapper default only; callers that explicitly export `TOTAL_GENERATION_STEPS` or pass `--total-generation-steps` still override it.
+
+## 2026-03-10 - DeepScaler G=2/4/8 training-time scaling estimate
+
+### Scope
+
+- 无代码改动。
+- Estimated wall-clock training-time multipliers for DeepScaler when only `NUM_GENERATIONS` changes and other parameters stay fixed.
+
+### Changed files
+
+1. `develop.md`
+
+### Validation
+
+- `nl -ba examples/deepscaler/run_train.sh | sed -n '19,30p'`
+- `nl -ba tunix/rl/experimental/agentic_rl_learner.py | sed -n '302,392p'`
+- `nl -ba tunix/rl/experimental/agentic_rl_learner.py | sed -n '844,912p'`
+
+### Validation results
+
+- Wrapper defaults remain:
+  - `ROLLOUT_PROMPT_BATCH_SIZE=4`
+  - `NUM_GENERATIONS=2`
+  - `TRAIN_MICRO_BATCH_SIZE=1`
+  - `NUM_BATCHES=315`
+- Fast-path rollout expands each prompt into `rollout_prompt_batch_size * num_generations` requests.
+- Actor training consumes `train_micro_batch_size * num_generations` sequences per logical micro-batch, with optional chunking only reducing peak memory, not total sequence count.
+- Therefore, with prompt/completion lengths held roughly constant, total training compute scales approximately linearly with `NUM_GENERATIONS`.
+
+### Known risks / TODO
+
+- This is an engineering estimate based on code-path work scaling, not a completed timing benchmark for full `G=4` or `G=8` runs.
+- Real wall time can exceed linear scaling if memory pressure lowers throughput or triggers rollout-side instability.
+
+## 2026-03-10 - DeepScaler DBC command clarification
+
+### Scope
+
+- 无代码改动。
+- Confirmed which Dynamic Batch Curation flags are wired into the DeepScaler entrypoint and recorded a default command that keeps `ROLLOUT_PROMPT_BATCH_SIZE` at its wrapper default.
+
+### Changed files
+
+1. `develop.md`
+
+### Validation
+
+- `rg -n "use_dynamic_batch_curation|use-dbc|curation_threshold" -S examples/deepscaler tunix/rl`
+- `nl -ba examples/deepscaler/README.md | sed -n '117,144p'`
+- `nl -ba examples/deepscaler/train_deepscaler_nb.py | sed -n '729,766p'`
+
+### Validation results
+
+- DeepScaler entrypoint supports:
+  - `--use-dynamic-batch-curation`
+  - `--use-dbc-outlier-l2`
+  - `--use-dbc-self-inf-batch`
+  - `--use-dbc-self-inf-group`
+- Self-influence variants are mutually exclusive, and they cannot be combined with `--use-dbc-outlier-l2`.
+- The DeepScaler README currently documents `--use-dbc-self-inf-group` as the DBC command on the default geometry.
+- Omitting `ROLLOUT_PROMPT_BATCH_SIZE` keeps the wrapper default at `4`.
+
+### Known risks / TODO
+
+- No end-to-end DBC smoke was run in this step; this entry only confirms the supported CLI and default wrapper behavior.
+
+## 2026-03-10 - DeepScaler G=8 command note
+
+### Scope
+
+- 无代码改动。
+- Recorded the recommended `NUM_GENERATIONS=8` launch command for the DeepScaler path.
+
+### Changed files
+
+1. `develop.md`
+
+### Validation
+
+- `nl -ba examples/deepscaler/run_train.sh | sed -n '19,30p'`
+- `nl -ba examples/deepscaler/README.md | sed -n '131,150p'`
+
+### Validation results
+
+- `run_train.sh` still defaults `ROLLOUT_PROMPT_BATCH_SIZE=4` when the env var is omitted.
+- The actor-side chunking flag remains optional and can be enabled via `ACTOR_GENERATION_CHUNK_SIZE`.
+- For `NUM_GENERATIONS=8`, using actor-side chunking is the least invasive way to reduce actor-side peak memory without changing rollout geometry.
+
+### Known risks / TODO
+
+- This note does not prove `NUM_GENERATIONS=8` will fit with default rollout geometry; rollout-side memory pressure can still be the limiting factor.
+
+## 2026-03-10 - DeepScaler wrapper defaults changed to G=8
+
+### Scope
+
+- Updated the DeepScaler shell wrapper so the user no longer needs to prefix the command with `NUM_GENERATIONS=8` and `ACTOR_GENERATION_CHUNK_SIZE=2`.
+- Adjusted the README so the documented default geometry matches the wrapper.
+
+### Changed files
+
+1. `examples/deepscaler/run_train.sh`
+2. `examples/deepscaler/README.md`
+3. `develop.md`
+
+### Validation
+
+- `nl -ba examples/deepscaler/run_train.sh | sed -n '19,26p'`
+- `bash -n examples/deepscaler/run_train.sh`
+- `nl -ba examples/deepscaler/README.md | sed -n '108,152p'`
+
+### Validation results
+
+- `run_train.sh` now defaults to:
+  - `NUM_GENERATIONS=8`
+  - `ACTOR_GENERATION_CHUNK_SIZE=2`
+  - `ROLLOUT_PROMPT_BATCH_SIZE=4` unchanged
+- The wrapper still allows external env vars to override those defaults.
+- README references to the wrapper default geometry were updated accordingly.
+
+### Known risks / TODO
+
+- This changes the behavior of invoking `./examples/deepscaler/run_train.sh` with no extra env vars; runs that previously defaulted to `G=2` will now default to `G=8`.
+- The wrapper default rollout work profile is now much heavier than before, so rollout-side OOM remains possible.
+
+## 2026-03-10 - DeepScaler wrapper defaults confirmation
+
+### Scope
+
+- 无代码改动。
+- Confirmed whether `--rollout-engine sglang_jax` and `--rollout-tp 2` are already covered by wrapper defaults.
+
+### Changed files
+
+1. `develop.md`
+
+### Validation
+
+- `nl -ba examples/deepscaler/run_train.sh | sed -n '19,24p'`
+
+### Validation results
+
+- `run_train.sh` already defaults:
+  - `ROLLOUT_ENGINE=sglang_jax`
+  - `ROLLOUT_TP=2`
+- Those CLI flags can be omitted unless the user wants to override the defaults.
+
+### Known risks / TODO
+
+- None for this clarification step.
+
+## 2026-03-10 - DeepScaler DBC wrapper default confirmation
+
+### Scope
+
+- 无代码改动。
+- Confirmed whether the DBC flags are baked into `examples/deepscaler/run_train.sh`.
+
+### Changed files
+
+1. `develop.md`
+
+### Validation
+
+- `nl -ba examples/deepscaler/run_train.sh | sed -n '75,117p'`
+
+### Validation results
+
+- `run_train.sh` always forwards rollout and training geometry flags from wrapper defaults.
+- DBC flags such as `--use-dynamic-batch-curation` and `--use-dbc-self-inf-group` are not injected by the wrapper.
+- Those DBC flags only reach the Python entrypoint if passed explicitly via the shell command tail (`"$@"`).
+
+### Known risks / TODO
+
+- If the user wants DBC to become the wrapper default, the shell wrapper needs an explicit branch or env-controlled passthrough for those flags.
+
+## 2026-03-10 - Added dedicated DeepScaler DBC wrapper
+
+### Scope
+
+- Added a new `examples/deepscaler/run_train_dbc.sh` wrapper.
+- Kept `examples/deepscaler/run_train.sh` untouched in this step.
+- The new wrapper hardcodes `--use-dynamic-batch-curation` and `--use-dbc-self-inf-group` so those flags are always forwarded.
+
+### Changed files
+
+1. `examples/deepscaler/run_train_dbc.sh`
+2. `develop.md`
+
+### Validation
+
+- `bash -n examples/deepscaler/run_train_dbc.sh`
+- `diff -u examples/deepscaler/run_train.sh examples/deepscaler/run_train_dbc.sh`
+
+### Validation results
+
+- New wrapper syntax is valid.
+- The new wrapper inherits the same geometry defaults as the current `run_train.sh`.
+- The only functional addition is a fixed DBC arg bundle:
+  - `--use-dynamic-batch-curation`
+  - `--use-dbc-self-inf-group`
+
+### Known risks / TODO
+
+- If callers append a conflicting DBC variant via extra CLI args, the Python entrypoint will reject the combination.
+- The new wrapper inherits the current default heavy geometry (`NUM_GENERATIONS=8`, `ROLLOUT_PROMPT_BATCH_SIZE=4`), so rollout-side memory pressure still applies.

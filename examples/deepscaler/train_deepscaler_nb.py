@@ -5,6 +5,7 @@
 import argparse
 import contextlib
 import importlib.util
+import math
 import os
 import subprocess
 from typing import Sequence
@@ -82,6 +83,7 @@ NUM_ITERATIONS = 1
 BETA = 0.001
 EPSILON = 0.2
 FAST_PATH_DEFAULT_ROLLOUT_PROMPT_BATCH_SIZE = 4
+ACTOR_GENERATION_CHUNK_SIZE = None
 
 # ====== Training ======
 BATCH_SIZE = 32
@@ -710,6 +712,15 @@ def parse_args(argv: Sequence[str] | None = None):
           f"{FAST_PATH_DEFAULT_ROLLOUT_PROMPT_BATCH_SIZE}."
       ),
   )
+  parser_.add_argument(
+      "--actor-generation-chunk-size",
+      type=int,
+      default=ACTOR_GENERATION_CHUNK_SIZE,
+      help=(
+          "Number of completions per prompt processed in each actor-side "
+          "training chunk. Defaults to using all num_generations at once."
+      ),
+  )
   parser_.add_argument("--beta", type=float, default=BETA)
   parser_.add_argument("--epsilon", type=float, default=EPSILON)
   parser_.add_argument("--save-interval-steps", type=int, default=SAVE_INTERVAL_STEPS)
@@ -759,6 +770,21 @@ def parse_args(argv: Sequence[str] | None = None):
     os.environ.pop("TUNIX_DBC_VARIANT", None)
     os.environ.pop("TUNIX_DBC_SELF_INF_SCOPE", None)
     os.environ.pop("TUNIX_GRPO_NUM_GENERATIONS", None)
+
+  if args.actor_generation_chunk_size is not None:
+    if args.actor_generation_chunk_size <= 0:
+      parser_.error(
+          "`--actor-generation-chunk-size` must be a positive integer."
+      )
+    if args.actor_generation_chunk_size > args.num_generations:
+      parser_.error(
+          "`--actor-generation-chunk-size` must be <= `--num-generations`."
+      )
+    if args.num_generations % args.actor_generation_chunk_size != 0:
+      parser_.error(
+          "`--actor-generation-chunk-size` must divide `--num-generations` "
+          "exactly to keep actor chunk shapes stable."
+      )
 
   return args
 
@@ -880,6 +906,14 @@ def run_training(args):
   runtime = _build_runtime_values(args)
   rollout_engine = _normalize_rollout_engine(args.rollout_engine)
   rollout_model_source = _resolve_rollout_model_source(args)
+  actor_chunk_factor = 1
+  if args.actor_generation_chunk_size is not None:
+    actor_chunk_factor = math.ceil(
+        args.num_generations / args.actor_generation_chunk_size
+    )
+    os.environ["TUNIX_ACTOR_GRAD_ACC_FACTOR"] = str(actor_chunk_factor)
+  else:
+    os.environ.pop("TUNIX_ACTOR_GRAD_ACC_FACTOR", None)
   if args.rollout_prompt_batch_size is not None and args.rollout_prompt_batch_size <= 0:
     raise ValueError("`--rollout-prompt-batch-size` must be a positive integer.")
   if args.enable_rollout_fast_path and rollout_engine != "sglang_jax":
@@ -909,6 +943,12 @@ def run_training(args):
   print(f"metrics log dir: {args.metrics_log_dir}")
   print(f"smoke test: {args.smoke_test}")
   print(f"rollout engine: {rollout_engine}")
+  if args.actor_generation_chunk_size is not None:
+    print(
+        "actor-side generation chunking enabled: "
+        f"actor_generation_chunk_size={args.actor_generation_chunk_size}, "
+        f"actor_grad_acc_factor={actor_chunk_factor}"
+    )
   if rollout_engine != "vanilla":
     print(f"rollout model source: {rollout_model_source}")
     print(f"rollout mesh shape: {tuple(rollout_mesh.shape.values())}")
@@ -1046,15 +1086,19 @@ def run_training(args):
       max_concurrency=grpo_max_concurrency,
       enable_rollout_fast_path=args.enable_rollout_fast_path,
       rollout_prompt_batch_size=args.rollout_prompt_batch_size,
+      actor_generation_chunk_size=args.actor_generation_chunk_size,
   )
 
-  with compat.set_mesh(training_mesh):
-    rl_cluster = rl_cluster_lib.RLCluster(
-        actor=qwen2_actor,
-        reference=qwen2_ref,
-        tokenizer=tokenizer,
-        cluster_config=cluster_config,
-    )
+  try:
+    with compat.set_mesh(training_mesh):
+      rl_cluster = rl_cluster_lib.RLCluster(
+          actor=qwen2_actor,
+          reference=qwen2_ref,
+          tokenizer=tokenizer,
+          cluster_config=cluster_config,
+      )
+  finally:
+    os.environ.pop("TUNIX_ACTOR_GRAD_ACC_FACTOR", None)
 
   grpo_trainer = GRPOLearner(
       rl_cluster=rl_cluster,

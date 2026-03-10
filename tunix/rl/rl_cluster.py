@@ -511,6 +511,35 @@ class RLCluster:
     actor_config = copy.deepcopy(self.cluster_config.training_config)
     actor_config.metrics_prefix = "actor"
     actor_config.pbar_description = "Actor Training"
+    actor_grad_acc_factor_env = os.environ.get(
+        "TUNIX_ACTOR_GRAD_ACC_FACTOR", ""
+    ).strip()
+    if actor_grad_acc_factor_env:
+      try:
+        actor_grad_acc_factor = int(actor_grad_acc_factor_env)
+      except ValueError as exc:
+        raise ValueError(
+            "TUNIX_ACTOR_GRAD_ACC_FACTOR must be a positive integer. "
+            f"Received: {actor_grad_acc_factor_env!r}"
+        ) from exc
+      if actor_grad_acc_factor <= 0:
+        raise ValueError(
+            "TUNIX_ACTOR_GRAD_ACC_FACTOR must be a positive integer. "
+            f"Received: {actor_grad_acc_factor}"
+        )
+      if actor_grad_acc_factor > 1:
+        base_grad_acc_steps = actor_config.get_with_default(
+            "gradient_accumulation_steps", 1
+        )
+        actor_config.gradient_accumulation_steps = (
+            base_grad_acc_steps * actor_grad_acc_factor
+        )
+        logging.info(
+            "Actor chunking enabled: scaling actor gradient_accumulation_steps "
+            "from %d to %d.",
+            base_grad_acc_steps,
+            actor_config.gradient_accumulation_steps,
+        )
     if actor_config.checkpoint_root_directory is not None:
       actor_config.checkpoint_root_directory = os.path.join(
           actor_config.checkpoint_root_directory, "actor"
