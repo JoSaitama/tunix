@@ -218,6 +218,206 @@ This file tracks engineering changes made in this repository.
 - `sed -n '456,520p' examples/deepscaler/math_eval_nb.py`
 - `sed -n '731,805p' examples/deepscaler/math_eval_nb.py`
 - `sed -n '1,80p' examples/deepscaler/run_eval.sh`
+
+---
+
+## 2026-03-10: DeepScaler first-step progress analysis
+
+### Scope
+
+- 无代码改动。
+- 分析用户正在运行的 `examples/deepscaler/run_train.sh` 日志，估算第一个训练 step 在当前配置下的组成与大致进度。
+
+### Changed files
+
+1. `develop.md`
+
+### Validation
+
+- `sed -n '1,220p' examples/deepscaler/run_train.sh`
+- `sed -n '1,260p' examples/deepscaler/README.md`
+- `sed -n '900,980p' examples/deepscaler/train_deepscaler_nb.py`
+- `sed -n '500,580p' tunix/rl/rl_cluster.py`
+- `sed -n '180,320p' tunix/rl/grpo/grpo_learner.py`
+- `rg -n "actor_generation_chunk_size|actor_grad_acc_factor|Actor Training|max_steps|num_generations|use-dbc-self-inf-group" examples/deepscaler tunix my_example -S`
+- 确认：
+  - 本次命令不是 `--smoke-test`，目标训练步数为 `315`。
+  - 当前配置为 `batch_size=128`、`num_generations=8`、`actor_generation_chunk_size=2`，因此单个训练 step 需要先完成 `128 * 8 = 1024` 条 completion 的 rollout / reward / advantage 处理。
+  - `actor_generation_chunk_size=2` 会把 actor 侧更新拆成 `8 / 2 = 4` 个累积块；进度条只有在整个 step 完成后才会从 `0/315` 跳到 `1/315`。
+
+### Known risks / TODO
+
+- 仅凭用户贴出的 stdout 片段，无法精确给出“第一个 step 已完成百分之多少”；若要精确计数，需要基于完整日志统计当前已打印的 completion 结果条数，或直接观察进程后续 stdout。
+
+---
+
+## 2026-03-10: DeepScaler first-step runtime state check
+
+### Scope
+
+- 无代码改动。
+- 检查用户当前运行中的 DeepScaler 训练进程和 TensorBoard event 文件，判断第一个训练 step 是否仍停留在判分阶段。
+
+### Changed files
+
+1. `develop.md`
+
+### Validation
+
+- `ps -eo pid,lstart,etime,cmd | rg 'examples/deepscaler/train_deepscaler_nb.py|run_train.sh' -S`
+- `find /tmp/deepscaler_tb_20260310_022623 -maxdepth 3 -type f`
+- `find /tmp/deepscaler_ckpt_20260310_022623 -maxdepth 4 -type f`
+- `source .venv_sglang312/bin/activate && python - <<'PY' ... event_accumulator ... PY`
+- 确认：
+  - 训练进程自 `2026-03-10 02:26:22 UTC` 起仍在运行。
+  - checkpoint 目录尚无保存产物。
+  - metrics event 文件中已存在 `actor/train/tflops_per_step`，其 `count=1` 且 `last_step=0`。
+  - 这表明当前运行已经进入第一个训练 step 的 actor-train 阶段；因此第一个 batch 的 rollout / reward / advantage 前置阶段大概率已经完成。
+
+### Known risks / TODO
+
+- 由于当前 stdout 没有重定向到文件，无法事后精确统计“已经打印了多少条 `IS CORRECT/IS NOT CORRECT`”；对“1024 个判分样本已完成多少”的判断只能结合 event 文件阶段信号来推断。
+
+---
+
+## 2026-03-10: DeepScaler first-step liveness recheck
+
+### Scope
+
+- 无代码改动。
+- 复测用户当前训练 run 的进程活跃度与 event 文件增长情况，判断距离 `1/315` 是否还很近。
+
+### Changed files
+
+1. `develop.md`
+
+### Validation
+
+- `stat -c '%y %s %n' /tmp/deepscaler_tb_20260310_022623/events.out.tfevents.1773109614.t1v-n-d0f559df-w-0`
+- `ps -p 2971628 -o pid,etime,time,%cpu,%mem,stat,cmd`
+- 间隔约 12 秒再次执行同样检查
+- 确认：
+  - 训练进程仍存活，且 `TIME` 在增长，说明仍在消耗 CPU 进行计算或编译。
+  - TensorBoard event 文件大小与 mtime 在两次检查间都未变化，仍停留在 `2026-03-10 02:46:55 UTC`。
+  - 这说明当前并没有新的 trainer step 指标落盘；距离 `1/315` 至少不是“几秒内就会跳”的状态。
+
+### Known risks / TODO
+
+- 仅靠 host 侧进程状态和 event 文件，无法精确区分“长时间 JAX 编译”与“数值上极慢的 actor 更新”；两者都会表现为 CPU 活跃但 step 指标不前进。
+
+---
+
+## 2026-03-10: DeepScaler step-1 completion confirmation
+
+### Scope
+
+- 无代码改动。
+- 再次检查当前运行中的 DeepScaler 训练日志落盘状态，确认是否已经到达第 1 个 step。
+
+### Changed files
+
+1. `develop.md`
+
+### Validation
+
+- `source .venv_sglang312/bin/activate && python - <<'PY' ... event_accumulator ... PY`
+- `find /tmp/deepscaler_ckpt_20260310_022623 -maxdepth 4 -type f`
+- `ps -p 2971628 -o pid,etime,time,%cpu,%mem,stat`
+- 确认：
+  - TensorBoard event 文件里已有首批 `global/train/...` 指标，均为 `last_step=0`，表示第一轮训练样本的统计已经落盘。
+  - checkpoint 目录已出现 `/tmp/deepscaler_ckpt_20260310_022623/actor/1/...`。
+  - 按当前 RL cluster 的 checkpoint 目录约定，这说明第一个 actor step 已经完成并写出 step `1` 的 checkpoint。
+
+### Known risks / TODO
+
+- event 文件中的很多训练指标仍以 `step=0` 记账，而 checkpoint 目录用 `actor/1` 命名；两者是不同的计步口径，不应混为一谈。
+
+---
+
+## 2026-03-10: DeepScaler step-1 elapsed time measurement
+
+### Scope
+
+- 无代码改动。
+- 基于当前运行进程启动时间与 `actor/1` checkpoint 文件时间，估算到达 step 1 的实际耗时。
+
+### Changed files
+
+1. `develop.md`
+
+### Validation
+
+- `ps -p 2971628 -o lstart=,etime=,cmd=`
+- `stat -c '%y %n' /tmp/deepscaler_ckpt_20260310_022623/actor/1/_CHECKPOINT_METADATA /tmp/deepscaler_ckpt_20260310_022623/actor/1/model_params/manifest.ocdbt`
+- 确认：
+  - 训练进程启动时间：`2026-03-10 02:26:22 UTC`
+  - `actor/1` checkpoint 文件时间：`2026-03-10 04:10:15 UTC`
+  - 两者相差约 `1 小时 43 分 53 秒`
+
+### Known risks / TODO
+
+- 这个耗时是按 `actor/1` checkpoint 落盘时间估算的；真正“step 1 训练计算完成”的时刻可能会比写盘时间略早，但通常差距不会很大。
+
+---
+
+## 2026-03-10: DeepScaler checkpoint cadence and disk usage check
+
+### Scope
+
+- 无代码改动。
+- 检查当前 DeepScaler 训练 run 的 checkpoint 保存间隔、当前 checkpoint 占用，以及磁盘剩余空间。
+
+### Changed files
+
+1. `develop.md`
+
+### Validation
+
+- `sed -n '1,140p' examples/deepscaler/run_train.sh`
+- `du -sh /tmp/deepscaler_ckpt_20260310_022623`
+- `du -sb /tmp/deepscaler_ckpt_20260310_022623`
+- `find /tmp/deepscaler_ckpt_20260310_022623/actor -maxdepth 1 -mindepth 1 -type d -printf '%f\n' | sort -n`
+- `find /tmp/deepscaler_ckpt_20260310_022623/actor/1/model_params -type f -printf '%s\n' | awk '{s+=$1} END {print s}'`
+- `df -h /tmp /home /`
+- 确认：
+  - 当前脚本默认 `SAVE_INTERVAL_STEPS=158`，`MAX_TO_KEEP=2`。
+  - 当前 run 的 checkpoint 根目录 `/tmp/deepscaler_ckpt_20260310_022623` 总占用约 `2.6G`（`2769934936` bytes）。
+  - 当前 actor 目录下只有 step `1`。
+  - `actor/1/model_params` 文件总和约 `2769901876` bytes，约等于 `2.58 GiB`。
+  - 当前根分区剩余空间约 `21G`。
+
+### Known risks / TODO
+
+- `du -sh` 对 Orbax/OCDBT 目录的展示可能不如字节级统计直观；本次以 `du -sb` 和文件字节和作为更可靠口径。
+- 实际单次 checkpoint 总大小会随着是否包含额外 metadata/optimizer state 略有波动，但当前 run 的 actor checkpoint 量级可按约 `2.6G` 估算。
+
+---
+
+## 2026-03-10: DeepScaler default checkpoint interval adjustment
+
+### Scope
+
+- 将 `examples/deepscaler/run_train.sh` 的默认 checkpoint 保存间隔从 `158` 调整为 `79`。
+- 目标是在默认 `MAX_STEPS=315` 的配置下，训练过程中大约产生 4 次保存点。
+
+### Changed files
+
+1. `examples/deepscaler/run_train.sh`
+2. `examples/deepscaler/run_train_dbc.sh`
+3. `develop.md`
+
+### Validation
+
+- `sed -n '1,80p' examples/deepscaler/run_train.sh`
+- `sed -n '1,80p' examples/deepscaler/run_train_dbc.sh`
+- 确认：
+  - `examples/deepscaler/run_train.sh` 与 `examples/deepscaler/run_train_dbc.sh` 的默认 `SAVE_INTERVAL_STEPS` 都已从 `158` 改为 `79`
+  - 在 `315` step 的默认 run 下，预期保存点大致为 step `79`、`158`、`237`、`315` 附近
+
+### Known risks / TODO
+
+- 当前修改只影响后续新启动的 run；已经在运行中的训练进程不会动态读取这个新默认值。
+- 更频繁保存会增加 I/O 和磁盘占用；按当前 actor checkpoint 约 `2.6G` 估算，需要继续关注 `/tmp` 剩余空间。
 - `sed -n '1,120p' examples/deepscaler/run_eval_pass1_avg16.sh`
 - 确认：
   - `math_eval_nb.py` 新增 `--seed` 参数，默认值为 `0`。
@@ -3908,3 +4108,39 @@ This file tracks engineering changes made in this repository.
 
 - If callers append a conflicting DBC variant via extra CLI args, the Python entrypoint will reject the combination.
 - The new wrapper inherits the current default heavy geometry (`NUM_GENERATIONS=8`, `ROLLOUT_PROMPT_BATCH_SIZE=4`), so rollout-side memory pressure still applies.
+
+## 2026-03-10 - Pushed-contents summary request
+
+### Scope
+
+- 无代码改动。
+- Confirmed the exact contents of pushed commit `24e3cf79dbbdb7193ba2d22c8e099e8bca06510a`.
+
+### Changed files
+
+1. `develop.md`
+
+### Validation
+
+- `git show --stat --summary --format=fuller 24e3cf79`
+- `git show --name-only --format=oneline --no-renames 24e3cf79`
+
+### Validation results
+
+- The pushed commit contains 7 tracked-file changes:
+  - `develop.md`
+  - `examples/deepscaler/README.md`
+  - `examples/deepscaler/run_train.sh`
+  - `examples/deepscaler/run_train_dbc.sh`
+  - `examples/deepscaler/train_deepscaler_nb.py`
+  - `tunix/rl/experimental/agentic_rl_learner.py`
+  - `tunix/rl/rl_cluster.py`
+- Commit summary:
+  - added actor-side generation chunking support
+  - added a dedicated DeepScaler DBC wrapper
+  - changed current `run_train.sh` defaults to `NUM_GENERATIONS=8` and `ACTOR_GENERATION_CHUNK_SIZE=2`
+  - updated docs and development log
+
+### Known risks / TODO
+
+- This summary step does not include a fresh end-to-end training run after push.
