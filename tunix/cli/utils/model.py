@@ -86,7 +86,8 @@ def create_model(
     model_config: dict[str, Any],
     tokenizer_config: dict[str, Any],
     mesh: jax.sharding.Mesh,
-) -> Tuple[nnx.Module, str]:
+    return_model_path: bool = False,
+) -> Tuple[nnx.Module, str] | Tuple[nnx.Module, str, str]:
   """Creates a model and determines the tokenizer path based on the model config.
 
   This function handles model loading from various sources (GCS, Kaggle, HF)
@@ -104,6 +105,8 @@ def create_model(
       A tuple containing:
           - model: The loaded and potentially LoRA-applied nnx.Module.
           - tokenizer_path: The determined path to the tokenizer model.
+          - model_path: The resolved local model path, only when
+            `return_model_path=True`.
   """
   tokenizer_path: str = tokenizer_config['tokenizer_path']
   model_name = model_config['model_name']
@@ -147,4 +150,6 @@ def create_model(
   if model_config['model_display']:
     nnx.display(model)
 
+  if return_model_path:
+    return model, tokenizer_path, model_path
   return model, tokenizer_path

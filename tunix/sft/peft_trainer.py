@@ -48,6 +48,57 @@ MetricsLogger = sft_metrics_logger.MetricsLogger
 MetricsLoggerOptions = sft_metrics_logger.MetricsLoggerOptions
 
 
+def _truncate_partition_spec_to_ndim(
+    partition_spec: Any,
+    ndim: int | None,
+) -> Any:
+  """Aligns an over-specified PartitionSpec with the tensor rank.
+
+  Some LoRA providers inherit the base weight partition spec for low-rank
+  matrices whose rank is smaller than the original kernel rank. In that case,
+  `nnx.get_partition_spec` can return specs such as
+  `PartitionSpec('fsdp', 'tp', None)` for a rank-2 tensor. JAX rejects those
+  specs when they are applied to optimizer state leaves.
+  """
+  if ndim is None or not isinstance(partition_spec, jax.sharding.PartitionSpec):
+    return partition_spec
+
+  spec_axes = list(partition_spec)
+  if len(spec_axes) <= ndim:
+    return partition_spec
+
+  excess_axes = len(spec_axes) - ndim
+  for index in range(len(spec_axes) - 1, -1, -1):
+    if excess_axes == 0:
+      break
+    if spec_axes[index] is None:
+      spec_axes.pop(index)
+      excess_axes -= 1
+
+  if excess_axes > 0:
+    spec_axes = spec_axes[:ndim]
+
+  return jax.sharding.PartitionSpec(*spec_axes)
+
+
+def _align_optimizer_leaf_partition_spec(
+    optimizer_state_leaf: Any,
+    optimizer_pspec_leaf: Any,
+) -> tuple[Any, bool]:
+  """Returns an optimizer spec leaf whose rank matches the state leaf."""
+  state_value = getattr(optimizer_state_leaf, "value", optimizer_state_leaf)
+  spec_value = getattr(optimizer_pspec_leaf, "value", optimizer_pspec_leaf)
+  adjusted_spec_value = _truncate_partition_spec_to_ndim(
+      spec_value, getattr(state_value, "ndim", None)
+  )
+  if adjusted_spec_value == spec_value:
+    return optimizer_pspec_leaf, False
+
+  if hasattr(optimizer_pspec_leaf, "replace"):
+    return optimizer_pspec_leaf.replace(value=adjusted_spec_value), True
+  return adjusted_spec_value, True
+
+
 @dataclasses.dataclass(slots=True, kw_only=True)
 class TrainingConfig:
   """Configuration for the trainer."""
@@ -364,6 +415,27 @@ class PeftTrainer:
       return
     optimizer_state = nnx.state(self.optimizer, nnx.optimizer.OptState)
     optimizer_pspecs = nnx.get_partition_spec(optimizer_state)
+    adjusted_spec_count = 0
+
+    def _sanitize_optimizer_spec(state_leaf, spec_leaf):
+      nonlocal adjusted_spec_count
+      adjusted_spec_leaf, was_adjusted = _align_optimizer_leaf_partition_spec(
+          state_leaf, spec_leaf
+      )
+      adjusted_spec_count += int(was_adjusted)
+      return adjusted_spec_leaf
+
+    optimizer_pspecs = jax.tree.map(
+        _sanitize_optimizer_spec,
+        optimizer_state,
+        optimizer_pspecs,
+    )
+    if adjusted_spec_count:
+      logging.info(
+          "Adjusted %d optimizer sharding specs to match optimizer state "
+          "tensor ranks.",
+          adjusted_spec_count,
+      )
 
     optimizer_sharded_state = jax.lax.with_sharding_constraint(
         optimizer_state, optimizer_pspecs

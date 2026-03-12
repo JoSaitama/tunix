@@ -153,6 +153,7 @@ class HyperParameters:
         "lora_config",
         "training_config",
         "optimizer_config",
+        "dpo_config",
         "profiler_options",
         "rl_training_config",
     }
@@ -177,6 +178,20 @@ class HyperParameters:
     self._validate_tokenizer()
     self._validate_model_source(raw_keys)
     self.check_supported_workflow()
+
+  def _iter_model_configs(
+      self, raw_keys: collections.OrderedDict[str, Any]
+  ) -> Iterator[tuple[str, collections.abc.Mapping[str, Any]]]:
+    """Yields all top-level model configs in the current config."""
+    for key, value in raw_keys.items():
+      if not key.endswith("model_config"):
+        continue
+      if not isinstance(value, collections.abc.Mapping):
+        raise ValueError(
+            f"Expected '{key}' to be a dictionary-like model config, got"
+            f" {type(value)}."
+        )
+      yield key, value
 
   def _validate_tokenizer(self):
     """Validate the tokenizer configuration.
@@ -238,21 +253,25 @@ class HyperParameters:
 
   def _validate_model_source(self, raw_keys: collections.OrderedDict[str, Any]):
     """Validate the checkpoint source and intermediate checkpoint."""
-    model_config = raw_keys["model_config"]
-    model_source = model_config.get("model_source")
-    intermediate_ckpt = model_config.get("intermediate_ckpt_dir")
+    validated_model_configs = list(self._iter_model_configs(raw_keys))
+    if not validated_model_configs:
+      raise ValueError("At least one '*model_config' section is required.")
 
-    if model_source not in _SUPPORTED_MODEL_SOURCES:
-      raise ValueError(
-          f"Invalid model_source: {model_source!r}. Must be one of"
-          f" {_SUPPORTED_MODEL_SOURCES}."
-      )
+    for config_key, model_config in validated_model_configs:
+      model_source = model_config.get("model_source")
+      intermediate_ckpt = model_config.get("intermediate_ckpt_dir")
 
-    if model_source in ["kaggle", "huggingface"] and not intermediate_ckpt:
-      raise ValueError(
-          "intermediate_ckpt must be specified when model_source is 'kaggle' or"
-          " 'huggingface'"
-      )
+      if model_source not in _SUPPORTED_MODEL_SOURCES:
+        raise ValueError(
+            f"Invalid model_source for '{config_key}': {model_source!r}. Must"
+            f" be one of {_SUPPORTED_MODEL_SOURCES}."
+        )
+
+      if model_source in ["kaggle", "huggingface"] and not intermediate_ckpt:
+        raise ValueError(
+            "intermediate_ckpt must be specified when model_source is"
+            f" 'kaggle' or 'huggingface'. Missing for '{config_key}'."
+        )
 
   def check_supported_workflow(self) -> None:
     """Checks if the model_source is supported for the given model_name.
@@ -260,9 +279,6 @@ class HyperParameters:
     Raises:
       ValueError: If the model_source is not supported for the model_name.
     """
-    model_config = self.config["model_config"]
-    model_name = model_config["model_name"]
-    model_source = model_config["model_source"]
     supported_sources = collections.defaultdict(
         lambda: ["huggingface", "internal"]
     )
@@ -272,34 +288,22 @@ class HyperParameters:
     supported_sources["gemma2"] = ["kaggle", "internal"]
     supported_sources["gemma3"] = ["gcs", "internal"]
 
-    if model_name.startswith("gemma3"):
-      expected_sources = supported_sources["gemma3"]
+    for config_key, model_config in self._iter_model_configs(self.config):
+      model_name = model_config["model_name"]
+      model_source = model_config["model_source"]
+      if model_name.startswith("gemma3"):
+        expected_sources = supported_sources["gemma3"]
+      elif model_name.startswith("gemma2"):
+        expected_sources = supported_sources["gemma2"]
+      elif model_name.startswith("gemma"):
+        expected_sources = supported_sources["gemma"]
+      else:
+        expected_sources = supported_sources["other"]
+
       if model_source not in expected_sources:
         raise ValueError(
-            f"Model '{model_name}' must use source(s) {expected_sources}, but"
-            f" got '{model_source}'."
-        )
-    elif model_name.startswith("gemma2"):
-      expected_sources = supported_sources["gemma2"]
-      if model_source not in expected_sources:
-        raise ValueError(
-            f"Model '{model_name}' must use source(s) {expected_sources}, but"
-            f" got '{model_source}'."
-        )
-    elif model_name.startswith("gemma"):
-      expected_sources = supported_sources["gemma"]
-      if model_source not in expected_sources:
-        raise ValueError(
-            f"Model '{model_name}' must use source(s) {expected_sources}, but"
-            f" got '{model_source}'."
-        )
-    else:
-      # Default case for other models
-      expected_sources = supported_sources["other"]
-      if model_source not in expected_sources:
-        raise ValueError(
-            f"Model '{model_name}' must use source(s) {expected_sources}, but"
-            f" got '{model_source}'."
+            f"Model '{model_name}' in '{config_key}' must use source(s)"
+            f" {expected_sources}, but got '{model_source}'."
         )
 
   def _get_nested_config(self, keys: Sequence[str]) -> Any:

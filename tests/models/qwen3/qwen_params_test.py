@@ -14,6 +14,7 @@
 
 """Tests for Qwen3 model parameters and LoRA merged model saving."""
 
+import json
 import os
 import unittest
 
@@ -198,6 +199,65 @@ class Qwen3ParamsTest(lora_params_test_base.LoraParamsTestBase):
       f.write('{"model_type": "qwen3"}')
 
     return self.base_checkpoint_dir
+
+  def test_save_merged_model_from_sharded_checkpoint(self):
+    """Supports Hugging Face-style sharded safetensors checkpoints."""
+    base_model = self._create_base_model()
+    self.create_checkpoint(base_model)
+
+    model_path = os.path.join(self.base_checkpoint_dir, "model.safetensors")
+    base_state = safe_np.load_file(model_path)
+    all_keys = sorted(base_state.keys())
+    split_index = len(all_keys) // 2
+    shard_specs = {
+        "model-00001-of-00002.safetensors": all_keys[:split_index],
+        "model-00002-of-00002.safetensors": all_keys[split_index:],
+    }
+
+    weight_map = {}
+    for shard_name, shard_keys in shard_specs.items():
+      safe_np.save_file(
+          {key: base_state[key] for key in shard_keys},
+          os.path.join(self.base_checkpoint_dir, shard_name),
+      )
+      for key in shard_keys:
+        weight_map[key] = shard_name
+    os.remove(model_path)
+
+    total_size = sum(np.asarray(value).nbytes for value in base_state.values())
+    with open(
+        os.path.join(self.base_checkpoint_dir, "model.safetensors.index.json"),
+        "w",
+    ) as f:
+      json.dump(
+          {
+              "metadata": {"total_size": total_size},
+              "weight_map": weight_map,
+          },
+          f,
+      )
+
+    lora_model = self._apply_lora_to_model(base_model)
+    self.save_merged_model(lora_model)
+
+    target_key = "model.layers.0.self_attn.q_proj.weight"
+    merged_state = safe_np.load_file(
+        os.path.join(self.merged_output_dir, weight_map[target_key])
+    )
+    expected = self._compute_expected_merged_weight(
+        base_state[target_key],
+        lora_model.layers[0].attn.q_proj.w_lora_a.value,
+        lora_model.layers[0].attn.q_proj.w_lora_b.value,
+    )
+
+    np.testing.assert_allclose(
+        merged_state[target_key], expected, rtol=1e-5, atol=2e-5
+    )
+    self.assertTrue(
+        os.path.exists(
+            os.path.join(self.merged_output_dir, "model.safetensors.index.json")
+        )
+    )
 
 
 if __name__ == "__main__":

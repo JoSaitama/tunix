@@ -14,6 +14,7 @@
 
 """Utilities for saving models with merged LoRA weights in safetensors format."""
 
+import json
 import os
 import shutil
 from typing import Any, Callable
@@ -50,6 +51,44 @@ def _extract_lora_from_component(
     lora_b = getattr(proj, lora_b_attr)
     return (path, (lora_a, lora_b))
   return None
+
+
+def _load_weight_map(local_model_path: str) -> dict[str, str] | None:
+  """Returns a state-key to shard filename map for sharded safetensors."""
+  index_path = os.path.join(local_model_path, 'model.safetensors.index.json')
+  if not os.path.exists(index_path):
+    return None
+  with open(index_path, 'r') as f:
+    index_data = json.load(f)
+  return index_data['weight_map']
+
+
+def _apply_lora_delta(
+    base_state: dict[str, Any],
+    state_key: str,
+    lora_a: Any,
+    lora_b: Any,
+    rank: int,
+    alpha: float,
+) -> None:
+  """Applies a LoRA delta to a single state dict entry."""
+  assert (
+      state_key in base_state
+  ), f'LoRA target {state_key} not found in base model state dict'
+
+  lora_a_val = jnp.asarray(getattr(lora_a, 'value', lora_a))
+  lora_b_val = jnp.asarray(getattr(lora_b, 'value', lora_b))
+
+  # Reshape 3D tensors to 2D if necessary.
+  if lora_a_val.ndim == 3:
+    d0, d1, d2 = lora_a_val.shape
+    lora_a_val = lora_a_val.reshape(d0 * d1, d2)
+  if lora_b_val.ndim == 3:
+    d0, d1, d2 = lora_b_val.shape
+    lora_b_val = lora_b_val.reshape(d0, d1 * d2)
+
+  combined_lora = (lora_a_val @ lora_b_val) * (alpha / rank)
+  base_state[state_key] += combined_lora.T.astype(base_state[state_key].dtype)
 
 
 def save_lora_merged_model_as_safetensors(
@@ -108,34 +147,32 @@ def save_lora_merged_model_as_safetensors(
     if custom_layer_extractor_fn:
       lora_layers |= custom_layer_extractor_fn(layer)
 
-  # Load base model state
-  base_state = safe_np.load_file(local_model_path + '/model.safetensors')
+  weight_map = _load_weight_map(local_model_path)
+  if weight_map is None:
+    base_state = safe_np.load_file(os.path.join(local_model_path, 'model.safetensors'))
+    for lora_name, (lora_a, lora_b) in lora_layers.items():
+      state_key = state_key_transform_fn(lora_name)
+      _apply_lora_delta(base_state, state_key, lora_a, lora_b, rank, alpha)
+    safe_np.save_file(base_state, os.path.join(output_dir, 'model.safetensors'))
+  else:
+    shard_to_updates: dict[str, list[tuple[str, Any, Any]]] = {}
+    for lora_name, (lora_a, lora_b) in lora_layers.items():
+      state_key = state_key_transform_fn(lora_name)
+      assert (
+          state_key in weight_map
+      ), f'LoRA layer {lora_name} not found in safetensors index'
+      shard_to_updates.setdefault(weight_map[state_key], []).append(
+          (state_key, lora_a, lora_b)
+      )
 
-  # Apply LoRA deltas
-  for lora_name, (lora_a, lora_b) in lora_layers.items():
-    state_key = state_key_transform_fn(lora_name)
-    assert (
-        state_key in base_state
-    ), f'LoRA layer {lora_name} not found in base model state dict'
-
-    lora_a_val = jnp.asarray(getattr(lora_a, 'value', lora_a))
-    lora_b_val = jnp.asarray(getattr(lora_b, 'value', lora_b))
-
-    # Reshape 3D tensors to 2D if necessary
-    if lora_a_val.ndim == 3:
-      d0, d1, d2 = lora_a_val.shape
-      lora_a_val = lora_a_val.reshape(d0 * d1, d2)
-    if lora_b_val.ndim == 3:
-      d0, d1, d2 = lora_b_val.shape
-      lora_b_val = lora_b_val.reshape(d0, d1 * d2)
-
-    # Compute and apply LoRA delta
-    combined_lora = (lora_a_val @ lora_b_val) * (alpha / rank)
-    base_state[state_key] += combined_lora.T.astype(base_state[state_key].dtype)
-
-  # Save merged model
-  safetensors_path = os.path.join(output_dir, 'model.safetensors')
-  safe_np.save_file(base_state, safetensors_path)
+    for shard_name in sorted(shard_to_updates):
+      shard_path = os.path.join(local_model_path, shard_name)
+      shard_state = safe_np.load_file(shard_path)
+      for state_key, lora_a, lora_b in shard_to_updates[shard_name]:
+        _apply_lora_delta(
+            shard_state, state_key, lora_a, lora_b, rank, alpha
+        )
+      safe_np.save_file(shard_state, os.path.join(output_dir, shard_name))
 
   # Copy non-safetensors files (config, tokenizer, etc.)
   for filename in os.listdir(local_model_path):

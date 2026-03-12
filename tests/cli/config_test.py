@@ -99,6 +99,40 @@ class ConfigTest(parameterized.TestCase):
 
     self.initialize_config([])
 
+  def test_dpo_style_config_without_top_level_model_config(self):
+    yaml_text = """
+actor_model_config:
+  model_name: "qwen3-4b-instruct-2507"
+  model_source: "huggingface"
+  model_id: "Qwen/Qwen3-4B-Instruct-2507"
+  intermediate_ckpt_dir: "/tmp/intermediate_actor"
+  model_display: false
+  mesh:
+    shape: "(1,1)"
+    axis_names: "('fsdp','tp')"
+reference_model_config:
+  model_name: "qwen3-4b-instruct-2507"
+  model_source: "huggingface"
+  model_id: "Qwen/Qwen3-4B-Instruct-2507"
+  intermediate_ckpt_dir: "/tmp/intermediate_reference"
+  model_display: false
+  mesh:
+    shape: "(1,1)"
+    axis_names: "('fsdp','tp')"
+tokenizer_config:
+  tokenizer_path: "Qwen/Qwen3-4B-Instruct-2507"
+  tokenizer_type: "huggingface"
+  add_bos: false
+  add_eos: false
+"""
+    with tempfile.NamedTemporaryFile("w", suffix=".yaml") as handle:
+      handle.write(yaml_text)
+      handle.flush()
+      with mock.patch.dict(os.environ, {"HF_TOKEN": "token"}, clear=False):
+        hp = config.initialize(["", handle.name])
+    self.assertIn("actor_model_config", hp.config)
+    self.assertIn("reference_model_config", hp.config)
+
   def test_override_training_config_simple(self):
     argv = [
         "",
@@ -300,20 +334,25 @@ class ConfigTest(parameterized.TestCase):
           expected=((2, 2), ("x", "y")),
       ),
   )
+  @mock.patch.object(jax, 'make_mesh')
   @mock.patch.object(jax, 'device_count')
   def test_create_mesh_valid(
-      self, mock_device_count_fn, raw_keys, mock_num_devices, expected
+      self,
+      mock_device_count_fn,
+      mock_make_mesh,
+      raw_keys,
+      mock_num_devices,
+      expected,
   ):
     mock_device_count_fn.return_value = mock_num_devices
+    mock_make_mesh.return_value = "mock-mesh"
     hp = self.initialize_config(self.convert_nested_dict_to_list(raw_keys))
     mesh = hp.create_mesh("model_config")
-    self.assertEqual(
-        mesh,
-        jax.make_mesh(
-            expected[0],
-            expected[1],
-            axis_types=(jax.sharding.AxisType.Auto,) * len(expected[1]),
-        ),
+    self.assertEqual(mesh, "mock-mesh")
+    mock_make_mesh.assert_called_once_with(
+        expected[0],
+        expected[1],
+        axis_types=(jax.sharding.AxisType.Auto,) * len(expected[1]),
     )
 
   @parameterized.named_parameters(

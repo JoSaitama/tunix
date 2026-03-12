@@ -1,0 +1,82 @@
+actor_model_config:
+  model_name: "qwen3-4b-instruct-2507"
+  model_source: "huggingface"
+  model_id: "Qwen/Qwen3-4B-Instruct-2507"
+  model_path: ""
+  model_download_path: "/tmp/models"
+  rng_seed: 0
+  model_display: false
+  intermediate_ckpt_dir: "/tmp/intermediate_ckpt_dpo_qwen3_4b"
+  lora_config:
+    module_path: ".*q_proj|.*k_proj|.*v_proj|.*o_proj|.*gate_proj|.*up_proj|.*down_proj"
+    rank: 128
+    alpha: 128.0
+  mesh:
+    shape: "(1,4)"
+    axis_names: "('fsdp','tp')"
+
+reference_model_config:
+  model_name: "qwen3-4b-instruct-2507"
+  model_source: "huggingface"
+  model_id: "Qwen/Qwen3-4B-Instruct-2507"
+  model_path: ""
+  model_download_path: "/tmp/models"
+  rng_seed: 0
+  model_display: false
+  intermediate_ckpt_dir: "/tmp/intermediate_ckpt_dpo_qwen3_4b"
+  mesh:
+    shape: "(1,4)"
+    axis_names: "('fsdp','tp')"
+
+tokenizer_config:
+  tokenizer_path: "Qwen/Qwen3-4B-Instruct-2507"
+  tokenizer_type: "huggingface"
+  add_bos: false
+  add_eos: false
+
+train_data_module: "examples/data/ultrafeedback_dpo.py:create_dataset(split='train_prefs', seed=42)"
+eval_data_module: "examples/data/ultrafeedback_dpo.py:create_dataset(split='test_prefs', seed=42)"
+
+batch_size: 1
+eval_batch_size: 1
+
+optimizer_config:
+  opt_type: "adamw"
+  schedule_type: "warmup_cosine_decay_schedule"
+  init_value: 0.0
+  peak_value: 5e-6
+  end_value: 0.0
+  warmup_steps: 546
+  decay_steps: 5464
+  b1: 0.9
+  b2: 0.99
+  weight_decay: 0.1
+  max_grad_norm: 0.1
+
+training_config:
+  # Approximate 1 epoch for 43,711 retained train pairs at effective batch 8.
+  eval_every_n_steps: 500
+  max_steps: 5464
+  gradient_accumulation_steps: 8
+  checkpoint_root_directory: "/home/lhf_hongfu_gmail_com/tunix/runs/dpo_qwen3_4b_ultrafeedback/checkpoints"
+  checkpointing_options:
+    save_interval_steps: 250
+    max_to_keep: 4
+  metrics_logging_options:
+    project_name: "tunix"
+    run_name: "qwen3-4b-ultrafeedback-dpo-baseline"
+    log_dir: "/home/lhf_hongfu_gmail_com/tunix/runs/dpo_qwen3_4b_ultrafeedback/tensorboard"
+    flush_every_n_steps: 20
+  profiler_options: null
+  data_sharding_axis: ["fsdp"]
+  max_inflight_computations: 2
+  metrics_prefix: "dpo"
+  pbar_description: "DPO"
+
+dpo_config:
+  beta: 0.01
+  label_smoothing: 0.0
+  max_prompt_length: 512
+  max_response_length: 512
+
+merged_model_output_dir: "/home/lhf_hongfu_gmail_com/tunix/runs/dpo_qwen3_4b_ultrafeedback/merged_lora"

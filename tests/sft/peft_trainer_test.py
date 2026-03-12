@@ -118,6 +118,26 @@ class PeftTrainerTest(parameterized.TestCase):
       trainer.train(self.train_ds, self.eval_ds)
     self.assertEqual(global_counter, 1)
 
+  def test_truncate_partition_spec_to_ndim(self):
+    self.assertEqual(
+        peft_trainer._truncate_partition_spec_to_ndim(
+            jax.sharding.PartitionSpec('fsdp', 'tp', None), 2
+        ),
+        jax.sharding.PartitionSpec('fsdp', 'tp'),
+    )
+    self.assertEqual(
+        peft_trainer._truncate_partition_spec_to_ndim(
+            jax.sharding.PartitionSpec('tp', None, 'fsdp'), 2
+        ),
+        jax.sharding.PartitionSpec('tp', 'fsdp'),
+    )
+    self.assertEqual(
+        peft_trainer._truncate_partition_spec_to_ndim(
+            jax.sharding.PartitionSpec('fsdp', 'tp'), 2
+        ),
+        jax.sharding.PartitionSpec('fsdp', 'tp'),
+    )
+
   @parameterized.named_parameters(
       ('cache_nnx_graph', True),
       ('no_cache_nnx_graph', False),

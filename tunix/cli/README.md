@@ -11,6 +11,8 @@ The Python scripts in this folder are the entry points for initiating training a
 
 - `grpo_main.py`: Main entry point to trigger Group Relative Policy Optimization (GRPO) Trainer from CLI configs
 
+- `dpo_main.py`: Main entry point to trigger Direct Preference Optimization (DPO) training from CLI configs
+
 
 ## Usage
 While you can run these scripts directly, the intended workflow is to use the wrapper scripts in the examples folder. These examples show how to pass the correct arguments and configurations for various use cases.
@@ -18,6 +20,8 @@ While you can run these scripts directly, the intended workflow is to use the wr
 For sft, we provide scripts running on mtnt translation dataset. See available [scripts](examples/sft/mtnt)
 
 For rl, we provide scripts running grpo on gsm8k math dataset. See available [scripts](examples/rl/gsm8k)
+
+For dpo, see the Qwen3 UltraFeedback example in [examples/dpo](../../examples/dpo)
 
 For launching shell scripts from examples, you would navigate to the examples directory and execute a script like this:
 
