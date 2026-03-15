@@ -37,8 +37,8 @@ tokenizer_config:
 train_data_module: "examples/data/ultrafeedback_dpo.py:create_dataset(split='train_prefs', seed=42)"
 eval_data_module: "examples/data/ultrafeedback_dpo.py:create_dataset(split='test_prefs', seed=42)"
 
-batch_size: 1
-eval_batch_size: 1
+batch_size: 2
+eval_batch_size: 2
 
 optimizer_config:
   opt_type: "adamw"
@@ -57,7 +57,7 @@ training_config:
   # Approximate 1 epoch for 43,711 retained train pairs at effective batch 8.
   eval_every_n_steps: 500
   max_steps: 5464
-  gradient_accumulation_steps: 8
+  gradient_accumulation_steps: 4
   checkpoint_root_directory: "/home/lhf_hongfu_gmail_com/tunix/runs/dpo_qwen3_4b_ultrafeedback/checkpoints"
   checkpointing_options:
     save_interval_steps: 250
@@ -78,5 +78,9 @@ dpo_config:
   label_smoothing: 0.0
   max_prompt_length: 512
   max_response_length: 512
+  use_dynamic_batch_curation: false
+  curation_variant: "outlier_l2"
+  curation_threshold: 3.0
+  self_influence_dot_threshold: 0.0
 
 merged_model_output_dir: "/home/lhf_hongfu_gmail_com/tunix/runs/dpo_qwen3_4b_ultrafeedback/merged_lora"

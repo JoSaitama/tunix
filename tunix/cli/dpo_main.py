@@ -215,6 +215,7 @@ class DpoPipeline(config.HyperParameters):
     actor_model, reference_model, tokenizer, _, model_path, mesh = (
         self.create_models_and_tokenizer()
     )
+    training_config = self.create_dpo_training_config()
     train_dataset = self.load_dataset(
         self.config["train_data_module"],
         tokenizer,
@@ -232,11 +233,27 @@ class DpoPipeline(config.HyperParameters):
           name="eval",
       )
 
-    trainer = dpo_trainer_lib.DPOTrainer(
+    trainer_cls = (
+        dpo_trainer_lib.CuratedDPOTrainer
+        if training_config.use_dynamic_batch_curation
+        else dpo_trainer_lib.DPOTrainer
+    )
+    if training_config.use_dynamic_batch_curation:
+      logging.info(
+          "Dynamic batch curation enabled for DPO: using CuratedDPOTrainer "
+          "(curation_variant=%s, curation_threshold=%s, "
+          "self_influence_dot_threshold=%s, gradient_accumulation_steps=%s).",
+          training_config.curation_variant,
+          training_config.curation_threshold,
+          training_config.self_influence_dot_threshold,
+          training_config.gradient_accumulation_steps,
+      )
+
+    trainer = trainer_cls(
         model=actor_model,
         ref_model=reference_model,
         optimizer=self.create_optimizer_with_clipping(),
-        training_config=self.create_dpo_training_config(),
+        training_config=training_config,
         tokenizer=tokenizer,
     )
 

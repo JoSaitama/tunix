@@ -95,6 +95,10 @@ class DpoMainTest(absltest.TestCase):
             "label_smoothing": 0.1,
             "max_prompt_length": 32,
             "max_response_length": 16,
+            "use_dynamic_batch_curation": True,
+            "curation_variant": "self-inf-batch",
+            "curation_threshold": 2.5,
+            "self_influence_dot_threshold": 0.25,
         }
     }
     pipeline.obtain_training_config_dict = mock.Mock(return_value={
@@ -110,6 +114,10 @@ class DpoMainTest(absltest.TestCase):
     self.assertEqual(training_config.label_smoothing, 0.1)
     self.assertEqual(training_config.max_prompt_length, 32)
     self.assertEqual(training_config.max_response_length, 16)
+    self.assertTrue(training_config.use_dynamic_batch_curation)
+    self.assertEqual(training_config.curation_variant, "self_inf_batch")
+    self.assertEqual(training_config.curation_threshold, 2.5)
+    self.assertEqual(training_config.self_influence_dot_threshold, 0.25)
 
   def test_create_optimizer_with_clipping_wraps_base_optimizer(self):
     pipeline = object.__new__(dpo_main.DpoPipeline)
@@ -165,6 +173,49 @@ class DpoMainTest(absltest.TestCase):
         rank=64,
         alpha=64.0,
     )
+
+  def test_run_dpo_trainer_uses_curated_trainer_when_enabled(self):
+    pipeline = object.__new__(dpo_main.DpoPipeline)
+    pipeline.config = {
+        "train_data_module": "train",
+        "eval_data_module": "eval",
+        "batch_size": 2,
+        "eval_batch_size": 2,
+    }
+    pipeline.create_models_and_tokenizer = mock.Mock(return_value=(
+        "actor-model",
+        "reference-model",
+        "tokenizer",
+        "tokenizer-path",
+        "model-path",
+        mock.MagicMock(),
+    ))
+    pipeline.load_dataset = mock.Mock(side_effect=["train-ds", "eval-ds"])
+    pipeline.create_optimizer_with_clipping = mock.Mock(return_value="optimizer")
+    pipeline.maybe_save_merged_lora = mock.Mock()
+    training_config = dpo_main.dpo_trainer_lib.DPOTrainingConfig(
+        eval_every_n_steps=10,
+        max_steps=20,
+        use_dynamic_batch_curation=True,
+    )
+    pipeline.create_dpo_training_config = mock.Mock(return_value=training_config)
+    trainer = mock.MagicMock()
+
+    with mock.patch.object(
+        dpo_main.dpo_trainer_lib,
+        "CuratedDPOTrainer",
+        return_value=trainer,
+    ) as mock_curated_trainer:
+      pipeline.run_dpo_trainer()
+
+    mock_curated_trainer.assert_called_once_with(
+        model="actor-model",
+        ref_model="reference-model",
+        optimizer="optimizer",
+        training_config=training_config,
+        tokenizer="tokenizer",
+    )
+    trainer.train.assert_called_once_with("train-ds", "eval-ds")
 
 
 if __name__ == "__main__":

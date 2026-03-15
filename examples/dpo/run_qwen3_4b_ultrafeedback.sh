@@ -46,9 +46,11 @@ if [[ "${PROFILE}" == "smoke" ]]; then
   EXTRA_ARGS+=(
     "train_data_module=examples/data/ultrafeedback_dpo.py:create_dataset(split='train_prefs', limit=512, seed=42)"
     "eval_data_module=examples/data/ultrafeedback_dpo.py:create_dataset(split='test_prefs', limit=64, seed=42)"
+    "batch_size=2"
+    "eval_batch_size=2"
     "training_config.max_steps=20"
     "training_config.eval_every_n_steps=10"
-    "training_config.gradient_accumulation_steps=8"
+    "training_config.gradient_accumulation_steps=4"
     "training_config.checkpoint_root_directory=/home/lhf_hongfu_gmail_com/tunix/runs/dpo_qwen3_4b_ultrafeedback_smoke/checkpoints"
     "training_config.checkpointing_options.save_interval_steps=250"
     "training_config.checkpointing_options.max_to_keep=4"

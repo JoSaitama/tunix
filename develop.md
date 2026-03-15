@@ -238,6 +238,43 @@ This file tracks engineering changes made in this repository.
 - `sed -n '1,260p' examples/deepscaler/README.md`
 - `sed -n '900,980p' examples/deepscaler/train_deepscaler_nb.py`
 - `sed -n '500,580p' tunix/rl/rl_cluster.py`
+
+---
+
+## 2026-03-12: DPO example environment validation
+
+### Scope
+
+- 无代码改动。
+- 检查 `examples/dpo/README.md` 的运行前提是否已满足。
+- 创建并验证小写虚拟环境 `/home/lhf_hongfu_gmail_com/.venvs/dpo`。
+- 直接调用 `tunix.cli.dpo_main` 进行 DPO smoke 运行验证，绕过脚本中硬编码的大写环境路径。
+
+### Changed files
+
+1. `develop.md`
+
+### Validation
+
+- `python3 --version`
+- `python3 -c "import jax; print(jax.__version__); print(jax.default_backend(), jax.device_count())"`
+  - 结果：系统默认 Python 为 `3.10.12`，且未安装 `jax`，不能直接运行 DPO 示例。
+- `python3.11 --version`
+- `ls /dev/accel* /dev/vfio/* 2>/dev/null | head`
+  - 结果：`python3.11` 可用；机器可见 `/dev/accel0..3`。
+- `python3.11 -m venv /home/lhf_hongfu_gmail_com/.venvs/dpo`
+- `source /home/lhf_hongfu_gmail_com/.venvs/dpo/bin/activate && python -m pip install -U pip && python -m pip install -e '.[dev]' && python -m pip install 'jax[tpu]==0.8.1'`
+  - 结果：安装完成，最终环境包含 `jax 0.8.1`、`jaxlib 0.8.1`、`libtpu 0.0.30`。
+- `source /home/lhf_hongfu_gmail_com/.venvs/dpo/bin/activate && python -c "import jax, flax; print('jax', jax.__version__); print('backend', jax.default_backend(), jax.device_count()); print('flax', flax.__version__)"`
+  - 结果：`jax 0.8.1`，`backend tpu 4`，`flax 0.12.5`。
+- `source /home/lhf_hongfu_gmail_com/.venvs/dpo/bin/activate && set -a && source /home/lhf_hongfu_gmail_com/tunix/my_example/.env && set +a && python -m tunix.cli.dpo_main /home/lhf_hongfu_gmail_com/tunix/examples/dpo/qwen3_4b_ultrafeedback.yaml "train_data_module=examples/data/ultrafeedback_dpo.py:create_dataset(split='train_prefs', limit=512, seed=42)" "eval_data_module=examples/data/ultrafeedback_dpo.py:create_dataset(split='test_prefs', limit=64, seed=42)" training_config.max_steps=20 training_config.eval_every_n_steps=10 training_config.gradient_accumulation_steps=8 training_config.checkpoint_root_directory=/home/lhf_hongfu_gmail_com/tunix/runs/dpo_qwen3_4b_ultrafeedback_smoke/checkpoints training_config.checkpointing_options.save_interval_steps=250 training_config.checkpointing_options.max_to_keep=4 training_config.metrics_logging_options.project_name=tunix training_config.metrics_logging_options.run_name=qwen3-4b-ultrafeedback-dpo-smoke training_config.metrics_logging_options.log_dir=/home/lhf_hongfu_gmail_com/tunix/runs/dpo_qwen3_4b_ultrafeedback_smoke/tensorboard training_config.metrics_logging_options.flush_every_n_steps=20 "training_config.data_sharding_axis=['fsdp']" training_config.max_inflight_computations=2 training_config.metrics_prefix=dpo training_config.pbar_description=DPO optimizer_config.opt_type=adamw optimizer_config.schedule_type=warmup_cosine_decay_schedule optimizer_config.init_value=0.0 optimizer_config.peak_value=5e-6 optimizer_config.end_value=0.0 optimizer_config.warmup_steps=2 optimizer_config.decay_steps=20 optimizer_config.b1=0.9 optimizer_config.b2=0.99 optimizer_config.weight_decay=0.1 optimizer_config.max_grad_norm=0.1 dpo_config.beta=0.01 dpo_config.label_smoothing=0.0 dpo_config.max_prompt_length=256 dpo_config.max_response_length=256 merged_model_output_dir=/home/lhf_hongfu_gmail_com/tunix/runs/dpo_qwen3_4b_ultrafeedback_smoke/merged_lora`
+  - 结果：成功读取配置、下载 `Qwen/Qwen3-4B-Instruct-2507` 权重与 tokenizer，并进入 LoRA/训练初始化阶段。
+
+### Known risks / TODO
+
+- `examples/dpo/run_qwen3_4b_ultrafeedback.sh` 当前硬编码 `VENV_PATH="/home/lhf_hongfu_gmail_com/.venvs/DPO"`；如果该大写路径存在但环境不完整，会覆盖已激活的小写 `dpo` 环境，导致 `ModuleNotFoundError`。
+- 本次未修改仓库代码；若后续坚持直接使用脚本且环境名必须为小写 `dpo`，需要单独处理这个路径兼容问题。
+- 本次 smoke 已确认进入模型初始化，但完整 20 step 训练仍需继续等待运行完成。
 - `sed -n '180,320p' tunix/rl/grpo/grpo_learner.py`
 - `rg -n "actor_generation_chunk_size|actor_grad_acc_factor|Actor Training|max_steps|num_generations|use-dbc-self-inf-group" examples/deepscaler tunix my_example -S`
 - 确认：
@@ -4144,3 +4181,504 @@ This file tracks engineering changes made in this repository.
 ### Known risks / TODO
 
 - This summary step does not include a fresh end-to-end training run after push.
+
+## 2026-03-14 - DPO environment README check
+
+### Scope
+
+- 无代码改动。
+- Checked what runtime environment `examples/dpo` expects and whether the README already documents it.
+
+### Changed files
+
+1. `develop.md`
+
+### Validation
+
+- `sed -n '1,140p' examples/dpo/README.md`
+- `sed -n '1,220p' examples/dpo/run_qwen3_4b_ultrafeedback.sh`
+- `sed -n '1,220p' pyproject.toml`
+
+### Validation results
+
+- `examples/dpo/README.md` already documents the dedicated DPO environment, Python version, install commands, required `HF_TOKEN`, and TPU assumptions.
+- `examples/dpo/run_qwen3_4b_ultrafeedback.sh` matches the documented virtualenv path `/home/lhf_hongfu_gmail_com/.venvs/DPO`.
+- `pyproject.toml` confirms the project requires Python `>=3.11`.
+
+### Known risks / TODO
+
+- README documents the intended environment, but this check did not perform a live training run or dependency import test in `/home/lhf_hongfu_gmail_com/.venvs/DPO`.
+
+## 2026-03-14 - DPO environment setup
+
+### Scope
+
+- 无代码改动。
+- Reused the existing `/home/lhf_hongfu_gmail_com/.venvs/DPO` virtualenv and aligned it with the `examples/dpo/README.md` setup instructions.
+
+### Changed files
+
+1. `develop.md`
+
+### Validation
+
+- `bash -lc 'source /home/lhf_hongfu_gmail_com/.venvs/DPO/bin/activate && python -m pip install -U pip'`
+- `bash -lc 'source /home/lhf_hongfu_gmail_com/.venvs/DPO/bin/activate && python -m pip install -e ".[dev]"'`
+- `bash -lc 'source /home/lhf_hongfu_gmail_com/.venvs/DPO/bin/activate && python -m pip install "jax[tpu]==0.8.1"'`
+- `bash -lc 'source /home/lhf_hongfu_gmail_com/.venvs/DPO/bin/activate && python - <<\"PY\"\nimport jax\nimport tunix\nprint(\"jax\", jax.__version__)\nprint(\"backend\", jax.default_backend())\nprint(\"devices\", jax.device_count())\nprint(\"tunix_import\", tunix.__file__)\nPY'`
+- `bash -lc 'source /home/lhf_hongfu_gmail_com/.venvs/DPO/bin/activate && python -m pip show jax jaxlib libtpu google-tunix | sed -n "1,120p"'`
+
+### Validation results
+
+- The existing `DPO` virtualenv is active and uses Python `3.11.13`.
+- Tunix is installed in editable mode from `/home/lhf_hongfu_gmail_com/tunix`.
+- JAX stack is aligned to the documented TPU setup:
+  - `jax==0.8.1`
+  - `jaxlib==0.8.1`
+  - `libtpu==0.0.30`
+- Runtime sanity check succeeded with:
+  - `backend tpu`
+  - `devices 4`
+
+### Known risks / TODO
+
+- This step did not execute `./examples/dpo/run_qwen3_4b_ultrafeedback.sh smoke`; running the trainer still requires a valid `HF_TOKEN` in `.env` or the shell environment.
+
+## 2026-03-14 - DPO smoke run check
+
+### Scope
+
+- 无代码改动。
+- Ran the DPO smoke command to verify environment, token loading, model download, trainer startup, and first eval/training transition.
+
+### Changed files
+
+1. `develop.md`
+
+### Validation
+
+- `bash -lc 'source /home/lhf_hongfu_gmail_com/.venvs/DPO/bin/activate && ./examples/dpo/run_qwen3_4b_ultrafeedback.sh smoke'`
+- `find runs/dpo_qwen3_4b_ultrafeedback_smoke -maxdepth 3 -type f | sort | tail -n 40`
+- `du -sh runs/dpo_qwen3_4b_ultrafeedback_smoke`
+
+### Validation results
+
+- Smoke run successfully:
+  - loaded `HF_TOKEN` from `my_example/.env`
+  - downloaded `Qwen/Qwen3-4B-Instruct-2507`
+  - initialized the DPO trainer and checkpoint manager
+  - skipped WandB backend cleanly because `wandb` is not installed
+  - completed initial eval with `Train step 0 eval loss: 0.691406 - eval perplexity: 2.000000`
+  - entered the training loop and created TensorBoard event files under `runs/dpo_qwen3_4b_ultrafeedback_smoke/tensorboard`
+- The smoke process was manually stopped after confirming the run had passed initialization and started training, to avoid holding TPU resources for the rest of the compile/train cycle.
+
+### Known risks / TODO
+
+- This verification did not wait for all `20` smoke steps to complete, so it does not yet prove end-of-run cleanup or LoRA merge/export behavior.
+
+## 2026-03-14 - DPO DBC integration assessment
+
+### Scope
+
+- 无代码改动。
+- Assessed whether Dynamic Batch Curation should be wired into `examples/dpo` and where it would need to land in the DPO stack.
+
+### Changed files
+
+1. `develop.md`
+
+### Validation
+
+- `sed -n '1,260p' tunix/sft/dpo/dpo_trainer.py`
+- `sed -n '1,340p' tunix/sft/peft_trainer.py`
+- `sed -n '1,260p' tunix/rl/robust_trainer.py`
+- `sed -n '520,610p' tunix/rl/rl_cluster.py`
+- `sed -n '1,220p' examples/dpo/qwen3_4b_ultrafeedback.yaml`
+
+### Validation results
+
+- Existing DBC wiring is RL-only:
+  - `tunix/rl/robust_trainer.py` subclasses `tunix.rl.trainer.Trainer`
+  - `tunix/rl/rl_cluster.py` selects `RobustTrainer` only for RL actor training
+- DPO uses `tunix/sft/dpo/dpo_trainer.py`, which subclasses `tunix/sft/peft_trainer.PeftTrainer`, so it does not pass through the RL trainer selection path.
+- The current DPO baseline config uses `batch_size: 1` with `gradient_accumulation_steps: 8`, so per-sample DBC on the current micro-batch would have no real filtering effect because each train step sees only one sample before accumulation.
+- If DBC is ever added to DPO, the correct landing point is a DPO/SFT-side trainer branch, not the existing RL `RobustTrainer`.
+
+### Known risks / TODO
+
+- A useful DPO DBC design likely needs either:
+  - larger per-step micro-batches (`batch_size > 1`), or
+  - a new accumulation-aware curation design that filters across multiple micro-steps before optimizer update.
+
+## 2026-03-14 - DPO cross-accumulation DBC implementation
+
+### Scope
+
+- Implemented DPO-side Dynamic Batch Curation that filters per-sample gradient outliers across a full gradient-accumulation window before one optimizer update.
+- Switched the `examples/dpo` baseline from `batch_size=1, gradient_accumulation_steps=8` to `batch_size=2, gradient_accumulation_steps=4`, preserving the effective batch size of `8`.
+- Added DPO example/docs coverage for enabling DBC via config overrides.
+
+### Changed files
+
+1. `develop.md`
+2. `examples/dpo/README.md`
+3. `examples/dpo/qwen3_4b_ultrafeedback.yaml`
+4. `examples/dpo/run_qwen3_4b_ultrafeedback.sh`
+5. `tests/cli/dpo_main_test.py`
+6. `tests/sft/dpo/dpo_trainer_test.py`
+7. `tunix/__init__.py`
+8. `tunix/cli/dpo_main.py`
+9. `tunix/sft/dpo/dpo_trainer.py`
+
+### Validation
+
+- `bash -lc 'source /home/lhf_hongfu_gmail_com/.venvs/DPO/bin/activate && python -m py_compile tunix/cli/dpo_main.py tunix/sft/dpo/dpo_trainer.py tests/cli/dpo_main_test.py tests/sft/dpo/dpo_trainer_test.py'`
+- `bash -lc 'source /home/lhf_hongfu_gmail_com/.venvs/DPO/bin/activate && python tests/cli/dpo_main_test.py'`
+- `bash -lc 'source /home/lhf_hongfu_gmail_com/.venvs/DPO/bin/activate && python tests/sft/dpo/dpo_trainer_test.py'`
+- `bash -lc 'source /home/lhf_hongfu_gmail_com/.venvs/DPO/bin/activate && RUN_TS=$(date +%Y%m%d_%H%M%S) && ./examples/dpo/run_qwen3_4b_ultrafeedback.sh smoke dpo_config.use_dynamic_batch_curation=true dpo_config.curation_threshold=3.0 training_config.max_steps=2 training_config.eval_every_n_steps=1 training_config.checkpoint_root_directory=/tmp/dpo_dbc_smoke_${RUN_TS}/checkpoints training_config.metrics_logging_options.log_dir=/tmp/dpo_dbc_smoke_${RUN_TS}/tensorboard merged_model_output_dir=/tmp/dpo_dbc_smoke_${RUN_TS}/merged_lora'`
+
+### Validation results
+
+- `tunix/sft/dpo/dpo_trainer.py` now contains:
+  - per-sample DPO/ORPO loss helpers
+  - accumulation-window curation aggregation
+  - `CuratedDPOTrainer` with manual cross-micro-step gradient curation
+- `tunix/cli/dpo_main.py` now selects `CuratedDPOTrainer` when `dpo_config.use_dynamic_batch_curation=true`.
+- `examples/dpo` baseline now uses `batch_size=2` and `gradient_accumulation_steps=4`; smoke overrides match those values.
+- `tests/cli/dpo_main_test.py`: passed.
+- `tests/sft/dpo/dpo_trainer_test.py`: passed, including:
+  - outlier-filter aggregation math
+  - equivalence to standard grad accumulation when threshold is effectively disabled
+- End-to-end DBC smoke validation:
+  - command reached `CuratedDPOTrainer`
+  - passed step-0 eval without the earlier DBC/eval metric crash
+  - created TensorBoard output under `/tmp/dpo_dbc_smoke_20260314_191658/tensorboard`
+  - the temporary smoke process was then terminated manually to release TPU resources
+
+### Known risks / TODO
+
+- The curated DPO path currently skips TFLOPs measurement because the existing utility assumes a single `train_step(model, optimizer, batch)` signature.
+- End-to-end validation confirmed startup, eval, and active metric output for the DBC example path, but it did not wait for the temporary `max_steps=2` smoke run to fully finish and merge/export LoRA outputs.
+
+## 2026-03-15 - DPO baseline command and hyperparameter check
+
+### Scope
+
+- 无代码改动。
+- Confirmed the current non-DBC `examples/dpo` full training command and baseline hyperparameters from the launcher, README, and YAML config.
+
+### Changed files
+
+1. `develop.md`
+
+### Validation
+
+- `sed -n '1,220p' examples/dpo/README.md`
+- `sed -n '1,220p' examples/dpo/qwen3_4b_ultrafeedback.yaml`
+- `sed -n '1,220p' examples/dpo/run_qwen3_4b_ultrafeedback.sh`
+
+### Validation results
+
+- The normal training command remains `./examples/dpo/run_qwen3_4b_ultrafeedback.sh full`.
+- The current baseline keeps effective batch size `8` via `batch_size=2` and `gradient_accumulation_steps=4`.
+- The recipe still targets `Qwen/Qwen3-4B-Instruct-2507` on `HuggingFaceH4/ultrafeedback_binarized` with LoRA DPO.
+
+### Known risks / TODO
+
+- None for this verification-only task.
+
+## 2026-03-15 - DPO README outlier_l2 full command
+
+### Scope
+
+- Added the missing `full` training example for DPO `outlier_l2` curation to the example README.
+
+### Changed files
+
+1. `develop.md`
+2. `examples/dpo/README.md`
+
+### Validation
+
+- `sed -n '1,200p' examples/dpo/README.md`
+
+### Validation results
+
+- `examples/dpo/README.md` now documents three `full` launcher patterns:
+  - baseline `full`
+  - `full` with `outlier_l2`
+  - `full` with `self_inf_batch`
+
+### Known risks / TODO
+
+- None for this documentation-only update.
+
+## 2026-03-15 - DPO README command presence check
+
+### Scope
+
+- 无代码改动。
+- Confirmed which DPO training and smoke commands are already documented in the example README.
+
+### Changed files
+
+1. `develop.md`
+
+### Validation
+
+- `sed -n '1,140p' examples/dpo/README.md`
+
+### Validation results
+
+- `examples/dpo/README.md` already documents:
+  - normal `full` training
+  - normal `smoke`
+  - DBC `smoke` with `outlier_l2`
+  - DBC `smoke` with `self_inf_batch`
+- The README does not currently include a dedicated `full` example for `self_inf_batch`; that path is still run by passing overrides to the existing `full` launcher command.
+
+### Known risks / TODO
+
+- If needed later, the README can add a separate `full + self_inf_batch` example block for discoverability, but it is not required for correctness.
+
+## 2026-03-15 - DPO README self-inf-batch full command
+
+### Scope
+
+- Added the missing `full` training example for DPO `self_inf_batch` curation to the example README.
+
+### Changed files
+
+1. `develop.md`
+2. `examples/dpo/README.md`
+
+### Validation
+
+- `sed -n '1,160p' examples/dpo/README.md`
+
+### Validation results
+
+- `examples/dpo/README.md` now documents all four main launcher patterns:
+  - normal `full`
+  - normal `smoke`
+  - DBC `smoke`
+  - DBC `full` for `self_inf_batch`
+
+### Known risks / TODO
+
+- None for this documentation-only update.
+
+## 2026-03-15 - DPO README full command inventory
+
+### Scope
+
+- 无代码改动。
+- Checked which `full` commands are currently documented in the DPO example README.
+
+### Changed files
+
+1. `develop.md`
+
+### Validation
+
+- `sed -n '1,180p' examples/dpo/README.md`
+
+### Validation results
+
+- `examples/dpo/README.md` currently documents two `full` commands:
+  - baseline `full`
+  - `full` with `self_inf_batch` DBC
+- The README does not currently include a separate `full` example for `outlier_l2`; that path can still be run by appending the corresponding overrides to the baseline `full` command.
+
+### Known risks / TODO
+
+- None for this verification-only task.
+
+## 2026-03-15 - DPO DBC variant scope clarification
+
+### Scope
+
+- 无代码改动。
+- Clarified the difference between the DBC variants already present in the RL/GRPO stack and the single DBC variant currently implemented for DPO.
+
+### Changed files
+
+1. `develop.md`
+
+### Validation
+
+- `rg -n "dynamic batch curation|DBC|dbc|use_dynamic_batch_curation|curation_threshold|self_inf|outlier|grad_norm" tunix my_example examples tests`
+- `sed -n '1,260p' tunix/rl/robust_trainer.py`
+- `sed -n '1,260p' tunix/rl/self_inf_trainer.py`
+- `sed -n '150,220p' my_example/config.py`
+- `sed -n '540,590p' tunix/rl/rl_cluster.py`
+
+### Validation results
+
+- The RL/GRPO stack exposes multiple DBC variants:
+  - outlier-L2 via `RobustTrainer`
+  - self-influence batch scope via `SelfInfTrainer(scope="batch")`
+  - self-influence group scope via `SelfInfTrainer(scope="group")`
+- The DPO stack currently exposes only one DBC variant:
+  - gradient-norm outlier filtering with cutoff `mean + threshold * std`
+  - applied once per full accumulation window in `CuratedDPOTrainer`
+- DPO currently has no `self_inf` variant selector and no environment-variable-based DBC variant switch like RL.
+
+### Known risks / TODO
+
+- If multiple DPO DBC variants are desired later, the clean extension point is the DPO trainer selection path in `tunix/cli/dpo_main.py`, not the existing RL variant wiring.
+
+## 2026-03-15 - DPO self-influence variant design judgment
+
+### Scope
+
+- 无代码改动。
+- Assessed whether DPO should expose both `self-inf-batch` and `self-inf-group`, or only one self-influence-style curation variant.
+
+### Changed files
+
+1. `develop.md`
+
+### Validation
+
+- Reused the already inspected DPO trainer implementation in `tunix/sft/dpo/dpo_trainer.py`.
+- Reused the already inspected RL self-influence implementation in `tunix/rl/self_inf_trainer.py`.
+- Reused the already inspected DPO example recipe in `examples/dpo/qwen3_4b_ultrafeedback.yaml`.
+
+### Validation results
+
+- For the current DPO recipe, `self-inf-group` is not naturally defined because samples are independent preference pairs, not GRPO-style grouped rollouts.
+- `self-inf-batch` could be defined for DPO by comparing each pair gradient against the mean gradient of the current curation window.
+- `self-inf-group` would only make sense if the DPO dataset loader and batching logic preserved true per-prompt groups with multiple preference pairs per prompt.
+- Recommendation: keep one DPO DBC variant for now, or add `self-inf-batch` first; do not add `self-inf-group` unless grouped DPO data is introduced explicitly.
+
+### Known risks / TODO
+
+- If grouped DPO is introduced later, the grouping semantics must be made explicit in the dataset and batching contract before adding a `self-inf-group` variant.
+
+## 2026-03-15 - DPO self-inf-batch variant implementation
+
+### Scope
+
+- Added a second DPO Dynamic Batch Curation variant, `self_inf_batch`, alongside the existing `outlier_l2` path.
+- Kept the default DPO DBC behavior unchanged by preserving `outlier_l2` as the default `curation_variant`.
+- Added config/docs/tests so DPO can switch between the two DBC variants without touching the RL DBC stack.
+
+### Changed files
+
+1. `develop.md`
+2. `examples/dpo/README.md`
+3. `examples/dpo/qwen3_4b_ultrafeedback.yaml`
+4. `tests/cli/dpo_main_test.py`
+5. `tests/sft/dpo/dpo_trainer_test.py`
+6. `tunix/cli/dpo_main.py`
+7. `tunix/sft/dpo/dpo_trainer.py`
+
+### Validation
+
+- `bash -lc 'source /home/lhf_hongfu_gmail_com/.venvs/DPO/bin/activate && python -m py_compile tunix/cli/dpo_main.py tunix/sft/dpo/dpo_trainer.py tests/cli/dpo_main_test.py tests/sft/dpo/dpo_trainer_test.py'`
+- `bash -lc 'source /home/lhf_hongfu_gmail_com/.venvs/DPO/bin/activate && python tests/cli/dpo_main_test.py'`
+- `bash -lc 'source /home/lhf_hongfu_gmail_com/.venvs/DPO/bin/activate && JAX_PLATFORMS=cpu python tests/sft/dpo/dpo_trainer_test.py'`
+- `bash -lc 'source /home/lhf_hongfu_gmail_com/.venvs/DPO/bin/activate && RUN_TS=$(date +%Y%m%d_%H%M%S) && ./examples/dpo/run_qwen3_4b_ultrafeedback.sh smoke dpo_config.use_dynamic_batch_curation=true dpo_config.curation_variant=self_inf_batch dpo_config.self_influence_dot_threshold=0.0 training_config.max_steps=2 training_config.eval_every_n_steps=1 training_config.checkpoint_root_directory=/tmp/dpo_self_inf_smoke_${RUN_TS}/checkpoints training_config.metrics_logging_options.log_dir=/tmp/dpo_self_inf_smoke_${RUN_TS}/tensorboard merged_model_output_dir=/tmp/dpo_self_inf_smoke_${RUN_TS}/merged_lora'`
+
+### Validation results
+
+- `tunix/sft/dpo/dpo_trainer.py` now supports:
+  - `curation_variant="outlier_l2"` using the existing grad-norm cutoff
+  - `curation_variant="self_inf_batch"` using per-sample gradient dot products against the full accumulation-window mean gradient
+- `DPOTrainingConfig` now normalizes DPO DBC variant aliases like `self-inf-batch` to the canonical `self_inf_batch`.
+- `CuratedDPOTrainer` now logs variant-specific DBC metrics without polluting eval metrics:
+  - common train-side DBC counts and grad-norm stats
+  - `dbc/grad_norm_cutoff` for `outlier_l2`
+  - `dbc/self_inf_dot_mean`, `dbc/self_inf_dot_std`, and `dbc/self_inf_dot_threshold` for `self_inf_batch`
+- `tests/cli/dpo_main_test.py`: passed.
+- `tests/sft/dpo/dpo_trainer_test.py`: passed on CPU, including:
+  - direct self-influence filtering math
+  - normalization of the `self-inf-batch` alias
+  - equivalence to standard gradient accumulation when `self_inf_batch` is configured to keep all samples
+- The attempted TPU smoke run confirmed that the `self_inf_batch` config overrides were accepted and reached the real DPO launcher/config merge path, but the process stalled in JAX TPU metadata probing before trainer startup and was terminated manually to release resources.
+
+### Known risks / TODO
+
+- The new `self_inf_batch` DPO variant is validated by unit/integration tests on CPU, but not yet by a completed TPU smoke run because this environment stalled during TPU backend metadata probing before trainer startup.
+
+## 2026-03-15 - DPO self-inf-batch smoke rerun and validation
+
+### Scope
+
+- 无代码改动。
+- Reran the DPO `self_inf_batch` smoke test, debugged the earlier startup stall, and confirmed the smoke path completes end-to-end when run outside sandbox restrictions.
+
+### Changed files
+
+1. `develop.md`
+
+### Validation
+
+- Sandboxed smoke attempt:
+  - `bash -lc 'source /home/lhf_hongfu_gmail_com/.venvs/DPO/bin/activate && RUN_TS=$(date +%Y%m%d_%H%M%S) && ./examples/dpo/run_qwen3_4b_ultrafeedback.sh smoke dpo_config.use_dynamic_batch_curation=true dpo_config.curation_variant=self_inf_batch dpo_config.self_influence_dot_threshold=0.0 training_config.max_steps=2 training_config.eval_every_n_steps=1 training_config.checkpoint_root_directory=/tmp/dpo_self_inf_smoke_${RUN_TS}/checkpoints training_config.metrics_logging_options.log_dir=/tmp/dpo_self_inf_smoke_${RUN_TS}/tensorboard merged_model_output_dir=/tmp/dpo_self_inf_smoke_${RUN_TS}/merged_lora'`
+- Unsandboxed rerun of the same smoke command:
+  - `bash -lc 'source /home/lhf_hongfu_gmail_com/.venvs/DPO/bin/activate && RUN_TS=$(date +%Y%m%d_%H%M%S) && ./examples/dpo/run_qwen3_4b_ultrafeedback.sh smoke dpo_config.use_dynamic_batch_curation=true dpo_config.curation_variant=self_inf_batch dpo_config.self_influence_dot_threshold=0.0 training_config.max_steps=2 training_config.eval_every_n_steps=1 training_config.checkpoint_root_directory=/tmp/dpo_self_inf_smoke_${RUN_TS}/checkpoints training_config.metrics_logging_options.log_dir=/tmp/dpo_self_inf_smoke_${RUN_TS}/tensorboard merged_model_output_dir=/tmp/dpo_self_inf_smoke_${RUN_TS}/merged_lora'`
+- Post-run artifact checks:
+  - `find /tmp/dpo_self_inf_smoke_20260315_030834/checkpoints -maxdepth 2 -mindepth 1 -type d | sort`
+  - `find /tmp/dpo_self_inf_smoke_20260315_030834/merged_lora -maxdepth 2 -type f | sort`
+  - `find /tmp/dpo_self_inf_smoke_20260315_030834/tensorboard -maxdepth 1 -type f | sort`
+
+### Validation results
+
+- The sandboxed smoke reproduced the earlier issue:
+  - repeated `Failed to get TPU metadata (tpu-env)` during startup
+  - no progress into model/trainer initialization
+- The same smoke command succeeded once rerun outside sandbox restrictions.
+- Confirmed runtime milestones on the successful unsandboxed run:
+  - model download/init completed
+  - overlong train/eval DPO filtering ran
+  - `CuratedDPOTrainer` selected with `curation_variant=self_inf_batch`
+  - step-0 eval completed
+  - train step 1 completed and checkpoint step `1` saved
+  - eval at train step `2` completed
+  - train step 2 completed and checkpoint step `2` saved
+  - merged LoRA output was written successfully
+- Successful run outputs:
+  - checkpoints under `/tmp/dpo_self_inf_smoke_20260315_030834/checkpoints/1` and `/tmp/dpo_self_inf_smoke_20260315_030834/checkpoints/2`
+  - merged model under `/tmp/dpo_self_inf_smoke_20260315_030834/merged_lora`
+  - TensorBoard events under `/tmp/dpo_self_inf_smoke_20260315_030834/tensorboard`
+- Observed runtime characteristic:
+  - the 2-step smoke completed successfully but took about 8 minutes because the first eval/train compilation on TPU was very slow in this environment
+
+### Known risks / TODO
+
+- For TPU-backed smoke/debug in this environment, sandboxed execution is not reliable because TPU metadata probing can stall before trainer startup; prefer unsandboxed execution for real TPU validation.
+
+## 2026-03-15 - DPO DBC parameter and filtering scope check
+
+### Scope
+
+- 无代码改动。
+- Confirmed which DPO Dynamic Batch Curation knobs are exposed in config and the exact sample window over which filtering is applied.
+
+### Changed files
+
+1. `develop.md`
+
+### Validation
+
+- `rg -n "use_dynamic_batch_curation|curation_threshold|aggregate_curated_step|CuratedDPOTrainer|gradient_accumulation_steps|batch_size" tunix/sft/dpo/dpo_trainer.py tunix/cli/dpo_main.py examples/dpo/qwen3_4b_ultrafeedback.yaml examples/dpo/run_qwen3_4b_ultrafeedback.sh`
+- `sed -n '1,260p' tunix/sft/dpo/dpo_trainer.py`
+- `sed -n '260,620p' tunix/sft/dpo/dpo_trainer.py`
+- `sed -n '620,820p' tunix/sft/dpo/dpo_trainer.py`
+- `sed -n '220,280p' tunix/cli/dpo_main.py`
+
+### Validation results
+
+- DPO DBC is enabled by `dpo_config.use_dynamic_batch_curation=true`.
+- The only explicit DBC threshold knob is `dpo_config.curation_threshold`, used as `mean_norm + threshold * std_norm`.
+- Filtering is applied once per full accumulation window, not per micro-step:
+  - each micro-step computes per-sample gradients and norms
+  - those samples are concatenated across `training_config.gradient_accumulation_steps`
+  - curation runs over the concatenated window before one optimizer update
+- The sample count inside one curation window is determined by `batch_size * gradient_accumulation_steps`.
+
+### Known risks / TODO
+
+- None for this verification-only task.

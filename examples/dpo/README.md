@@ -22,8 +22,8 @@ LoRA DPO baseline on `HuggingFaceH4/ultrafeedback_binarized`.
 - LR schedule: warmup cosine decay
 - Peak LR: `5e-6`
 - Effective batch size: `8`
-  - `batch_size=1`
-  - `gradient_accumulation_steps=8`
+  - `batch_size=2`
+  - `gradient_accumulation_steps=4`
 - Train steps: `5464`
 - Eval interval: `500`
 
@@ -43,6 +43,54 @@ Run the short smoke test:
 source /home/lhf_hongfu_gmail_com/.venvs/DPO/bin/activate
 cd /home/lhf_hongfu_gmail_com/tunix
 ./examples/dpo/run_qwen3_4b_ultrafeedback.sh smoke
+```
+
+Run the same smoke recipe with cross-accumulation DBC enabled:
+
+```bash
+source /home/lhf_hongfu_gmail_com/.venvs/DPO/bin/activate
+cd /home/lhf_hongfu_gmail_com/tunix
+./examples/dpo/run_qwen3_4b_ultrafeedback.sh smoke \
+  dpo_config.use_dynamic_batch_curation=true \
+  dpo_config.curation_threshold=3.0
+```
+
+Run the full DPO recipe with `outlier_l2` curation:
+
+```bash
+source /home/lhf_hongfu_gmail_com/.venvs/DPO/bin/activate
+cd /home/lhf_hongfu_gmail_com/tunix
+./examples/dpo/run_qwen3_4b_ultrafeedback.sh full \
+  dpo_config.use_dynamic_batch_curation=true \
+  dpo_config.curation_variant=outlier_l2 \
+  dpo_config.curation_threshold=3.0
+```
+
+Available DPO DBC variants:
+
+- `dpo_config.curation_variant=outlier_l2` (default): filter large gradient-norm outliers using `mean + curation_threshold * std`
+- `dpo_config.curation_variant=self_inf_batch`: filter samples whose gradient has negative or weak alignment with the full accumulation-window mean gradient using `dpo_config.self_influence_dot_threshold`
+
+Run the DPO smoke recipe with `self_inf_batch` curation:
+
+```bash
+source /home/lhf_hongfu_gmail_com/.venvs/DPO/bin/activate
+cd /home/lhf_hongfu_gmail_com/tunix
+./examples/dpo/run_qwen3_4b_ultrafeedback.sh smoke \
+  dpo_config.use_dynamic_batch_curation=true \
+  dpo_config.curation_variant=self_inf_batch \
+  dpo_config.self_influence_dot_threshold=0.0
+```
+
+Run the full DPO recipe with `self_inf_batch` curation:
+
+```bash
+source /home/lhf_hongfu_gmail_com/.venvs/DPO/bin/activate
+cd /home/lhf_hongfu_gmail_com/tunix
+./examples/dpo/run_qwen3_4b_ultrafeedback.sh full \
+  dpo_config.use_dynamic_batch_curation=true \
+  dpo_config.curation_variant=self_inf_batch \
+  dpo_config.self_influence_dot_threshold=0.0
 ```
 
 The launcher loads `.env` from either:

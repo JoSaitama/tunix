@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import functools
 from unittest import mock
 from absl.testing import absltest
 from absl.testing import parameterized
@@ -385,6 +386,164 @@ class DPOTrainerTest(parameterized.TestCase):
     )
     np.testing.assert_array_equal(out.completion_mask, expected_completion_mask)
     self.assertEqual(out.logits_to_keep, 4)
+
+  def test_aggregate_curated_step_filters_outlier(self):
+    grads = {"w": jnp.array([[1.0], [1.0], [10.0], [1.0]])}
+    losses = jnp.array([1.0, 1.0, 10.0, 1.0])
+    aux = {"metric": jnp.array([1.0, 1.0, 10.0, 1.0])}
+    grad_norms = jnp.array([1.0, 1.0, 10.0, 1.0])
+
+    final_grads, final_loss, final_aux = dpo_lib.aggregate_curated_step(
+        per_sample_grads=grads,
+        per_sample_losses=losses,
+        per_sample_aux=aux,
+        per_sample_grad_norms=grad_norms,
+        curation_threshold=1.0,
+    )
+
+    np.testing.assert_allclose(final_grads["w"], np.array([1.0]), atol=1e-6)
+    np.testing.assert_allclose(final_loss, 1.0, atol=1e-6)
+    np.testing.assert_allclose(final_aux["metric"], 1.0, atol=1e-6)
+    np.testing.assert_allclose(final_aux["dbc/num_samples_kept"], 3.0, atol=1e-6)
+    np.testing.assert_allclose(
+        final_aux["dbc/num_samples_filtered"], 1.0, atol=1e-6
+    )
+    np.testing.assert_allclose(final_aux["dbc/keep_ratio"], 0.75, atol=1e-6)
+
+  def test_aggregate_self_influence_curated_step_filters_anti_aligned_sample(
+      self,
+  ):
+    grads = {"w": jnp.array([[1.0], [1.0], [1.0], [-0.1]])}
+    losses = jnp.array([1.0, 1.0, 1.0, 10.0])
+    aux = {"metric": jnp.array([1.0, 1.0, 1.0, 10.0])}
+    grad_norms = jnp.array([1.0, 1.0, 1.0, 0.1])
+
+    final_grads, final_loss, final_aux = (
+        dpo_lib.aggregate_self_influence_curated_step(
+            per_sample_grads=grads,
+            per_sample_losses=losses,
+            per_sample_aux=aux,
+            per_sample_grad_norms=grad_norms,
+            dot_threshold=0.0,
+        )
+    )
+
+    np.testing.assert_allclose(final_grads["w"], np.array([1.0]), atol=1e-6)
+    np.testing.assert_allclose(final_loss, 1.0, atol=1e-6)
+    np.testing.assert_allclose(final_aux["metric"], 1.0, atol=1e-6)
+    np.testing.assert_allclose(final_aux["dbc/num_samples_kept"], 3.0, atol=1e-6)
+    np.testing.assert_allclose(
+        final_aux["dbc/num_samples_filtered"], 1.0, atol=1e-6
+    )
+    np.testing.assert_allclose(final_aux["dbc/keep_ratio"], 0.75, atol=1e-6)
+    np.testing.assert_allclose(
+        final_aux["dbc/self_inf_dot_threshold"], 0.0, atol=1e-6
+    )
+
+  @parameterized.named_parameters(
+      dict(
+          testcase_name="outlier_l2",
+          curation_variant="outlier_l2",
+          curation_threshold=1e6,
+          self_influence_dot_threshold=0.0,
+          expected_metrics=(
+              "dbc/num_samples_total",
+              "dbc/num_samples_kept",
+              "dbc/keep_ratio",
+              "dbc/grad_norm_cutoff",
+          ),
+      ),
+      dict(
+          testcase_name="self_inf_batch",
+          curation_variant="self_inf_batch",
+          curation_threshold=3.0,
+          self_influence_dot_threshold=-1e6,
+          expected_metrics=(
+              "dbc/num_samples_total",
+              "dbc/num_samples_kept",
+              "dbc/keep_ratio",
+              "dbc/self_inf_dot_mean",
+          ),
+      ),
+  )
+  def test_curated_trainer_matches_grad_accumulation_when_no_samples_filtered(
+      self,
+      curation_variant,
+      curation_threshold,
+      self_influence_dot_threshold,
+      expected_metrics,
+  ):
+    prompt_ids = np.arange(0, 10).reshape(2, 5)
+    prompt_mask = np.ones((2, 5))
+    chosen_ids = np.arange(10, 20).reshape(2, 5)
+    chosen_mask = np.ones((2, 5))
+    rejected_ids = np.arange(20, 30).reshape(2, 5)
+    rejected_mask = np.ones((2, 5))
+    train_ds = _dummy_dataset(
+        MySource(np.arange(4)),
+        prompt_ids,
+        prompt_mask,
+        chosen_ids,
+        chosen_mask,
+        rejected_ids,
+        rejected_mask,
+    )
+    baseline_model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
+    curated_model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
+    baseline_ref = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
+    curated_ref = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
+
+    baseline_trainer = dpo_lib.DPOTrainer(
+        model=baseline_model,
+        ref_model=baseline_ref,
+        optimizer=optax.sgd(1e-3),
+        training_config=dpo_lib.DPOTrainingConfig(
+            eval_every_n_steps=10,
+            max_steps=2,
+            gradient_accumulation_steps=2,
+        ),
+    )
+    curated_trainer = dpo_lib.CuratedDPOTrainer(
+        model=curated_model,
+        ref_model=curated_ref,
+        optimizer=optax.sgd(1e-3),
+        training_config=dpo_lib.DPOTrainingConfig(
+            eval_every_n_steps=10,
+            max_steps=2,
+            gradient_accumulation_steps=2,
+            use_dynamic_batch_curation=True,
+            curation_variant=curation_variant,
+            curation_threshold=curation_threshold,
+            self_influence_dot_threshold=self_influence_dot_threshold,
+        ),
+    )
+
+    baseline_trainer.train(train_ds, None)
+    curated_trainer.train(train_ds, None)
+
+    jax.tree.map_with_path(
+        functools.partial(tc.assert_close, atol=1e-6, rtol=1e-6),
+        nnx.state(baseline_model, nnx.Param),
+        nnx.state(curated_model, nnx.Param),
+    )
+    self.assertEqual(baseline_trainer.train_steps, curated_trainer.train_steps)
+    self.assertEqual(baseline_trainer.iter_steps, curated_trainer.iter_steps)
+    for metric_name in expected_metrics:
+      self.assertLen(
+          curated_trainer.metrics_logger.get_metric_history(
+              "", metric_name, "train"
+          ),
+          curated_trainer.train_steps,
+      )
+
+  def test_dpo_training_config_normalizes_curation_variant_alias(self):
+    config = dpo_lib.DPOTrainingConfig(
+        eval_every_n_steps=10,
+        max_steps=20,
+        curation_variant="self-inf-batch",
+    )
+
+    self.assertEqual(config.curation_variant, "self_inf_batch")
 
 
 if __name__ == "__main__":
