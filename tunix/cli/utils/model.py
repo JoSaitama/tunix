@@ -27,6 +27,28 @@ from tunix.rl import reshard
 _DEFAULT_TOKENIZER_PATH = 'meta-llama/Llama-3.1-8B'
 
 
+def _get_model_export_fn(model_name: str, export_fn_name: str):
+  """Returns a model-specific safetensors export function."""
+  params_modules = [
+      automodel.get_model_module(model_name, automodel.ModelModule.PARAMS)
+  ]
+  if model_name.startswith('gemma'):
+    params_modules.append(
+        automodel.get_model_module(
+            model_name, automodel.ModelModule.PARAMS_SAFETENSORS
+        )
+    )
+
+  for params_module in params_modules:
+    save_fn = getattr(params_module, export_fn_name, None)
+    if save_fn is not None:
+      return save_fn
+
+  raise AttributeError(
+      f'No {export_fn_name} saver found for model {model_name}.'
+  )
+
+
 def apply_lora_to_model(base_model, mesh, lora_config):
   """Apply Lora to the base model if given lora config."""
   logging.info('lora_config %r', lora_config)
@@ -153,3 +175,32 @@ def create_model(
   if return_model_path:
     return model, tokenizer_path, model_path
   return model, tokenizer_path
+
+
+def save_model_as_safetensors(
+    model_name: str,
+    local_model_path: str,
+    output_dir: str,
+    model_obj: nnx.Module,
+    lora_config: dict[str, Any] | None = None,
+) -> None:
+  """Exports a trained model as a safetensors directory."""
+  if lora_config:
+    save_fn = _get_model_export_fn(
+        model_name, 'save_lora_merged_model_as_safetensors'
+    )
+    save_fn(
+        local_model_path=local_model_path,
+        output_dir=output_dir,
+        lora_model=model_obj,
+        rank=lora_config['rank'],
+        alpha=lora_config['alpha'],
+    )
+    return
+
+  save_fn = _get_model_export_fn(model_name, 'save_full_model_as_safetensors')
+  save_fn(
+      local_model_path=local_model_path,
+      output_dir=output_dir,
+      model=model_obj,
+  )

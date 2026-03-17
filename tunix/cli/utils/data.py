@@ -6,7 +6,9 @@ import os
 from typing import Any
 
 import grain
+import numpy as np
 from tunix.generate import tokenizer_adapter
+from tunix.sft.peft_trainer import TrainingInput
 
 Tokenizer = tokenizer_adapter.Tokenizer
 TokenizerAdapter = tokenizer_adapter.TokenizerAdapter
@@ -65,7 +67,11 @@ def parse_call_string(arg_string: str) -> tuple[list[Any], dict[str, Any]]:
   return parsed_args, parsed_kwargs
 
 
-def get_dataset_from_module(specifier: str, tokenizer: TokenizerAdapter):
+def get_dataset_from_module(
+    specifier: str,
+    tokenizer: TokenizerAdapter,
+    apply_template: bool = True,
+):
   """Get dataset from module.
 
   Examples of specifier:
@@ -127,9 +133,84 @@ def get_dataset_from_module(specifier: str, tokenizer: TokenizerAdapter):
   else:
     func = module.create_dataset
   dataset = func(*args, **kwargs)
-  return dataset.map(
-      functools.partial(apply_chat_template, tokenizer=tokenizer)
+  if apply_template:
+    return dataset.map(
+        functools.partial(apply_chat_template, tokenizer=tokenizer)
+    )
+  return dataset
+
+
+def _get_sft_response_text(record: dict[str, Any]) -> str:
+  for key in ("response", "chosen_response", "chosen_responses"):
+    value = record.get(key)
+    if value is None:
+      continue
+    if isinstance(value, str):
+      return value
+    raise ValueError(f"SFT response field '{key}' must be a string.")
+  raise KeyError(
+      "SFT dataset records must include one of: "
+      "'response', 'chosen_response', 'chosen_responses'."
   )
+
+
+def _build_sft_training_input(
+    prompt_text: str,
+    response_text: str,
+    tokenizer: Tokenizer,
+    max_target_length: int,
+) -> TrainingInput | None:
+  prompt_tokens = tokenizer.tokenize(prompt_text, add_eos=False)
+  response_tokens = tokenizer.tokenize(response_text, add_eos=True)
+
+  total_length = len(prompt_tokens) + len(response_tokens)
+  if total_length > max_target_length:
+    return None
+
+  input_tokens = prompt_tokens.tolist()
+  input_tokens.extend(response_tokens.tolist())
+
+  input_mask = [0] * len(prompt_tokens) + [1] * len(response_tokens)
+  pad_size = max_target_length - total_length
+  input_tokens.extend([tokenizer.pad_id()] * pad_size)
+  input_mask.extend([0] * pad_size)
+
+  return TrainingInput(
+      input_tokens=np.array(input_tokens, dtype=prompt_tokens.dtype),
+      input_mask=np.array(input_mask, dtype=np.bool_),
+  )
+
+
+def _record_to_sft_training_input(
+    record: dict[str, Any],
+    tokenizer: Tokenizer,
+    max_target_length: int,
+) -> TrainingInput | None:
+  prompt_text = record["prompts"]
+  response_text = _get_sft_response_text(record)
+  return _build_sft_training_input(
+      prompt_text=prompt_text,
+      response_text=response_text,
+      tokenizer=tokenizer,
+      max_target_length=max_target_length,
+  )
+
+
+def get_sft_dataset_from_module(
+    specifier: str,
+    tokenizer: Tokenizer,
+    max_target_length: int,
+):
+  """Loads an SFT dataset module and converts records into TrainingInput."""
+  dataset = get_dataset_from_module(specifier, tokenizer)
+  dataset = dataset.map(
+      functools.partial(
+          _record_to_sft_training_input,
+          tokenizer=tokenizer,
+          max_target_length=max_target_length,
+      )
+  )
+  return dataset.filter(lambda x: x is not None)
 
 
 def post_init_dataset(

@@ -265,7 +265,12 @@ def download_model(
   elif model_source == ModelSource.GCS:
     return model_id_or_path
   elif model_source == ModelSource.INTERNAL:
-    raise ValueError('INTERNAL model source is not supported in OSS.')
+    if not os.path.exists(model_id_or_path):
+      raise ValueError(
+          "INTERNAL model source expects an existing local path in OSS. "
+          f"Received: {model_id_or_path}"
+      )
+    return model_id_or_path
   else:
     raise ValueError(
         f'Unsupported model source: {model_source}. Only KAGGLE, GCS,'

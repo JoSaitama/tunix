@@ -241,6 +241,122 @@ This file tracks engineering changes made in this repository.
 
 ---
 
+## 2026-03-17: Full-default UltraFeedback SFT -> DPO workflow
+
+### Scope
+
+- 为 `qwen2.5-1.5b` 的 `UltraFeedback` 两阶段 workflow 增加默认 `full`、可选 `lora` 的 stage-wise 分支。
+- 打通 `full SFT -> exported safetensors -> full/lora DPO` 的模型交接。
+- 保留现有 LoRA-only 导出兼容分支，不改数据切分语义。
+- 新增一份端到端 README，明确 `sft` / `dpo` prompt-disjoint 切分和 DPO+DBC 对照命令。
+
+### Changed files
+
+1. `tunix/models/safetensors_saver.py`
+2. `tunix/models/qwen2/params.py`
+3. `tunix/cli/utils/model.py`
+4. `tunix/cli/peft_main.py`
+5. `tunix/cli/dpo_main.py`
+6. `tests/cli/utils/model_test.py`
+7. `tests/cli/peft_main_test.py`
+8. `tests/cli/dpo_main_test.py`
+9. `tests/models/qwen2/qwen_params_test.py`
+10. `examples/sft/ultrafeedback/qwen2p5_1p5b_ultrafeedback.yaml`
+11. `examples/sft/ultrafeedback/qwen2p5_1p5b_ultrafeedback_lora.yaml`
+12. `examples/sft/ultrafeedback/run_qwen2p5_1p5b_ultrafeedback.sh`
+13. `examples/sft/ultrafeedback/README.md`
+14. `examples/dpo/qwen2p5_1p5b_ultrafeedback_from_sft.yaml`
+15. `examples/dpo/qwen2p5_1p5b_ultrafeedback_from_sft_lora.yaml`
+16. `examples/dpo/run_qwen2p5_1p5b_ultrafeedback_from_sft.sh`
+17. `examples/dpo/README.md`
+18. `examples/ultrafeedback/README.md`
+19. `tunix/cli/README.md`
+20. `develop.md`
+
+### Validation
+
+- `python -m py_compile tunix/cli/peft_main.py tunix/cli/dpo_main.py tunix/cli/utils/model.py tunix/models/qwen2/params.py tunix/models/safetensors_saver.py tests/cli/peft_main_test.py tests/cli/dpo_main_test.py tests/cli/utils/model_test.py tests/models/qwen2/qwen_params_test.py`
+  - 结果：通过。
+- `bash -n examples/sft/ultrafeedback/run_qwen2p5_1p5b_ultrafeedback.sh`
+  - 结果：通过。
+- `bash -n examples/dpo/run_qwen2p5_1p5b_ultrafeedback_from_sft.sh`
+  - 结果：通过。
+- 解析 4 份 YAML：
+  - `examples/sft/ultrafeedback/qwen2p5_1p5b_ultrafeedback.yaml`
+  - `examples/sft/ultrafeedback/qwen2p5_1p5b_ultrafeedback_lora.yaml`
+  - `examples/dpo/qwen2p5_1p5b_ultrafeedback_from_sft.yaml`
+  - `examples/dpo/qwen2p5_1p5b_ultrafeedback_from_sft_lora.yaml`
+  - 结果：`yaml.safe_load` 全部通过。
+- `source /home/lhf_hongfu_gmail_com/.venvs/DPO/bin/activate && python tests/cli/utils/model_test.py`
+  - 结果：`11` 个测试通过。
+- `source /home/lhf_hongfu_gmail_com/.venvs/DPO/bin/activate && python tests/cli/peft_main_test.py`
+  - 结果：退出码 `0`。
+- `source /home/lhf_hongfu_gmail_com/.venvs/DPO/bin/activate && python tests/cli/dpo_main_test.py`
+  - 结果：`7` 个测试通过。
+- `source /home/lhf_hongfu_gmail_com/.venvs/DPO/bin/activate && JAX_PLATFORMS=cpu python tests/models/qwen2/qwen_params_test.py`
+  - 结果：`4` 个测试通过，包含新增 `full model round-trip`。
+- 说明：
+  - 当前环境没有 `pytest`，因此本轮针对这些 `absltest` 文件直接用 `python <test_file>.py` 执行。
+
+### Known risks / TODO
+
+- 还没有跑依赖 Hugging Face 下载的端到端 SFT/DPO smoke 训练；当前验证覆盖的是脚本入口、配置解析、导出逻辑和单元测试。
+- `full model safetensors exporter` 当前只补到了 `Qwen2`，没有顺手扩展到全仓所有模型家族。
+- `full DPO` 会独立加载 actor/reference 两份 base model，这保证了语义正确，但实际训练时的 HBM 峰值仍需要在真实 TPU worker 上进一步确认。
+
+---
+
+## 2026-03-17: UltraFeedback ratio and internal validation split
+
+### Scope
+
+- 将 qwen2.5 UltraFeedback recipe 的默认比例从 `0.5/0.5` 调整为 `0.25/0.75`。
+- 在 `train_prefs` 内新增 deterministic prompt-level `train/eval` holdout，避免训练期直接使用 `test_prefs` 做 early-stop 或挑 checkpoint。
+- 保持 `SFT` 与 `DPO` 的 prompt-disjoint 主切分不变，只增加第二层 `subset=train|eval|all` 过滤。
+
+### Changed files
+
+1. `tunix/examples/data/ultrafeedback_dpo.py`
+2. `tunix/examples/data/ultrafeedback_sft.py`
+3. `tests/examples/data/ultrafeedback_dpo_test.py`
+4. `tests/examples/data/ultrafeedback_sft_test.py`
+5. `examples/sft/ultrafeedback/qwen2p5_1p5b_ultrafeedback.yaml`
+6. `examples/sft/ultrafeedback/qwen2p5_1p5b_ultrafeedback_lora.yaml`
+7. `examples/sft/ultrafeedback/run_qwen2p5_1p5b_ultrafeedback.sh`
+8. `examples/sft/ultrafeedback/README.md`
+9. `examples/dpo/qwen2p5_1p5b_ultrafeedback_from_sft.yaml`
+10. `examples/dpo/qwen2p5_1p5b_ultrafeedback_from_sft_lora.yaml`
+11. `examples/dpo/run_qwen2p5_1p5b_ultrafeedback_from_sft.sh`
+12. `examples/dpo/README.md`
+13. `examples/ultrafeedback/README.md`
+14. `develop.md`
+
+### Validation
+
+- `python -m py_compile tunix/examples/data/ultrafeedback_dpo.py tunix/examples/data/ultrafeedback_sft.py tests/examples/data/ultrafeedback_dpo_test.py tests/examples/data/ultrafeedback_sft_test.py`
+  - 结果：通过。
+- `bash -n examples/sft/ultrafeedback/run_qwen2p5_1p5b_ultrafeedback.sh`
+  - 结果：通过。
+- `bash -n examples/dpo/run_qwen2p5_1p5b_ultrafeedback_from_sft.sh`
+  - 结果：通过。
+- 解析 4 份 YAML：
+  - `examples/sft/ultrafeedback/qwen2p5_1p5b_ultrafeedback.yaml`
+  - `examples/sft/ultrafeedback/qwen2p5_1p5b_ultrafeedback_lora.yaml`
+  - `examples/dpo/qwen2p5_1p5b_ultrafeedback_from_sft.yaml`
+  - `examples/dpo/qwen2p5_1p5b_ultrafeedback_from_sft_lora.yaml`
+  - 结果：`yaml.safe_load` 全部通过。
+- `source /home/lhf_hongfu_gmail_com/.venvs/DPO/bin/activate && python tests/examples/data/ultrafeedback_dpo_test.py`
+  - 结果：`6` 个测试通过，覆盖 `partition` 与 `subset` 的互斥性。
+- `source /home/lhf_hongfu_gmail_com/.venvs/DPO/bin/activate && python tests/examples/data/ultrafeedback_sft_test.py`
+  - 结果：退出码 `0`。
+
+### Known risks / TODO
+
+- 目前只是把 training-time eval 改成 `train_prefs` 内部 holdout；还没有新增一个专门的“最终 test-only 评测脚本”去自动在 `test_prefs` 上汇报最佳 checkpoint。
+- `subset=train|eval` 同样是基于原始 prompt 字符串 hash 的严格切分；它能避免同 prompt 泄露，但不会做语义去重。
+
+---
+
 ## 2026-03-12: DPO example environment validation
 
 ### Scope
@@ -4682,3 +4798,866 @@ This file tracks engineering changes made in this repository.
 ### Known risks / TODO
 
 - None for this verification-only task.
+
+## 2026-03-16 - Tunix supported base model inventory check
+
+### Scope
+
+- 无代码改动。
+- 核对当前仓库中 Tunix 正式支持的 base model 家族与具体变体，基于 `naming` 映射、`ModelConfig` 注册和覆盖测试给出结论。
+
+### Changed files
+
+1. `develop.md`
+
+### Validation
+
+- `rg -n "def (gemma|gemma1p1|gemma2|gemma3|llama3|llama3p1|llama3p2|qwen2p5|deepseek_r1_distill_qwen|qwen3)_" tunix/models/gemma/model.py tunix/models/gemma3/model.py tunix/models/llama3/model.py tunix/models/qwen2/model.py tunix/models/qwen3/model.py`
+- `nl -ba tunix/models/naming.py | sed -n '60,110p'`
+- `nl -ba tests/models/naming_test.py | sed -n '30,420p'`
+
+### Validation results
+
+- 当前 `naming` 层支持的 model family / category 为：
+  - `gemma`, `gemma1p1`, `gemma2`, `gemma3`
+  - `llama3`, `llama3p1`, `llama3p2`
+  - `qwen2p5`, `deepseek_r1_distill_qwen`
+  - `qwen3`
+- `tests/models/naming_test.py` 会校验 `_TEST_MODEL_INFOS` 与各家族 `ModelConfig` 方法是双向全覆盖，因此这份清单可视为当前仓库正式支持集合。
+- 当前支持的具体 base model 变体共 40 个：
+  - Gemma: `gemma-2b`, `gemma-2b-it`, `gemma-1.1-2b-it`, `gemma-7b`, `gemma-7b-it`, `gemma-1.1-7b-it`, `gemma-2-2b`, `gemma-2-2b-it`, `gemma-2-9b`, `gemma-2-9b-it`
+  - Gemma 3: `gemma-3-270m`, `gemma-3-270m-it`, `gemma-3-1b-pt`, `gemma-3-1b-it`, `gemma-3-4b-pt`, `gemma-3-4b-it`, `gemma-3-12b-pt`, `gemma-3-12b-it`, `gemma-3-27b-pt`, `gemma-3-27b-it`
+  - Llama 3: `llama-3-70b`, `llama-3.1-405b`, `llama-3.1-8b`, `llama-3.1-70b`, `llama-3.2-1b`, `llama-3.2-3b`
+  - Qwen 2.5 family: `qwen2.5-0.5b`, `qwen2.5-1.5b`, `qwen2.5-3b`, `qwen2.5-7b`, `qwen2.5-math-1.5b`, `deepseek-r1-distill-qwen-1.5b`
+  - Qwen 3: `qwen3-0.6b`, `qwen3-1.7b`, `qwen3-4b`, `qwen3-4b-instruct-2507`, `qwen3-4b-thinking-2507`, `qwen3-8b`, `qwen3-14b`, `qwen3-30b-a3b`
+
+### Known risks / TODO
+
+- 仓库里目前还没有单独的“模型目录/catalog”源文件；结论依赖 `naming.py`、各家族 `ModelConfig` 和 `tests/models/naming_test.py` 的一致性。
+
+## 2026-03-16 - Qwen base model subset clarification
+
+### Scope
+
+- 无代码改动。
+- 针对用户追问，明确区分当前 Tunix 支持的 Qwen 3 / Qwen 2.5 变体中，哪些属于 base model，哪些属于 instruct / thinking / math / distill 变体。
+
+### Changed files
+
+1. `develop.md`
+
+### Validation
+
+- `nl -ba tunix/models/qwen2/model.py | sed -n '100,210p'`
+- `nl -ba tunix/models/qwen3/model.py | sed -n '100,215p'`
+- `rg -n "Qwen/Qwen2.5|Qwen/Qwen3|DeepSeek-R1-Distill-Qwen" tests/models/naming_test.py`
+
+### Validation results
+
+- Qwen 2.5 family 中当前支持且可视为 plain base model 的是：
+  - `qwen2.5-0.5b`
+  - `qwen2.5-1.5b`
+  - `qwen2.5-3b`
+  - `qwen2.5-7b`
+- 下列不应归为 plain base model：
+  - `qwen2.5-math-1.5b`：math-specialized 变体
+  - `deepseek-r1-distill-qwen-1.5b`：distill 变体
+- Qwen 3 中当前支持且可视为 plain base model 的是：
+  - `qwen3-0.6b`
+  - `qwen3-1.7b`
+  - `qwen3-4b`
+  - `qwen3-8b`
+  - `qwen3-14b`
+  - `qwen3-30b-a3b`
+- 下列不应归为 plain base model：
+  - `qwen3-4b-instruct-2507`
+  - `qwen3-4b-thinking-2507`
+
+### Known risks / TODO
+
+- 仓库没有单独的 `is_base_model` 标记；本次结论按命名语义与注册名称区分，等价于“非 instruct / 非 thinking / 非 math / 非 distill”的 plain base model。
+
+## 2026-03-16 - Qwen3-4B pretraining-only status clarification
+
+### Scope
+
+- 无代码改动。
+- 纠正并澄清 `qwen3-4b` 在 Tunix 本地命名分类与 Qwen 官方训练阶段定义之间的差异。
+
+### Changed files
+
+1. `develop.md`
+
+### Validation
+
+- `nl -ba tests/models/naming_test.py | sed -n '300,330p'`
+- 官方来源：
+  - `https://huggingface.co/Qwen/Qwen3-4B`
+  - `https://huggingface.co/Qwen/Qwen3-4B-Base`
+
+### Validation results
+
+- Tunix 当前注册的 `qwen3-4b` 对应的是官方仓库 `Qwen/Qwen3-4B`，不是 `Qwen/Qwen3-4B-Base`。
+- Qwen 官方模型卡标注：
+  - `Qwen/Qwen3-4B` 的 `Training Stage` 为 `Pretraining & Post-training`
+  - `Qwen/Qwen3-4B-Base` 的 `Training Stage` 为 `Pretraining`
+- 因此，若按“只经历 pretrain 的 base model”这个严格定义，`qwen3-4b` 不能算；对应名称应是 `Qwen/Qwen3-4B-Base`。
+
+### Known risks / TODO
+
+- 之前把 `qwen3-4b` 按“非 instruct / 非 thinking”归进 plain base，这个分类只适用于本仓库的命名语义，不等同于官方的“pretrain-only base”定义。
+
+## 2026-03-16 - Pretrain-only base model re-check for Tunix Qwen registrations
+
+### Scope
+
+- 无代码改动。
+- 按官方模型卡中的 `Training Stage` 重新核对当前 Tunix 支持的 Qwen 2.5 / Qwen 3 相关模型里，哪些可被严格确认是“只经历过 pretraining”的 base model。
+
+### Changed files
+
+1. `develop.md`
+
+### Validation
+
+- 本地注册清单：
+  - `nl -ba tests/models/naming_test.py | sed -n '252,360p'`
+- 官方模型卡：
+  - `https://huggingface.co/Qwen/Qwen2.5-0.5B`
+  - `https://huggingface.co/Qwen/Qwen2.5-1.5B`
+  - `https://huggingface.co/Qwen/Qwen2.5-3B`
+  - `https://huggingface.co/Qwen/Qwen2.5-7B`
+  - `https://huggingface.co/Qwen/Qwen3-0.6B`
+  - `https://huggingface.co/Qwen/Qwen3-1.7B`
+  - `https://huggingface.co/Qwen/Qwen3-4B`
+  - `https://huggingface.co/Qwen/Qwen3-8B`
+  - `https://huggingface.co/Qwen/Qwen3-14B`
+  - `https://huggingface.co/Qwen/Qwen3-30B-A3B`
+  - `https://huggingface.co/Qwen/Qwen3-0.6B-Base`
+  - `https://huggingface.co/Qwen/Qwen3-1.7B-Base`
+  - `https://huggingface.co/Qwen/Qwen3-4B-Base`
+  - `https://huggingface.co/Qwen/Qwen3-8B-Base`
+  - `https://huggingface.co/Qwen/Qwen3-14B-Base`
+  - `https://huggingface.co/Qwen/Qwen3-30B-A3B-Base`
+  - `https://huggingface.co/Qwen/Qwen2.5-Math-1.5B`
+  - `https://huggingface.co/deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B`
+
+### Validation results
+
+- 当前 Tunix 已支持并能被官方模型卡明确确认 `Training Stage: Pretraining` 的 Qwen 系 base model 是：
+  - `qwen2.5-0.5b`
+  - `qwen2.5-1.5b`
+  - `qwen2.5-3b`
+  - `qwen2.5-7b`
+- 当前 Tunix 注册的 `qwen3-*` 名称都不是 pretrain-only；它们对应的官方模型卡均为 `Training Stage: Pretraining & Post-training`。
+- 若按“只经历 pretrain”的严格定义，Qwen 3 对应的官方 base 名称应是：
+  - `Qwen/Qwen3-0.6B-Base`
+  - `Qwen/Qwen3-1.7B-Base`
+  - `Qwen/Qwen3-4B-Base`
+  - `Qwen/Qwen3-8B-Base`
+  - `Qwen/Qwen3-14B-Base`
+  - `Qwen/Qwen3-30B-A3B-Base`
+- 但这些 `*-Base` 名称当前不在 Tunix 现有注册清单里。
+- `qwen2.5-math-1.5b` 虽然模型卡中被归入 Qwen2.5-Math 的 “base models” 组，但没有像通用 Qwen2.5 / Qwen3 那样给出同样明确的 `Training Stage: Pretraining` 字段；本次未把它放进“已明确确认只经历 pretrain”的严格清单。
+- `deepseek-r1-distill-qwen-1.5b` 明确属于 distill 模型，不应归入 pretrain-only base model。
+
+### Known risks / TODO
+
+- 对 `qwen2.5-math-1.5b` 的排除是出于“严格按官方 `Training Stage` 明确字段确认”的保守口径，不代表它一定经历了 post-training；只是当前已查到的官方卡片没有给出同等级别的显式确认。
+
+## 2026-03-16 - UltraFeedback split SFT then DPO feasibility check for qwen2.5-1.5b
+
+### Scope
+
+- 无代码改动。
+- 评估基于当前 Tunix 代码，是否适合使用 `qwen2.5-1.5b` 将 `UltraFeedback` 拆分为一部分先做 SFT、另一部分再做 DPO。
+
+### Changed files
+
+1. `develop.md`
+
+### Validation
+
+- `sed -n '1,240p' examples/dpo/README.md`
+- `sed -n '1,260p' examples/dpo/qwen3_4b_ultrafeedback.yaml`
+- `sed -n '1,260p' tunix/examples/data/ultrafeedback_dpo.py`
+- `nl -ba tunix/cli/peft_main.py | sed -n '20,90p'`
+- `nl -ba tunix/examples/data/translation_dataset.py | sed -n '35,90p'`
+- `nl -ba tunix/cli/dpo_main.py | sed -n '80,155p'`
+- `nl -ba tunix/cli/utils/data.py | sed -n '12,80p'`
+- `nl -ba tunix/models/qwen2/params.py | sed -n '1,120p'`
+- `nl -ba tunix/models/qwen3/params.py | sed -n '140,170p'`
+
+### Validation results
+
+- 从训练方法上看，`qwen2.5-1.5b` 先做 SFT、再做 DPO 是合理路线，尤其因为该模型是 pretrain-only base，而 `UltraFeedback` 是偏 chat/preference 的指令数据。
+- 当前 DPO 路径已经支持通过 `train_data_module` / `eval_data_module` 直接读取 `UltraFeedback` preference pairs，并在数据入口统一套 chat template。
+- 当前 SFT CLI 入口 `tunix/cli/peft_main.py` 仍然硬编码走 `translation_dataset.create_datasets(...)`，没有像 DPO 那样的通用 `train_data_module` 接口；直接拿 `UltraFeedback` 做 SFT 还不能无改动复用。
+- 当前 DPO pipeline 要求 actor/reference 共享同一 base model 标识，并通过“先加载 reference，再在 actor 上额外 apply LoRA”的方式构造模型；这更适合“从一个已定型的 base/full model 再挂一层 DPO LoRA”。
+- `qwen3` 已有 `save_lora_merged_model_as_safetensors`，但 `qwen2` 目前没有对应 merge saver；因此若用 `qwen2.5-1.5b` 做 LoRA SFT，SFT 产物不能像 `qwen3` 一样顺滑地 merge 成一个新的 full model 再喂给 DPO。
+
+### Known risks / TODO
+
+- 结论是“方法上可行，但按当前代码不是开箱即用”。
+- 若要把这条链路做顺，优先需要两类补充能力：
+  - SFT 侧支持通用数据模块或单独的 UltraFeedback SFT 入口；
+  - `qwen2` 支持 LoRA merge 导出，或 DPO 侧支持从 SFT checkpoint 正确初始化 actor/reference。
+
+## 2026-03-16 - DBC-on-DPO paper setting discussion
+
+### Scope
+
+- 无代码改动。
+- 评估“使用 `qwen2.5-1.5b`，将 UltraFeedback 划分为 SFT 子集和 DPO 子集，用于验证 DBC 在 DPO 上有效性”的实验设定是否适合作为顶会投稿主 setting。
+
+### Changed files
+
+1. `develop.md`
+
+### Validation
+
+- 基于当前仓库中已检查过的：
+  - `examples/dpo/qwen3_4b_ultrafeedback.yaml`
+  - `tunix/cli/dpo_main.py`
+  - `tunix/cli/peft_main.py`
+  - `tunix/examples/data/ultrafeedback_dpo.py`
+- 以及本轮讨论中已确认的模型口径：
+  - `qwen2.5-1.5b` 为 pretrain-only base
+  - 当前 Tunix DPO baseline 使用的是 post-trained instruct model
+
+### Validation results
+
+- 该设定作为“辅助实验”是合理的，因为它能测试 DBC 在更弱初始化条件下是否仍有收益。
+- 但若把它作为“主实验 setting”去支撑顶会级别的 DBC-on-DPO 核心结论，风险较高，因为 DBC 效果会与以下因素强耦合：
+  - pretrain-only base 自身缺乏 instruction tuning
+  - SFT 数据切分策略
+  - SFT 质量和训练配方
+  - 两阶段训练带来的额外超参和初始化差异
+- 更强的主实验应优先使用已经 post-trained / instruct 的标准公开模型，在完全相同的 DPO 配方下仅比较“是否启用 DBC”。
+- `pretrain-only base -> SFT -> DPO` 更适合作为补充实验，用来回答“DBC 是否也能帮助更弱或更早期的 policy 初始化”。
+
+### Known risks / TODO
+
+- 若只做这一种 setting，审稿人很容易质疑：DBC 的收益是否只是来自于修补一个本来就不够标准的起点，而不是对 DPO 本身更普适的改进。
+
+## 2026-03-16 - Overfitting risk discussion for aligned-model DPO setting
+
+### Scope
+
+- 无代码改动。
+- 讨论“instruct/post-trained model + standard DPO + with/without DBC”作为主实验时，是否会因为模型已对齐而在 UltraFeedback 上过拟合，以及这对论文设定的影响。
+
+### Changed files
+
+1. `develop.md`
+
+### Validation
+
+- 基于本轮讨论，不涉及新增脚本或代码执行。
+- 参考对象仍为当前仓库中的 DPO baseline recipe：
+  - `examples/dpo/qwen3_4b_ultrafeedback.yaml`
+  - `examples/dpo/README.md`
+
+### Validation results
+
+- 已对齐模型在 preference 数据上更容易出现“增益空间变小”或“训练后期过拟合”的现象，这个担心是合理的。
+- 但这不构成放弃 aligned-model 主 setting 的充分理由；更好的做法是：
+  - 把 aligned-model setting 作为主实验，回答 DBC 在标准 DPO 条件下是否有效；
+  - 再增加 weaker-initialization setting 作为补充实验，回答 DBC 在更不稳定 regime 下是否更有帮助。
+- 若 aligned-model setting 的头部空间较小，反而更能说明 DBC 是否带来稳健且非偶然的改进。
+
+### Known risks / TODO
+
+- 如果 aligned-model setting 完全没有提升，而 weaker-initialization setting 提升明显，则论文主张应收缩为“DBC 对高不稳定 DPO regime 更有效”，而不应宣称普适增益。
+
+## 2026-03-16 - Worker-side DPO artifact inspection for aligned-model setting
+
+### Scope
+
+- 无代码改动。
+- 检查当前 worker 上与 `aligned instruct model + standard DPO + with/without DBC` 相关的本地结果文件，确认哪些 full/smoke 结果仍然存在，哪些已经被覆盖。
+
+### Changed files
+
+1. `develop.md`
+
+### Validation
+
+- `find /home/lhf_hongfu_gmail_com -type f -name 'events.out.tfevents.*' 2>/dev/null | rg 'dpo|ultrafeedback|tensorboard'`
+- `python - <<'PY' ... EventAccumulator(...) ... PY` on:
+  - `runs/dpo_qwen3_4b_ultrafeedback/tensorboard/events.out.tfevents.1773548250.t1v-n-21f197d2-w-0`
+  - `runs/dpo_qwen3_4b_ultrafeedback/tensorboard/events.out.tfevents.1773564268.t1v-n-21f197d2-w-0`
+  - `runs/dpo_qwen3_4b_ultrafeedback_smoke/tensorboard/events.out.tfevents.*`
+  - `/tmp/dpo_self_inf_smoke_20260315_030834/tensorboard/events.out.tfevents.*`
+- `sed -n '1,240p' /tmp/dpo_outlier_l2.log`
+- `tail -n 120 /tmp/dpo_outlier_l2.log`
+- `rg -n "use_dynamic_batch_curation|curation_variant|qwen3-4b-ultrafeedback-dpo-baseline" /tmp/dpo_outlier_l2.log`
+
+### Validation results
+
+- 当前 worker 上仍能明确定位到的 full DPO event 只有：
+  - `runs/dpo_qwen3_4b_ultrafeedback/tensorboard/events.out.tfevents.1773548250.t1v-n-21f197d2-w-0`
+  - 一个很小的 companion event 文件 `1773564268...`，仅含 JAX compile 指标
+- 该 full event 文件包含完整 `dpo/train/dbc/*` 指标，覆盖 `1 -> 5464` 步，说明它是一次启用了 DBC 的 full run，而不是 baseline run。
+- `/tmp/dpo_outlier_l2.log` 也明确记录：
+  - `dpo_config.use_dynamic_batch_curation=True`
+  - `curation_variant='outlier_l2'`
+  - 训练完整跑到 `5464` 步并成功保存 checkpoint 与 merged LoRA
+- 这次 full DBC run 复用了 baseline 名称和目录：
+  - `run_name='qwen3-4b-ultrafeedback-dpo-baseline'`
+  - `log_dir=/home/lhf_hongfu_gmail_com/tunix/runs/dpo_qwen3_4b_ultrafeedback/tensorboard`
+  - `checkpoint_root_directory=/home/lhf_hongfu_gmail_com/tunix/runs/dpo_qwen3_4b_ultrafeedback/checkpoints`
+- 因此，当前 worker 上没有找到可直接与之配对的 full non-DBC baseline TensorBoard 留档；现有 full 目录已被 DBC run 占用/覆盖。
+- 仍然存在的 baseline 证据只有 smoke 级别：
+  - `runs/dpo_qwen3_4b_ultrafeedback_smoke/tensorboard/events.out.tfevents.1773513895...`
+  - 其 tags 不含 `dbc/*`
+- 仍然存在的 DBC smoke 证据：
+  - `self_inf_batch` smoke 在 `/tmp/dpo_self_inf_smoke_20260315_030834/tensorboard` 下，含 `dbc/*` 指标
+  - 两个早期 outlier smoke 目录存在，但 event 文件中没有可读标量输出
+
+### Known risks / TODO
+
+- 当前 worker 上的本地数据足以支持“full DBC run 的行为分析”，但不足以支持“full baseline vs full DBC”的严格对照结论，因为 full baseline artifact 目前缺失。
+- 后续若要做论文级比较，必须将 baseline / outlier_l2 / self_inf_batch 分别写到独立的 `run_name`、`log_dir`、`checkpoint_root_directory`。
+
+## 2026-03-16 - Interpreting overfitting in aligned-model DPO artifacts
+
+### Scope
+
+- 无代码改动。
+- 结合当前 worker 上保留下来的 full DPO artifact，解释“训练 metrics 明显过拟合”对 DBC-on-DPO 论文设定意味着什么。
+
+### Changed files
+
+1. `develop.md`
+
+### Validation
+
+- 基于已解析的 full event 文件：
+  - `runs/dpo_qwen3_4b_ultrafeedback/tensorboard/events.out.tfevents.1773548250.t1v-n-21f197d2-w-0`
+- 基于已检查的 full 日志：
+  - `/tmp/dpo_outlier_l2.log`
+
+### Validation results
+
+- 当前 full run 确实存在明确的 train/eval 分叉：
+  - `train/loss`: `0.6934 -> 0.4415`
+  - `eval/loss`: `0.3594 -> 0.4004`
+  - `train/rewards/accuracy`: `0.375 -> 0.857`
+  - `eval/rewards/accuracy`: `0.374 -> 0.712`
+- 因此，“明显过拟合”的更强证据不是单独的训练指标，而是 held-out eval 已经随着训练推进而变差。
+- 但这条 full run 同时满足：
+  - `train/dbc/keep_ratio = 1.0` 全程不变
+  - `use_dynamic_batch_curation=True`
+  - `curation_variant='outlier_l2'`
+- 所以这次 full run 更准确的解释是：
+  - aligned-model DPO 确实过拟合
+  - 但当前 DBC 配置没有真正介入优化过程
+  - 因而这条结果不能用来证明“DBC 无效”，只能说明“当前 `outlier_l2, threshold=3.0, window=8` 这组配置没有起作用”
+
+### Known risks / TODO
+
+- 若论文继续采用 aligned-model setting，核心比较指标不应只看最终点，而应至少加入：
+  - best eval checkpoint
+  - final-vs-best degradation
+  - keep ratio / filtered count
+  - train-eval gap
+
+## 2026-03-16 - Qwen2.5-1.5B UltraFeedback SFT -> DPO + DBC implementation
+
+### Scope
+
+- 为 `qwen2.5-1.5b` 落地 `pretrain-only base -> SFT -> DPO` 的最小可运行链路。
+- 新增 UltraFeedback 的 prompt-disjoint `sft/dpo` 切分逻辑。
+- 给 SFT CLI 增加通用 `train_data_module` / `eval_data_module` 分支，并补齐 `qwen2` 的 merged LoRA safetensors 导出。
+- 新增对应的 SFT/DPO recipe、脚本和测试。
+
+### Changed files
+
+1. `develop.md`
+2. `examples/data/ultrafeedback_sft.py`
+3. `examples/dpo/README.md`
+4. `examples/dpo/qwen2p5_1p5b_ultrafeedback_from_sft.yaml`
+5. `examples/dpo/run_qwen2p5_1p5b_ultrafeedback_from_sft.sh`
+6. `examples/sft/ultrafeedback/README.md`
+7. `examples/sft/ultrafeedback/qwen2p5_1p5b_ultrafeedback.yaml`
+8. `examples/sft/ultrafeedback/run_qwen2p5_1p5b_ultrafeedback.sh`
+9. `tests/cli/peft_main_test.py`
+10. `tests/examples/data/ultrafeedback_dpo_test.py`
+11. `tests/examples/data/ultrafeedback_sft_test.py`
+12. `tests/models/qwen2/qwen_params_test.py`
+13. `tunix/cli/README.md`
+14. `tunix/cli/peft_main.py`
+15. `tunix/cli/utils/data.py`
+16. `tunix/examples/data/ultrafeedback_dpo.py`
+17. `tunix/examples/data/ultrafeedback_sft.py`
+18. `tunix/models/qwen2/params.py`
+
+### Validation
+
+- `python -m py_compile tunix/cli/utils/data.py tunix/cli/peft_main.py tunix/models/qwen2/params.py tunix/examples/data/ultrafeedback_dpo.py tunix/examples/data/ultrafeedback_sft.py tests/cli/peft_main_test.py tests/examples/data/ultrafeedback_dpo_test.py tests/examples/data/ultrafeedback_sft_test.py tests/models/qwen2/qwen_params_test.py`
+- `source /home/lhf_hongfu_gmail_com/.venvs/DPO/bin/activate && PYTHONPATH=/home/lhf_hongfu_gmail_com/tunix python tests/cli/dpo_main_test.py`
+- `source /home/lhf_hongfu_gmail_com/.venvs/DPO/bin/activate && PYTHONPATH=/home/lhf_hongfu_gmail_com/tunix python tests/cli/peft_main_test.py`
+- `source /home/lhf_hongfu_gmail_com/.venvs/DPO/bin/activate && PYTHONPATH=/home/lhf_hongfu_gmail_com/tunix python tests/examples/data/ultrafeedback_dpo_test.py`
+- `source /home/lhf_hongfu_gmail_com/.venvs/DPO/bin/activate && PYTHONPATH=/home/lhf_hongfu_gmail_com/tunix python tests/examples/data/ultrafeedback_sft_test.py`
+- `source /home/lhf_hongfu_gmail_com/.venvs/DPO/bin/activate && PYTHONPATH=/home/lhf_hongfu_gmail_com/tunix JAX_PLATFORMS=cpu python tests/models/qwen2/qwen_params_test.py`
+- `source /home/lhf_hongfu_gmail_com/.venvs/DPO/bin/activate && PYTHONPATH=/home/lhf_hongfu_gmail_com/tunix JAX_PLATFORMS=cpu python tests/models/qwen3/qwen_params_test.py`
+
+### Validation results
+
+- `py_compile` 通过，新增和修改的 Python 文件无语法错误。
+- `tests/cli/dpo_main_test.py` 通过。
+- `tests/cli/peft_main_test.py` 退出码为 `0`。
+- `tests/examples/data/ultrafeedback_dpo_test.py` 通过。
+- `tests/examples/data/ultrafeedback_sft_test.py` 退出码为 `0`。
+- `tests/models/qwen2/qwen_params_test.py` 在 `JAX_PLATFORMS=cpu` 下通过，说明新增的 `qwen2` merged saver 可以完成保存、重载和 forward equivalence 校验。
+- `tests/models/qwen3/qwen_params_test.py` 在 `JAX_PLATFORMS=cpu` 下通过，作为对现有 merge 路径的回归验证。
+- 新增 recipe 支持：
+  - `examples/sft/ultrafeedback/run_qwen2p5_1p5b_ultrafeedback.sh [full|smoke]`
+  - `examples/dpo/run_qwen2p5_1p5b_ultrafeedback_from_sft.sh [full|smoke] [baseline|outlier_l2|self_inf_batch] /path/to/sft_merged_model`
+- DPO 脚本默认按 `variant/profile/timestamp` 写独立输出目录，避免 baseline 和 DBC 相互覆盖。
+
+### Known risks / TODO
+
+- 本次只验证了静态检查和单测，没有实际执行需要下载 Hugging Face 权重的 SFT/DPO smoke run；端到端训练仍依赖 `HF_TOKEN`、TPU/JAX 环境和真实模型下载权限。
+- `tests/cli/peft_main_test.py` 与 `tests/examples/data/ultrafeedback_sft_test.py` 在当前环境中无标准输出，但退出码为 `0`；后续若要统一测试日志风格，可再切到项目统一的 test runner。
+- 模型参数测试在默认 TPU backend 下会碰到已有的 `libtpu_lockfile` 环境问题，因此本次显式使用了 `JAX_PLATFORMS=cpu` 进行验证。
+
+## 2026-03-16 - README availability check for SFT -> DPO flow
+
+### Scope
+
+- 无代码改动。
+- 确认当前仓库里是否已经有一份把 `qwen2.5-1.5b` 的 `SFT -> DPO -> baseline/DBC` 全流程串起来的 README。
+
+### Changed files
+
+1. `develop.md`
+
+### Validation
+
+- 检查现有文档入口：
+  - `examples/sft/ultrafeedback/README.md`
+  - `examples/dpo/README.md`
+  - `tunix/cli/README.md`
+
+### Validation results
+
+- 当前仓库没有“一份完整串起来的端到端 README”。
+- 现有说明是拆开的：
+  - `examples/sft/ultrafeedback/README.md` 说明 SFT 部分
+  - `examples/dpo/README.md` 说明 DPO 与 DPO-from-SFT 部分
+  - `tunix/cli/README.md` 只更新了入口级说明
+
+### Known risks / TODO
+
+- 如果后续需要降低实验复现门槛，建议再补一份单独的端到端 README，把：
+  - 数据切分约定
+  - SFT 命令
+  - SFT 产物路径
+  - DPO baseline / `outlier_l2` / `self_inf_batch` 命令
+  - 结果目录结构
+  串成一条完整流程。
+
+## 2026-03-17 - Qwen2.5-1.5B UltraFeedback full SFT run
+
+### Scope
+
+- 调整 `qwen2.5-1.5b` 的 UltraFeedback full-SFT 配置，确保 full-weight 训练在当前 4-chip TPU worker 上可稳定跑通。
+- 修复 SFT launcher 对 `training_config` 的覆盖方式，避免 `peft_main` 因 replace 语义丢失必填字段。
+- 完成一轮正式 full-SFT，产出最终 `exported_model`、checkpoint 和训练指标。
+
+### Changed files
+
+1. `develop.md`
+2. `examples/dpo/qwen2p5_1p5b_ultrafeedback_from_sft.yaml`
+3. `examples/dpo/qwen2p5_1p5b_ultrafeedback_from_sft_lora.yaml`
+4. `examples/sft/ultrafeedback/qwen2p5_1p5b_ultrafeedback.yaml`
+5. `examples/sft/ultrafeedback/qwen2p5_1p5b_ultrafeedback_lora.yaml`
+6. `examples/sft/ultrafeedback/run_qwen2p5_1p5b_ultrafeedback.sh`
+
+### Validation
+
+- TPU 可用性确认：
+  - `source /home/lhf_hongfu_gmail_com/.venvs/DPO/bin/activate && python -c "import jax; print(jax.default_backend(), jax.device_count())"`
+- 数据规模与长度校准：
+  - 统计 `sft_fraction=0.25` / `eval_fraction=0.1` 下的 SFT/DPO prompt-disjoint 切分样本数
+  - 统计 SFT 子集在 chat template 后的 token 长度分布与 `<=512/768/1024` keep-rate
+- launcher 语法检查：
+  - `bash -n examples/sft/ultrafeedback/run_qwen2p5_1p5b_ultrafeedback.sh`
+- SFT 小预跑：
+  - `python -m tunix.cli.peft_main examples/sft/ultrafeedback/qwen2p5_1p5b_ultrafeedback.yaml train_data_module="examples/data/ultrafeedback_sft.py:create_dataset(split='train_prefs', partition='sft', subset='train', sft_fraction=0.25, eval_fraction=0.1, seed=42, limit=128)" eval_data_module="examples/data/ultrafeedback_sft.py:create_dataset(split='train_prefs', partition='sft', subset='eval', sft_fraction=0.25, eval_fraction=0.1, seed=42, limit=32)" training_config.max_steps=2 training_config.eval_every_n_steps=1 training_config.checkpoint_root_directory=/tmp/sft_qwen2p5_preflight3_20260317_003140/checkpoints training_config.metrics_logging_options.run_name=qwen2p5-sft-preflight3-20260317_003140 training_config.metrics_logging_options.log_dir=/tmp/sft_qwen2p5_preflight3_20260317_003140/tensorboard exported_model_output_dir=/tmp/sft_qwen2p5_preflight3_20260317_003140/exported_model`
+- 正式 full-SFT：
+  - `source /home/lhf_hongfu_gmail_com/.venvs/DPO/bin/activate && set -a && source my_example/.env && set +a && RUN_TS=20260317_003657 RUN_ROOT=/home/lhf_hongfu_gmail_com/tunix/runs/sft_qwen2p5_1p5b_ultrafeedback_full_full_20260317_003657 ./examples/sft/ultrafeedback/run_qwen2p5_1p5b_ultrafeedback.sh full --ft-mode full`
+- TensorBoard / artifact 检查：
+  - 用 `tensorboard.backend.event_processing.event_accumulator` 读取 full run 的 `sft/train/*` 和 `sft/eval/*` 指标
+  - `find /home/lhf_hongfu_gmail_com/tunix/runs/sft_qwen2p5_1p5b_ultrafeedback_full_full_20260317_003657/exported_model -maxdepth 1 -type f | sort`
+- chat-template sanity check：
+  - `source /home/lhf_hongfu_gmail_com/.venvs/DPO/bin/activate && python - <<'PY' ... AutoTokenizer.from_pretrained(exported_model).apply_chat_template(...) ... PY`
+
+### Validation results
+
+- TPU backend 可用，设备数为 `4`。
+- SFT/DPO 切分下的样本数为：
+  - `sft_train=13810`
+  - `sft_eval=1475`
+  - `dpo_train=41327`
+  - `dpo_eval=4523`
+- SFT 子集经 chat template 后的长度统计显示：
+  - `p50=400`
+  - `p75=626`
+  - `p90=872`
+  - `p95=1050`
+  - `p99=1466`
+  - `<=768` keep-rate `= 11947 / 13810 = 0.8651`
+- 由此将 full-SFT 主配置定为：
+  - `mesh.shape="(2,2)"`
+  - `max_target_length=768`
+  - `peak_value=1e-5`
+  - `warmup_steps=100`
+  - `decay_steps=1500`
+  - `weight_decay=0.05`
+  - `max_grad_norm=1.0`
+  - `gradient_accumulation_steps=4`
+  - `eval_every_n_steps=100`
+  - `save_interval_steps=100`
+  - `max_steps=1500`
+- 正式 full-SFT 成功跑完，训练在数据耗尽时结束于 `step 1493`，总训练时间约 `26m15s`。
+- 正式 full run 输出目录：
+  - `/home/lhf_hongfu_gmail_com/tunix/runs/sft_qwen2p5_1p5b_ultrafeedback_full_full_20260317_003657`
+- 最终导出模型目录：
+  - `/home/lhf_hongfu_gmail_com/tunix/runs/sft_qwen2p5_1p5b_ultrafeedback_full_full_20260317_003657/exported_model`
+- 最终保留 checkpoint：
+  - `1200`
+  - `1300`
+  - `1400`
+  - `1493`
+- 关键指标：
+  - 初始 `eval/loss=1.2246857`
+  - 初始 `eval/perplexity=3.4030962`
+  - 最后一次 eval（`step 1400`）`loss=1.0714879`
+  - 最后一次 eval（`step 1400`）`perplexity=2.9197206`
+  - 最佳 eval（`step 1200`）`loss=1.0713655`
+  - 最佳 eval（`step 1200`）`perplexity=2.9193630`
+  - 最终 train step（`1493`）`loss=1.2489289`
+  - 训练过程中记录到的最小 train loss 在 `step 569`，为 `0.5949118`
+- 导出的 tokenizer 可以正常应用 chat template，输出格式为 Qwen chat 模板：
+  - `<|im_start|>system ... <|im_start|>user ... <|im_start|>assistant`
+
+### Known risks / TODO
+
+- 当前环境缺少 `torch`，因此没有对最终导出模型做一条真实生成的 CPU 推理；本次只验证了 tokenizer/chat template 和导出产物完整性。
+- 最优验证点在 `step 1200`，而最终导出模型来自 `step 1493`。如果后续 DPO 更重视验证集最优初始化，而不是“最终一轮训练后权重”，建议直接从 checkpoint `1200` 再导出一份 best-model artifact。
+- event file 显示 `step 1200 -> 1400` 基本处于平台区：
+  - `1200: 1.0713655`
+  - `1300: 1.0713979`
+  - `1400: 1.0714879`
+  如果后续要把 SFT 当论文主实验，建议再补一个基于 validation loss 的 best-checkpoint export。
+
+## 2026-03-17 - Exported SFT model generation sanity check
+
+### Scope
+
+- 无代码改动。
+- 使用 Tunix JAX sampler 对 `/home/lhf_hongfu_gmail_com/tunix/runs/sft_qwen2p5_1p5b_ultrafeedback_full_full_20260317_003657/exported_model` 做实际生成验证，确认模型能按 chat 模板进行对话。
+
+### Changed files
+
+1. `develop.md`
+
+### Validation
+
+- 读取 TensorBoard event file，复核 full-SFT 的 `train/eval` 指标序列是否完整、是否存在后段异常反弹。
+- 使用 Tunix 的 `automodel.create_model_from_safe_tensors` + `generate.sampler.Sampler` 在 `(2,2)` TPU mesh 上加载导出的 Qwen2.5-1.5B 模型。
+- 实际生成测试 1：
+  - 中文自我介绍
+  - `SFT/DPO` 缩写问答
+  - 简单英文算术
+- 实际生成测试 2：
+  - 中文翻译
+  - 中文三条项目符号总结
+  - Python 小函数
+  - 两轮上下文记忆
+
+### Validation results
+
+- event file 指标完整，`eval/loss` 序列为：
+  - `0: 1.2246857`
+  - `100: 1.1186268`
+  - `200: 1.0916263`
+  - `300: 1.0864414`
+  - `400: 1.0810978`
+  - `500: 1.0770451`
+  - `600: 1.0762211`
+  - `700: 1.0749636`
+  - `800: 1.0735710`
+  - `900: 1.0722202`
+  - `1000: 1.0718851`
+  - `1100: 1.0714262`
+  - `1200: 1.0713655`
+  - `1300: 1.0713979`
+  - `1400: 1.0714879`
+- 生成 sanity check 结论：
+  - 模型可以正常按 Qwen chat template 回答。
+  - 基础对话、翻译、简单代码生成、简单多轮记忆均可用。
+  - 专有缩写消歧与严格格式服从仍偏弱，说明这是一份“已能聊天”的 SFT 模型，但还不是强 instruction model。
+- 代表性生成结果：
+  - 自我介绍：`你好，我是一名AI助手，致力于为用户提供最优质的服务。`
+  - 翻译：`Today's weather is nice, let's go for a walk in the park.`
+  - Python 函数：能正确给出 `def reverse_string(s): return s[::-1]`
+  - 多轮记忆：能记住“最喜欢的颜色是蓝色”，但回答成完整句 `我最喜欢的颜色是蓝色。`，没有完全遵守“只回答颜色”
+  - 失败样例：对 `SFT 和 DPO 的区别` 这个 acronym-heavy 提问，模型把缩写错误展开成了无关组织名
+
+### Known risks / TODO
+
+- 这份模型已经具备可用 chat 能力，适合作为后续 DPO 初始化。
+- 但如果论文或下游任务特别依赖强 instruction adherence，仍建议通过后续 DPO 进一步强化格式服从和术语理解。
+
+## 2026-03-17 - SFT checkpoint cleanup
+
+### Scope
+
+- 无代码改动。
+- 按用户要求，仅保留 `qwen2.5-1.5b` 这轮 full-SFT run 的最后一个 checkpoint，删除更早的中间 checkpoint。
+
+### Changed files
+
+1. `develop.md`
+
+### Validation
+
+- 清理前检查：
+  - `find /home/lhf_hongfu_gmail_com/tunix/runs/sft_qwen2p5_1p5b_ultrafeedback_full_full_20260317_003657/checkpoints -maxdepth 1 -mindepth 1 | sort`
+- 删除中间 checkpoint：
+  - 通过 Python `shutil.rmtree(...)` 删除 `1200`、`1300`、`1400`
+- 清理后检查：
+  - `find /home/lhf_hongfu_gmail_com/tunix/runs/sft_qwen2p5_1p5b_ultrafeedback_full_full_20260317_003657/checkpoints -maxdepth 1 -mindepth 1 | sort`
+
+### Validation results
+
+- 清理前 checkpoint 为：
+  - `1200`
+  - `1300`
+  - `1400`
+  - `1493`
+- 清理后仅保留：
+  - `1493`
+- `exported_model` 与 TensorBoard 目录未删除，后续仍可直接用于 DPO 初始化与结果回查。
+
+### Known risks / TODO
+
+- 无代码风险。
+
+## 2026-03-17 - Add reproducibility note for Qwen2.5-1.5B SFT experiment
+
+### Scope
+
+- 新增一份独立的实验记录文档，说明这次 `qwen2.5-1.5b` UltraFeedback full-SFT 是如何实现的，以及哪条命令可以直接复现。
+
+### Changed files
+
+1. `develop.md`
+2. `examples/ultrafeedback/paper_experiment.md`
+
+### Validation
+
+- 检查新增文档内容是否覆盖：
+  - 实现文件
+  - 数据切分
+  - 超参数
+  - 精确复现命令
+  - 输出目录
+  - 后续 DPO 应使用的模型路径
+  - 基本 sanity check 命令
+
+### Validation results
+
+- 已新增独立文档：
+  - `examples/ultrafeedback/paper_experiment.md`
+- 文档中包含本次实际 full-SFT run 的实现说明与可复制命令。
+
+### Known risks / TODO
+
+- 文档里的固定输出路径引用的是当前已完成的这次 run；若用户重新训练，实际 `RUN_ROOT` 会随新的 `RUN_TS` 改变。
+
+## 2026-03-17 - Rename experiment note to paper_experiment.md
+
+### Scope
+
+- 无逻辑改动。
+- 将 `examples/ultrafeedback` 下的实验记录文档重命名为 `paper_experiment.md`。
+
+### Changed files
+
+1. `develop.md`
+2. `examples/ultrafeedback/paper_experiment.md`
+
+### Validation
+
+- 检查原文件名引用：
+  - `rg -n "qwen2p5_1p5b_sft_experiment\\.md|paper_experiment\\.md" -S .`
+- 重命名后检查目录：
+  - `ls -l examples/ultrafeedback`
+
+### Validation results
+
+- 实验说明文档现位于：
+  - `examples/ultrafeedback/paper_experiment.md`
+- `develop.md` 中相关引用已同步更新。
+
+### Known risks / TODO
+
+- 无代码风险。
+
+## 2026-03-17 - DPO-from-SFT smoke validation and local INTERNAL model loading fix
+
+### Scope
+
+- 修复 `qwen2.5-1.5b` 的 DPO-from-SFT launcher，使其像 SFT launcher 一样通过临时 YAML 注入嵌套配置，避免 CLI 覆盖把整段 `training_config` / `dpo_config` 替换坏。
+- 为 OSS 模式补充 `ModelSource.INTERNAL` 的本地路径加载分支，使 DPO 可以直接从本地 `exported_model` 目录加载 actor/reference base。
+- 运行 DPO smoke 验证：
+  - `baseline` 完整通过
+  - `outlier_l2` 的 DBC 训练路径通过，但最终导出因磁盘写满失败
+
+### Changed files
+
+1. `develop.md`
+2. `examples/dpo/run_qwen2p5_1p5b_ultrafeedback_from_sft.sh`
+3. `tunix/models/automodel.py`
+4. `tests/models/automodel_test.py`
+
+### Validation
+
+- `bash -n examples/dpo/run_qwen2p5_1p5b_ultrafeedback_from_sft.sh`
+- `source /home/lhf_hongfu_gmail_com/.venvs/DPO/bin/activate && PYTHONPATH=/home/lhf_hongfu_gmail_com/tunix python tests/models/automodel_test.py`
+- `source /home/lhf_hongfu_gmail_com/.venvs/DPO/bin/activate && PYTHONPATH=/home/lhf_hongfu_gmail_com/tunix python tests/cli/dpo_main_test.py`
+- `source /home/lhf_hongfu_gmail_com/.venvs/DPO/bin/activate && set -a && source my_example/.env && set +a && RUN_TS=$(date +%Y%m%d_%H%M%S) && export RUN_TS && export RUN_ROOT=/home/lhf_hongfu_gmail_com/tunix/runs/dpo_qwen2p5_1p5b_ultrafeedback_from_sft_baseline_full_smoke_${RUN_TS} && ./examples/dpo/run_qwen2p5_1p5b_ultrafeedback_from_sft.sh smoke baseline /home/lhf_hongfu_gmail_com/tunix/runs/sft_qwen2p5_1p5b_ultrafeedback_full_full_20260317_003657/exported_model`
+- `source /home/lhf_hongfu_gmail_com/.venvs/DPO/bin/activate && set -a && source my_example/.env && set +a && RUN_TS=$(date +%Y%m%d_%H%M%S) && export RUN_TS && export RUN_ROOT=/home/lhf_hongfu_gmail_com/tunix/runs/dpo_qwen2p5_1p5b_ultrafeedback_from_sft_outlier_l2_full_smoke_${RUN_TS} && ./examples/dpo/run_qwen2p5_1p5b_ultrafeedback_from_sft.sh smoke outlier_l2 /home/lhf_hongfu_gmail_com/tunix/runs/sft_qwen2p5_1p5b_ultrafeedback_full_full_20260317_003657/exported_model`
+- `source /home/lhf_hongfu_gmail_com/.venvs/DPO/bin/activate && set -a && source my_example/.env && set +a && RUN_TS=$(date +%Y%m%d_%H%M%S) && export RUN_TS && export RUN_ROOT=/home/lhf_hongfu_gmail_com/tunix/runs/dpo_qwen2p5_1p5b_ultrafeedback_from_sft_self_inf_batch_full_smoke_${RUN_TS} && ./examples/dpo/run_qwen2p5_1p5b_ultrafeedback_from_sft.sh smoke self_inf_batch /home/lhf_hongfu_gmail_com/tunix/runs/sft_qwen2p5_1p5b_ultrafeedback_full_full_20260317_003657/exported_model`
+- `df -h /home/lhf_hongfu_gmail_com/tunix /tmp`
+
+### Validation results
+
+- DPO launcher shell syntax 检查通过。
+- `tests/models/automodel_test.py` 通过，新增 `INTERNAL` 本地路径分支测试。
+- `tests/cli/dpo_main_test.py` 通过，说明现有 DPO CLI 回归未破坏。
+- `baseline` smoke run 成功完成训练、评估、checkpoint 保存与最终导出：
+  - run 目录：`/home/lhf_hongfu_gmail_com/tunix/runs/dpo_qwen2p5_1p5b_ultrafeedback_from_sft_baseline_full_smoke_20260317_032140`
+  - exported model：`/home/lhf_hongfu_gmail_com/tunix/runs/dpo_qwen2p5_1p5b_ultrafeedback_from_sft_baseline_full_smoke_20260317_032140/exported_model`
+  - 最后一步 `dpo/eval/loss=0.69140625`
+  - 最后一步 `dpo/eval/rewards/accuracy=0.27083334`
+  - 最后一步 `dpo/train/loss=0.69140625`
+  - 最后一步 `dpo/train/rewards/accuracy=0.5`
+- `outlier_l2` smoke run 已进入 `CuratedDPOTrainer`，说明 DBC 代码路径生效：
+  - run 目录：`/home/lhf_hongfu_gmail_com/tunix/runs/dpo_qwen2p5_1p5b_ultrafeedback_from_sft_outlier_l2_full_smoke_20260317_032730`
+  - 日志确认：`Dynamic batch curation enabled for DPO: using CuratedDPOTrainer (curation_variant=outlier_l2, curation_threshold=2.0, self_influence_dot_threshold=0.0, gradient_accumulation_steps=2).`
+  - 训练与 checkpoint 保存通过，失败点仅在最终 `exported_model` safetensors 序列化
+  - 失败原因为：`No space left on device (os error 28)`
+- `self_inf_batch` smoke run 已进入 `CuratedDPOTrainer`，并完成实际训练步与 checkpoint 写入，说明另一条 DBC variant 也能跑通：
+  - run 目录：`/home/lhf_hongfu_gmail_com/tunix/runs/dpo_qwen2p5_1p5b_ultrafeedback_from_sft_self_inf_batch_full_smoke_20260317_034030`
+  - 日志确认：`Dynamic batch curation enabled for DPO: using CuratedDPOTrainer (curation_variant=self_inf_batch, curation_threshold=2.0, self_influence_dot_threshold=0.0, gradient_accumulation_steps=2).`
+  - 已完成 `step 0` eval、`checkpoint step 1` 保存，以及 `train step 1-4`
+  - 该 variant 单步明显更慢；本轮 smoke 在确认训练路径正常后手动停止，并清理了临时目录以回收磁盘空间
+- 当前根分区磁盘已满：
+  - `df -h` 显示 `/dev/root` 可用空间仅 `76K`，使用率 `100%`
+
+### Known risks / TODO
+
+- 目前 baseline smoke 已确认可用，但在释放磁盘空间前，任何新的 full run 或 DBC smoke/final export 都有较高概率因磁盘空间不足失败。
+- 本次验证已证明 `DBC` 训练分支本身可进入并执行；剩余问题是环境存储空间，而不是 DPO/DBC 逻辑错误。
+- 为继续工作，本轮已清理 baseline/outlier/self-inf 的临时 smoke 目录，当前磁盘空间比验证当时宽裕，但 full DPO 仍建议在运行前确认根分区有充足余量。
+
+## 2026-03-17 - DPO smoke re-validation under sandbox restrictions
+
+### Scope
+
+- 在当前 worker 上重新复跑 `qwen2.5-1.5b` 的 DPO smoke，确认最新代码和最新 SFT 导出模型在真实环境下的可用性。
+- 记录 baseline 与 `outlier_l2` DBC 的真实 run 目录、指标和失败点。
+- 回收本轮生成的 smoke 产物，为后续 full DPO 释放磁盘空间。
+- 本轮无新的代码改动；仅做运行验证、磁盘清理和开发日志补录。
+
+### Changed files
+
+1. `develop.md`
+
+### Validation
+
+- `source /home/lhf_hongfu_gmail_com/.venvs/DPO/bin/activate && set -a && source /home/lhf_hongfu_gmail_com/tunix/my_example/.env && set +a && RUN_TS=$(date +%Y%m%d_%H%M%S) && export RUN_TS && export RUN_ROOT=/home/lhf_hongfu_gmail_com/tunix/runs/dpo_qwen2p5_1p5b_ultrafeedback_from_sft_baseline_full_smoke_${RUN_TS} && ./examples/dpo/run_qwen2p5_1p5b_ultrafeedback_from_sft.sh smoke baseline /home/lhf_hongfu_gmail_com/tunix/runs/sft_qwen2p5_1p5b_ultrafeedback_full_full_20260317_003657/exported_model`
+- `source /home/lhf_hongfu_gmail_com/.venvs/DPO/bin/activate && set -a && source /home/lhf_hongfu_gmail_com/tunix/my_example/.env && set +a && RUN_TS=$(date +%Y%m%d_%H%M%S) && export RUN_TS && export RUN_ROOT=/home/lhf_hongfu_gmail_com/tunix/runs/dpo_qwen2p5_1p5b_ultrafeedback_from_sft_outlier_l2_full_smoke_${RUN_TS} && ./examples/dpo/run_qwen2p5_1p5b_ultrafeedback_from_sft.sh smoke outlier_l2 /home/lhf_hongfu_gmail_com/tunix/runs/sft_qwen2p5_1p5b_ultrafeedback_full_full_20260317_003657/exported_model`
+- `python - <<'PY' ... event_accumulator ... PY`
+- `df -h /home/lhf_hongfu_gmail_com/tunix /tmp`
+- `du -sh /home/lhf_hongfu_gmail_com/tunix/runs/dpo_qwen2p5_1p5b_ultrafeedback_from_sft_baseline_full_smoke_20260317_141006 /home/lhf_hongfu_gmail_com/tunix/runs/dpo_qwen2p5_1p5b_ultrafeedback_from_sft_outlier_l2_full_smoke_20260317_141540 /home/lhf_hongfu_gmail_com/tunix/runs/sft_qwen2p5_1p5b_ultrafeedback_full_full_20260317_003657`
+- `rm -rf /home/lhf_hongfu_gmail_com/tunix/runs/dpo_qwen2p5_1p5b_ultrafeedback_from_sft_baseline_full_smoke_20260317_141006 /home/lhf_hongfu_gmail_com/tunix/runs/dpo_qwen2p5_1p5b_ultrafeedback_from_sft_outlier_l2_full_smoke_20260317_141540`
+
+### Validation results
+
+- `baseline` smoke 在真实 TPU 环境下完整通过：
+  - run 目录：`/home/lhf_hongfu_gmail_com/tunix/runs/dpo_qwen2p5_1p5b_ultrafeedback_from_sft_baseline_full_smoke_20260317_141006`
+  - 已写出 checkpoint：`1`、`20`
+  - 已成功导出完整模型到 `exported_model`
+  - event file：`tensorboard/events.out.tfevents.1773756620.t1v-n-21f197d2-w-0`
+  - 最后一步 `dpo/eval/loss=0.69140625`
+  - 最后一步 `dpo/eval/rewards/accuracy=0.27083334`
+  - 最后一步 `dpo/eval/rewards/margin=-0.00072797`
+  - 最后一步 `dpo/train/loss=0.69140625`
+  - 最后一步 `dpo/train/rewards/accuracy=0.5`
+- `outlier_l2` DBC smoke 在真实 TPU 环境下完成了训练与 checkpoint：
+  - run 目录：`/home/lhf_hongfu_gmail_com/tunix/runs/dpo_qwen2p5_1p5b_ultrafeedback_from_sft_outlier_l2_full_smoke_20260317_141540`
+  - 日志确认进入 `CuratedDPOTrainer`
+  - 已写出 checkpoint：`1`、`20`
+  - event file：`tensorboard/events.out.tfevents.1773756955.t1v-n-21f197d2-w-0`
+  - 最后一步 `dpo/eval/loss=0.6875`
+  - 最后一步 `dpo/eval/rewards/accuracy=0.375`
+  - 最后一步 `dpo/eval/rewards/margin=-0.00099945`
+  - 最后一步 `dpo/train/loss=0.6904296875`
+  - 最后一步 `dpo/train/rewards/accuracy=0.5`
+  - 最后一步 `dpo/train/dbc/keep_ratio=1.0`
+- `outlier_l2` smoke 的失败点仅在最终导出：
+  - `safetensors_rust.SafetensorError: No space left on device (os error 28)`
+  - `exported_model` 当时只留下了不完整产物，不能当作成功导出。
+- 本轮已删除这两个 smoke run 目录，当前磁盘空间回升到：
+  - `/dev/root` 已用 `85G / 97G`
+  - 可用空间约 `13G`
+
+### Known risks / TODO
+
+- 当前可以确认：
+  - baseline full 命令可直接跑
+  - DBC 训练分支可直接跑
+- 当前不能确认：
+  - 在当前磁盘余量下，长时间 full DPO 加最终导出是否始终稳定
+- 若继续 full DPO，建议随时监控根分区空间，避免再次在导出阶段失败。
+
+## 2026-03-17 - README pointers for DPO commands
+
+### Scope
+
+- 核对当前仓库里是否已经有写明 `qwen2.5-1.5b` 的 SFT -> DPO 命令位置。
+- 本轮无代码改动，仅确认文档入口。
+
+### Changed files
+
+1. `develop.md`
+
+### Validation
+
+- `rg -n "run_qwen2p5_1p5b_ultrafeedback_from_sft\\.sh|outlier_l2|self_inf_batch|SFT_MODEL|full baseline" examples/ultrafeedback examples/dpo examples/sft -S`
+- `sed -n '1,260p' examples/ultrafeedback/README.md`
+- `sed -n '1,260p' examples/ultrafeedback/paper_experiment.md`
+
+### Validation results
+
+- `examples/ultrafeedback/README.md` 已写明端到端 workflow，包括：
+  - SFT 命令
+  - DPO smoke 命令
+  - DPO full 命令
+  - `baseline` / `outlier_l2` / `self_inf_batch`
+- `examples/ultrafeedback/paper_experiment.md` 已写明：
+  - 这次实际 SFT 实验的完整复现命令
+  - 实际 `SFT_MODEL` 路径
+  - 说明后续应把该 `SFT_MODEL` 传给 DPO launcher
+- `examples/dpo/README.md` 也保留了 DPO launcher 的单独说明。
+
+### Known risks / TODO
+
+- 当前 `paper_experiment.md` 还没有把这台 worker 上的“带真实 `SFT_MODEL` 路径的 DPO full 命令”逐条写死；如果需要，可以后续补进去。

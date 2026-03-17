@@ -21,6 +21,28 @@ from tunix.examples.data import ultrafeedback_dpo
 
 class UltraFeedbackDpoTest(absltest.TestCase):
 
+  def test_prompt_partition_is_deterministic_and_disjoint(self):
+    prompt = "Explain TPU sharding."
+    is_sft = ultrafeedback_dpo._prompt_is_in_partition(
+        prompt, partition="sft", sft_fraction=0.5, seed=42
+    )
+    is_dpo = ultrafeedback_dpo._prompt_is_in_partition(
+        prompt, partition="dpo", sft_fraction=0.5, seed=42
+    )
+
+    self.assertNotEqual(is_sft, is_dpo)
+
+  def test_eval_subset_is_deterministic_and_disjoint(self):
+    prompt = "Explain TPU sharding."
+    is_train = ultrafeedback_dpo._prompt_is_in_subset(
+        prompt, subset="train", eval_fraction=0.1, seed=42
+    )
+    is_eval = ultrafeedback_dpo._prompt_is_in_subset(
+        prompt, subset="eval", eval_fraction=0.1, seed=42
+    )
+
+    self.assertNotEqual(is_train, is_eval)
+
   def test_extract_response_text_supports_chat_messages(self):
     response = ultrafeedback_dpo._extract_response_text([
         {"role": "assistant", "content": "better answer"}
@@ -45,6 +67,7 @@ class UltraFeedbackDpoTest(absltest.TestCase):
     dataset.__len__.return_value = 10
     dataset.shuffle.return_value = dataset
     dataset.select.return_value = dataset
+    dataset.filter.return_value = dataset
     mapped_dataset = object()
 
     with (
@@ -67,6 +90,35 @@ class UltraFeedbackDpoTest(absltest.TestCase):
     dataset.shuffle.assert_called_once_with(seed=7)
     dataset.select.assert_called_once_with(range(8))
     mock_source.assert_called_once_with(dataset)
+
+  def test_create_dataset_applies_prompt_partition_before_shuffle(self):
+    dataset = mock.MagicMock()
+    dataset.filter.return_value = dataset
+    dataset.shuffle.return_value = dataset
+    mapped_dataset = object()
+
+    with (
+        mock.patch.object(
+            ultrafeedback_dpo, "load_dataset", return_value=dataset
+        ),
+        mock.patch.object(
+            ultrafeedback_dpo.grain.MapDataset,
+            "source",
+            return_value=mock.Mock(map=mock.Mock(return_value=mapped_dataset)),
+        ),
+    ):
+      output = ultrafeedback_dpo.create_dataset(
+          "train_prefs",
+          partition="dpo",
+          sft_fraction=0.4,
+          subset="train",
+          eval_fraction=0.1,
+          seed=11,
+      )
+
+    self.assertIs(output, mapped_dataset)
+    self.assertEqual(dataset.filter.call_count, 2)
+    dataset.shuffle.assert_called_once_with(seed=11)
 
 
 if __name__ == "__main__":

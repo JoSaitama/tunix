@@ -16,7 +16,9 @@
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 from tunix.models import safetensors_loader
+from tunix.models import safetensors_saver
 from tunix.models.qwen2 import model as model_lib
 
 
@@ -96,4 +98,104 @@ def create_model_from_safe_tensors(
       mesh=mesh,
       preprocess_fn=None,
       dtype=dtype,
+  )
+
+
+def _qwen2_state_key_to_safetensors_key(lora_name: str) -> str:
+  """Transforms a Qwen2 layer path into a safetensors state key."""
+  return f"model.{lora_name}.weight".replace(".attn.", ".self_attn.")
+
+
+def _build_full_state_dict(model: model_lib.Qwen2) -> dict[str, np.ndarray]:
+  """Builds a Hugging Face-compatible safetensors state dict from a Qwen2."""
+  cfg = model.config
+  state_dict = {
+      "model.embed_tokens.weight": np.asarray(
+          model.embedder.input_embedding.value
+      ),
+      "model.norm.weight": np.asarray(model.final_norm.w.value),
+  }
+
+  for layer_idx, layer in enumerate(model.layers):
+    prefix = f"model.layers.{layer_idx}"
+    state_dict[f"{prefix}.input_layernorm.weight"] = np.asarray(
+        layer.input_layernorm.w.value
+    )
+    state_dict[f"{prefix}.post_attention_layernorm.weight"] = np.asarray(
+        layer.post_attention_layernorm.w.value
+    )
+    state_dict[f"{prefix}.self_attn.q_proj.weight"] = np.asarray(
+        layer.attn.q_proj.w.value
+    ).reshape(cfg.embed_dim, -1).T
+    state_dict[f"{prefix}.self_attn.k_proj.weight"] = np.asarray(
+        layer.attn.k_proj.w.value
+    ).reshape(cfg.embed_dim, -1).T
+    state_dict[f"{prefix}.self_attn.v_proj.weight"] = np.asarray(
+        layer.attn.v_proj.w.value
+    ).reshape(cfg.embed_dim, -1).T
+    state_dict[f"{prefix}.self_attn.o_proj.weight"] = np.asarray(
+        layer.attn.o_proj.w.value
+    ).transpose(2, 0, 1).reshape(cfg.embed_dim, -1)
+    state_dict[f"{prefix}.self_attn.q_proj.bias"] = np.asarray(
+        layer.attn.q_bias.value
+    )
+    state_dict[f"{prefix}.self_attn.k_proj.bias"] = np.asarray(
+        layer.attn.k_bias.value
+    )
+    state_dict[f"{prefix}.self_attn.v_proj.bias"] = np.asarray(
+        layer.attn.v_bias.value
+    )
+    state_dict[f"{prefix}.mlp.gate_proj.weight"] = np.asarray(
+        layer.mlp.gate_proj.kernel.value
+    ).T
+    state_dict[f"{prefix}.mlp.up_proj.weight"] = np.asarray(
+        layer.mlp.up_proj.kernel.value
+    ).T
+    state_dict[f"{prefix}.mlp.down_proj.weight"] = np.asarray(
+        layer.mlp.down_proj.kernel.value
+    ).T
+
+  if not cfg.use_tied_embedding:
+    state_dict["lm_head.weight"] = np.asarray(model.lm_head.w.value).T
+
+  return state_dict
+
+
+def save_lora_merged_model_as_safetensors(
+    local_model_path: str,
+    output_dir: str,
+    lora_model: model_lib.Qwen2,
+    rank: int,
+    alpha: float,
+):
+  """Saves a Qwen2 model with LoRA weights merged in safetensors format."""
+  safetensors_saver.save_lora_merged_model_as_safetensors(
+      local_model_path=local_model_path,
+      output_dir=output_dir,
+      lora_model=lora_model,
+      rank=rank,
+      alpha=alpha,
+      state_key_transform_fn=_qwen2_state_key_to_safetensors_key,
+      field_patterns=(
+          "q_proj",
+          "k_proj",
+          "v_proj",
+          "o_proj",
+          "gate_proj",
+          "up_proj",
+          "down_proj",
+      ),
+  )
+
+
+def save_full_model_as_safetensors(
+    local_model_path: str,
+    output_dir: str,
+    model: model_lib.Qwen2,
+):
+  """Saves a full Qwen2 model in Hugging Face-compatible safetensors format."""
+  safetensors_saver.save_full_model_as_safetensors(
+      local_model_path=local_model_path,
+      output_dir=output_dir,
+      model_state=_build_full_state_dict(model),
   )

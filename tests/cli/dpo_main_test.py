@@ -140,38 +140,108 @@ class DpoMainTest(absltest.TestCase):
     mock_clip.assert_called_once_with(0.5)
     mock_chain.assert_called_once_with("clip-op", "base-optimizer")
 
-  def test_maybe_save_merged_lora_invokes_model_saver(self):
+  def test_create_models_and_tokenizer_loads_separate_full_models(self):
+    pipeline = object.__new__(dpo_main.DpoPipeline)
+    pipeline.config = {
+        "actor_model_config": {
+            "model_name": "qwen2.5-1.5b",
+            "model_id": "Qwen/Qwen2.5-1.5B",
+            "model_source": "internal",
+            "model_path": "/tmp/model",
+        },
+        "reference_model_config": {
+            "model_name": "qwen2.5-1.5b",
+            "model_id": "Qwen/Qwen2.5-1.5B",
+            "model_source": "internal",
+            "model_path": "/tmp/model",
+        },
+        "tokenizer_config": {"tokenizer_path": "tok"},
+    }
+    pipeline.create_mesh = mock.Mock(side_effect=["ref-mesh", "actor-mesh"])
+    reference_model = mock.Mock(name="reference-model")
+    actor_model = mock.Mock(name="actor-model")
+
+    with (
+        mock.patch.object(
+            dpo_main.model_lib,
+            "create_model",
+            side_effect=[
+                (reference_model, "tok-path", "/tmp/reference"),
+                (actor_model, "tok-path", "/tmp/actor"),
+            ],
+        ) as mock_create_model,
+        mock.patch.object(
+            dpo_main.model_lib,
+            "create_tokenizer",
+            return_value="tokenizer",
+        ) as mock_create_tokenizer,
+        mock.patch.object(
+            dpo_main.model_lib,
+            "apply_lora_to_model",
+        ) as mock_apply_lora,
+    ):
+      result = pipeline.create_models_and_tokenizer()
+
+    self.assertEqual(
+        result,
+        (
+            actor_model,
+            reference_model,
+            "tokenizer",
+            "tok-path",
+            "/tmp/actor",
+            "actor-mesh",
+        ),
+    )
+    self.assertEqual(mock_create_model.call_count, 2)
+    mock_create_tokenizer.assert_called_once_with({"tokenizer_path": "tok"}, "tok-path")
+    mock_apply_lora.assert_not_called()
+
+  def test_maybe_export_model_invokes_lora_exporter(self):
     pipeline = object.__new__(dpo_main.DpoPipeline)
     pipeline.config = {
         "actor_model_config": {
             "lora_config": {"rank": 64, "alpha": 64.0},
             "model_name": "qwen3-4b-instruct-2507",
         },
-        "merged_model_output_dir": "/tmp/merged",
+        "exported_model_output_dir": "/tmp/exported",
     }
-    save_fn = mock.Mock()
-    params_module = mock.Mock(
-        save_lora_merged_model_as_safetensors=save_fn,
+
+    with mock.patch.object(
+        dpo_main.model_lib,
+        "save_model_as_safetensors",
+    ) as mock_save_model:
+      pipeline.maybe_export_model(actor_model="actor", model_path="/tmp/model")
+
+    mock_save_model.assert_called_once_with(
+        model_name="qwen3-4b-instruct-2507",
+        local_model_path="/tmp/model",
+        output_dir="/tmp/exported",
+        model_obj="actor",
+        lora_config={"rank": 64, "alpha": 64.0},
     )
 
-    with (
-        mock.patch.object(
-            dpo_main.automodel,
-            "get_model_module",
-            return_value=params_module,
-        ) as mock_get_model_module,
-        mock.patch.object(dpo_main.os, "makedirs") as mock_makedirs,
-    ):
-      pipeline.maybe_save_merged_lora(actor_model="actor", model_path="/tmp/model")
+  def test_maybe_export_model_invokes_full_exporter(self):
+    pipeline = object.__new__(dpo_main.DpoPipeline)
+    pipeline.config = {
+        "actor_model_config": {
+            "model_name": "qwen2.5-1.5b",
+        },
+        "exported_model_output_dir": "/tmp/exported",
+    }
 
-    mock_get_model_module.assert_called_once()
-    mock_makedirs.assert_called_once_with("/tmp/merged", exist_ok=True)
-    save_fn.assert_called_once_with(
+    with mock.patch.object(
+        dpo_main.model_lib,
+        "save_model_as_safetensors",
+    ) as mock_save_model:
+      pipeline.maybe_export_model(actor_model="actor", model_path="/tmp/model")
+
+    mock_save_model.assert_called_once_with(
+        model_name="qwen2.5-1.5b",
         local_model_path="/tmp/model",
-        output_dir="/tmp/merged",
-        lora_model="actor",
-        rank=64,
-        alpha=64.0,
+        output_dir="/tmp/exported",
+        model_obj="actor",
+        lora_config=None,
     )
 
   def test_run_dpo_trainer_uses_curated_trainer_when_enabled(self):
@@ -192,7 +262,7 @@ class DpoMainTest(absltest.TestCase):
     ))
     pipeline.load_dataset = mock.Mock(side_effect=["train-ds", "eval-ds"])
     pipeline.create_optimizer_with_clipping = mock.Mock(return_value="optimizer")
-    pipeline.maybe_save_merged_lora = mock.Mock()
+    pipeline.maybe_export_model = mock.Mock()
     training_config = dpo_main.dpo_trainer_lib.DPOTrainingConfig(
         eval_every_n_steps=10,
         max_steps=20,

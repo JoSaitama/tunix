@@ -22,6 +22,8 @@ from typing import Any, Callable
 import jax.numpy as jnp
 import safetensors.numpy as safe_np
 
+_INDEX_FILENAME = 'model.safetensors.index.json'
+
 
 def qwix_path_to_str(qwix_path) -> str:
   return '.'.join([str(field) for field in qwix_path])
@@ -55,12 +57,36 @@ def _extract_lora_from_component(
 
 def _load_weight_map(local_model_path: str) -> dict[str, str] | None:
   """Returns a state-key to shard filename map for sharded safetensors."""
-  index_path = os.path.join(local_model_path, 'model.safetensors.index.json')
+  index_path = os.path.join(local_model_path, _INDEX_FILENAME)
   if not os.path.exists(index_path):
     return None
   with open(index_path, 'r') as f:
     index_data = json.load(f)
   return index_data['weight_map']
+
+
+def _reset_output_dir(output_dir: str) -> None:
+  if os.path.exists(output_dir):
+    shutil.rmtree(output_dir)
+  os.makedirs(output_dir)
+
+
+def copy_support_files(
+    local_model_path: str,
+    output_dir: str,
+    *,
+    copy_index: bool,
+) -> None:
+  """Copies model sidecar files (config, tokenizer, etc.) into output_dir."""
+  for filename in os.listdir(local_model_path):
+    if filename.endswith('.safetensors'):
+      continue
+    if not copy_index and filename == _INDEX_FILENAME:
+      continue
+    src = os.path.join(local_model_path, filename)
+    if os.path.isfile(src):
+      dst = os.path.join(output_dir, filename)
+      shutil.copy(src, dst)
 
 
 def _apply_lora_delta(
@@ -122,9 +148,7 @@ def save_lora_merged_model_as_safetensors(
       corresponding lora pair.
   """
 
-  if os.path.exists(output_dir):
-    shutil.rmtree(output_dir)
-  os.makedirs(output_dir)
+  _reset_output_dir(output_dir)
 
   # Extract LoRA layers using the model-specific function
   lora_layers = {}
@@ -154,6 +178,7 @@ def save_lora_merged_model_as_safetensors(
       state_key = state_key_transform_fn(lora_name)
       _apply_lora_delta(base_state, state_key, lora_a, lora_b, rank, alpha)
     safe_np.save_file(base_state, os.path.join(output_dir, 'model.safetensors'))
+    copy_support_files(local_model_path, output_dir, copy_index=False)
   else:
     shard_to_updates: dict[str, list[tuple[str, Any, Any]]] = {}
     for lora_name, (lora_a, lora_b) in lora_layers.items():
@@ -173,11 +198,15 @@ def save_lora_merged_model_as_safetensors(
             shard_state, state_key, lora_a, lora_b, rank, alpha
         )
       safe_np.save_file(shard_state, os.path.join(output_dir, shard_name))
+    copy_support_files(local_model_path, output_dir, copy_index=True)
 
-  # Copy non-safetensors files (config, tokenizer, etc.)
-  for filename in os.listdir(local_model_path):
-    if not filename.endswith('.safetensors'):
-      src = os.path.join(local_model_path, filename)
-      if os.path.isfile(src):
-        dst = os.path.join(output_dir, filename)
-        shutil.copy(src, dst)
+
+def save_full_model_as_safetensors(
+    local_model_path: str,
+    output_dir: str,
+    model_state: dict[str, Any],
+):
+  """Saves a full model state dict in unsharded safetensors format."""
+  _reset_output_dir(output_dir)
+  safe_np.save_file(model_state, os.path.join(output_dir, 'model.safetensors'))
+  copy_support_files(local_model_path, output_dir, copy_index=False)

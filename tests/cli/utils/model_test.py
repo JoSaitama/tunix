@@ -208,6 +208,57 @@ class ModelTest(parameterized.TestCase):
     else:
       mock_nnx_display.assert_not_called()
 
+  def test_save_model_as_safetensors_uses_lora_saver(self):
+    save_fn = mock.Mock()
+
+    with mock.patch.object(
+        model,
+        '_get_model_export_fn',
+        return_value=save_fn,
+    ) as mock_get_export_fn:
+      model.save_model_as_safetensors(
+          model_name='qwen2.5-1.5b',
+          local_model_path='/tmp/base',
+          output_dir='/tmp/out',
+          model_obj='lora-model',
+          lora_config={'rank': 8, 'alpha': 16.0},
+      )
+
+    mock_get_export_fn.assert_called_once_with(
+        'qwen2.5-1.5b', 'save_lora_merged_model_as_safetensors'
+    )
+    save_fn.assert_called_once_with(
+        local_model_path='/tmp/base',
+        output_dir='/tmp/out',
+        lora_model='lora-model',
+        rank=8,
+        alpha=16.0,
+    )
+
+  def test_save_model_as_safetensors_uses_full_saver(self):
+    save_fn = mock.Mock()
+
+    with mock.patch.object(
+        model,
+        '_get_model_export_fn',
+        return_value=save_fn,
+    ) as mock_get_export_fn:
+      model.save_model_as_safetensors(
+          model_name='qwen2.5-1.5b',
+          local_model_path='/tmp/base',
+          output_dir='/tmp/out',
+          model_obj='full-model',
+      )
+
+    mock_get_export_fn.assert_called_once_with(
+        'qwen2.5-1.5b', 'save_full_model_as_safetensors'
+    )
+    save_fn.assert_called_once_with(
+        local_model_path='/tmp/base',
+        output_dir='/tmp/out',
+        model='full-model',
+    )
+
 
 if __name__ == "__main__":
   absltest.main()

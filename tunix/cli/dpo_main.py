@@ -15,8 +15,6 @@
 """Main entry point for DPO training."""
 
 from __future__ import annotations
-
-import os
 from typing import Any
 
 from absl import app
@@ -25,7 +23,6 @@ import optax
 from tunix.cli import config
 from tunix.cli.utils import data as data_lib
 from tunix.cli.utils import model as model_lib
-from tunix.models import automodel
 from tunix.sft.dpo import dpo_trainer as dpo_trainer_lib
 
 
@@ -116,7 +113,7 @@ class DpoPipeline(config.HyperParameters):
     reference_mesh = self.create_mesh("reference_model_config")
     actor_mesh = self.create_mesh("actor_model_config")
 
-    reference_model, tokenizer_path, model_path = model_lib.create_model(
+    reference_model, tokenizer_path, _ = model_lib.create_model(
         self.config["reference_model_config"],
         self.config["tokenizer_config"],
         reference_mesh,
@@ -126,11 +123,17 @@ class DpoPipeline(config.HyperParameters):
         self.config["tokenizer_config"], tokenizer_path
     )
 
-    actor_model = reference_model
-    actor_lora_config = self.config["actor_model_config"].get("lora_config")
+    actor_config = dict(self.config["actor_model_config"])
+    actor_lora_config = actor_config.pop("lora_config", None)
+    actor_model, _, actor_model_path = model_lib.create_model(
+        actor_config,
+        self.config["tokenizer_config"],
+        actor_mesh,
+        return_model_path=True,
+    )
     if actor_lora_config:
       actor_model = model_lib.apply_lora_to_model(
-          reference_model,
+          actor_model,
           actor_mesh,
           actor_lora_config,
       )
@@ -144,7 +147,7 @@ class DpoPipeline(config.HyperParameters):
         reference_model,
         tokenizer,
         tokenizer_path,
-        model_path,
+        actor_model_path,
         actor_mesh,
     )
 
@@ -167,48 +170,22 @@ class DpoPipeline(config.HyperParameters):
         max_prompt_length=None,
     )
 
-  def maybe_save_merged_lora(self, actor_model, model_path: str) -> None:
+  def maybe_export_model(self, actor_model, model_path: str) -> None:
     actor_lora_config = self.config["actor_model_config"].get("lora_config")
-    if not actor_lora_config:
-      return
-
-    output_dir = self.config.get("merged_model_output_dir")
+    output_dir = self.config.get("exported_model_output_dir")
+    if output_dir is None and actor_lora_config:
+      output_dir = self.config.get("merged_model_output_dir")
     if not output_dir:
       return
 
     model_name = self.config["actor_model_config"]["model_name"]
-    params_modules = [
-        automodel.get_model_module(model_name, automodel.ModelModule.PARAMS)
-    ]
-    if model_name.startswith("gemma"):
-      params_modules.append(
-          automodel.get_model_module(
-              model_name, automodel.ModelModule.PARAMS_SAFETENSORS
-          )
-      )
-
-    save_fn = None
-    for params_module in params_modules:
-      save_fn = getattr(
-          params_module, "save_lora_merged_model_as_safetensors", None
-      )
-      if save_fn is not None:
-        break
-
-    if save_fn is None:
-      raise AttributeError(
-          "No LoRA merge saver found for model "
-          f"{self.config['actor_model_config']['model_name']}."
-      )
-
-    os.makedirs(output_dir, exist_ok=True)
-    logging.info("Saving merged LoRA model to %s", output_dir)
-    save_fn(
+    logging.info("Saving exported DPO model to %s", output_dir)
+    model_lib.save_model_as_safetensors(
+        model_name=model_name,
         local_model_path=model_path,
         output_dir=output_dir,
-        lora_model=actor_model,
-        rank=actor_lora_config["rank"],
-        alpha=actor_lora_config["alpha"],
+        model_obj=actor_model,
+        lora_config=actor_lora_config,
     )
 
   def run_dpo_trainer(self):
@@ -260,7 +237,7 @@ class DpoPipeline(config.HyperParameters):
     with mesh:
       trainer.train(train_dataset, eval_dataset)
 
-    self.maybe_save_merged_lora(actor_model, model_path)
+    self.maybe_export_model(actor_model, model_path)
 
 
 def main(argv, **kwargs):

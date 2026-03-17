@@ -3,10 +3,21 @@
 This directory contains the runnable recipe for the `Qwen/Qwen3-4B-Instruct-2507`
 LoRA DPO baseline on `HuggingFaceH4/ultrafeedback_binarized`.
 
+It also contains a second recipe for `Qwen/Qwen2.5-1.5B` that starts from an
+SFT-exported model checkpoint and compares `baseline`, `outlier_l2`, and
+`self_inf_batch`. That workflow now defaults to full DPO and accepts
+`--ft-mode lora` when you want a LoRA actor. Its training-time eval is taken
+from a prompt-level holdout inside `train_prefs`, leaving `test_prefs` for
+final reporting.
+
 ## Files
 
 - `qwen3_4b_ultrafeedback.yaml`: baseline config
 - `run_qwen3_4b_ultrafeedback.sh`: launcher for `full` and `smoke`
+- `qwen2p5_1p5b_ultrafeedback_from_sft.yaml`: full DPO-from-SFT config
+- `qwen2p5_1p5b_ultrafeedback_from_sft_lora.yaml`: LoRA DPO-from-SFT config
+- `run_qwen2p5_1p5b_ultrafeedback_from_sft.sh`: launcher for
+  `baseline|outlier_l2|self_inf_batch`
 
 ## Baseline
 
@@ -70,6 +81,34 @@ Available DPO DBC variants:
 
 - `dpo_config.curation_variant=outlier_l2` (default): filter large gradient-norm outliers using `mean + curation_threshold * std`
 - `dpo_config.curation_variant=self_inf_batch`: filter samples whose gradient has negative or weak alignment with the full accumulation-window mean gradient using `dpo_config.self_influence_dot_threshold`
+
+Run the `Qwen/Qwen2.5-1.5B` DPO-from-SFT smoke recipe:
+
+```bash
+source /home/lhf_hongfu_gmail_com/.venvs/DPO/bin/activate
+cd /home/lhf_hongfu_gmail_com/tunix
+./examples/dpo/run_qwen2p5_1p5b_ultrafeedback_from_sft.sh \
+  smoke \
+  baseline \
+  /path/to/sft_exported_model
+```
+
+Swap `baseline` for `outlier_l2` or `self_inf_batch` to run the two DBC
+variants. The script writes each run into a variant-specific directory so the
+artifacts do not overwrite one another.
+
+Run the same workflow with a LoRA actor:
+
+```bash
+./examples/dpo/run_qwen2p5_1p5b_ultrafeedback_from_sft.sh \
+  smoke \
+  baseline \
+  /path/to/sft_exported_model \
+  --ft-mode lora
+```
+
+For the full SFT -> DPO workflow, including the prompt-disjoint dataset split,
+see `examples/ultrafeedback/README.md`.
 
 Run the DPO smoke recipe with `self_inf_batch` curation:
 

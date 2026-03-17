@@ -185,6 +185,15 @@ class AutoModelTest(parameterized.TestCase):
         version=expected_version,
     )
 
+  def test_download_model_internal_returns_existing_local_path(self):
+    path = self.create_tempdir().full_path
+
+    returned = automodel.download_model(
+        path, model_download_path=None, model_source=automodel.ModelSource.INTERNAL
+    )
+
+    self.assertEqual(returned, path)
+
 
 if __name__ == "__main__":
   absltest.main()

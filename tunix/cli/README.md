@@ -17,11 +17,16 @@ The Python scripts in this folder are the entry points for initiating training a
 ## Usage
 While you can run these scripts directly, the intended workflow is to use the wrapper scripts in the examples folder. These examples show how to pass the correct arguments and configurations for various use cases.
 
-For sft, we provide scripts running on mtnt translation dataset. See available [scripts](examples/sft/mtnt)
+For sft, we provide scripts running on the MTNT translation dataset and on
+UltraFeedback chosen-only chat data. See available
+[scripts](examples/sft/mtnt) and [scripts](../../examples/sft/ultrafeedback).
+For the full `UltraFeedback` two-stage workflow, see
+[examples/ultrafeedback](../../examples/ultrafeedback).
 
 For rl, we provide scripts running grpo on gsm8k math dataset. See available [scripts](examples/rl/gsm8k)
 
-For dpo, see the Qwen3 UltraFeedback example in [examples/dpo](../../examples/dpo)
+For dpo, see the Qwen3 UltraFeedback example and the Qwen2.5-from-SFT workflow
+in [examples/dpo](../../examples/dpo)
 
 For launching shell scripts from examples, you would navigate to the examples directory and execute a script like this:
 

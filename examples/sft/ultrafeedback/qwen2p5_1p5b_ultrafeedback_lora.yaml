@@ -1,0 +1,65 @@
+model_config:
+  model_name: "qwen2.5-1.5b"
+  model_source: "huggingface"
+  model_id: "Qwen/Qwen2.5-1.5B"
+  model_path: ""
+  model_download_path: "/tmp/models/qwen2p5_1p5b_ultrafeedback_sft"
+  rng_seed: 0
+  model_display: false
+  intermediate_ckpt_dir: "/tmp/intermediate_ckpt_qwen2p5_1p5b_ultrafeedback_sft"
+  lora_config:
+    module_path: ".*q_proj|.*k_proj|.*v_proj|.*o_proj|.*gate_proj|.*up_proj|.*down_proj"
+    rank: 64
+    alpha: 64.0
+  mesh:
+    shape: "(2,2)"
+    axis_names: "('fsdp','tp')"
+
+tokenizer_config:
+  tokenizer_path: "Qwen/Qwen2.5-1.5B"
+  tokenizer_type: "huggingface"
+  add_bos: false
+  add_eos: false
+
+train_data_module: "examples/data/ultrafeedback_sft.py:create_dataset(split='train_prefs', partition='sft', subset='train', sft_fraction=0.25, eval_fraction=0.1, seed=42)"
+eval_data_module: "examples/data/ultrafeedback_sft.py:create_dataset(split='train_prefs', partition='sft', subset='eval', sft_fraction=0.25, eval_fraction=0.1, seed=42)"
+
+batch_size: 2
+eval_batch_size: 2
+max_target_length: 512
+num_batches: null
+num_test_batches: null
+
+optimizer_config:
+  opt_type: "adamw"
+  schedule_type: "warmup_cosine_decay_schedule"
+  init_value: 0.0
+  peak_value: 1e-5
+  end_value: 0.0
+  warmup_steps: 200
+  decay_steps: 2000
+  b1: 0.9
+  b2: 0.99
+  weight_decay: 0.1
+  max_grad_norm: 0.1
+
+training_config:
+  eval_every_n_steps: 200
+  max_steps: 2000
+  gradient_accumulation_steps: 4
+  checkpoint_root_directory: "/home/lhf_hongfu_gmail_com/tunix/runs/sft_qwen2p5_1p5b_ultrafeedback/checkpoints"
+  checkpointing_options:
+    save_interval_steps: 200
+    max_to_keep: 4
+  metrics_logging_options:
+    project_name: "tunix"
+    run_name: "qwen2p5-1p5b-ultrafeedback-sft"
+    log_dir: "/home/lhf_hongfu_gmail_com/tunix/runs/sft_qwen2p5_1p5b_ultrafeedback/tensorboard"
+    flush_every_n_steps: 20
+  profiler_options: null
+  data_sharding_axis: ["fsdp"]
+  max_inflight_computations: 2
+  metrics_prefix: "sft"
+  pbar_description: "SFT"
+
+exported_model_output_dir: "/home/lhf_hongfu_gmail_com/tunix/runs/sft_qwen2p5_1p5b_ultrafeedback/exported_model"
