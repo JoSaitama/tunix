@@ -5661,3 +5661,96 @@ This file tracks engineering changes made in this repository.
 ### Known risks / TODO
 
 - 当前 `paper_experiment.md` 还没有把这台 worker 上的“带真实 `SFT_MODEL` 路径的 DPO full 命令”逐条写死；如果需要，可以后续补进去。
+
+## 2026-03-17 - DPO hyperparameter summary review
+
+### Scope
+
+- 核对 `qwen2.5-1.5b` 这条 DPO-from-SFT recipe 的当前默认超参数。
+- 本轮无代码改动，仅做配置解读。
+
+### Changed files
+
+1. `develop.md`
+
+### Validation
+
+- `sed -n '1,220p' examples/dpo/qwen2p5_1p5b_ultrafeedback_from_sft.yaml`
+- `sed -n '1,220p' examples/dpo/qwen2p5_1p5b_ultrafeedback_from_sft_lora.yaml`
+- `sed -n '1,240p' examples/dpo/run_qwen2p5_1p5b_ultrafeedback_from_sft.sh`
+- `nl -ba examples/dpo/qwen2p5_1p5b_ultrafeedback_from_sft.yaml | sed -n '1,220p'`
+- `nl -ba examples/dpo/qwen2p5_1p5b_ultrafeedback_from_sft_lora.yaml | sed -n '1,220p'`
+- `nl -ba examples/dpo/run_qwen2p5_1p5b_ultrafeedback_from_sft.sh | sed -n '1,220p'`
+
+### Validation results
+
+- 当前 full DPO 默认配置已确认：
+  - `batch_size=2`
+  - `eval_batch_size=2`
+  - `gradient_accumulation_steps=4`
+  - `max_steps=2000`
+  - `eval_every_n_steps=200`
+  - `optimizer=adamw`
+  - `peak_value=5e-6`
+  - `warmup_steps=200`
+  - `decay_steps=2000`
+  - `weight_decay=0.1`
+  - `max_grad_norm=0.1`
+  - `beta=0.01`
+  - `max_prompt_length=512`
+  - `max_response_length=512`
+- 当前 DBC 默认配置已确认：
+  - `outlier_l2`: `curation_threshold=2.0`
+  - `self_inf_batch`: `self_influence_dot_threshold=0.0`
+- launcher 的 smoke profile 会覆盖为：
+  - `max_steps=20`
+  - `eval_every_n_steps=10`
+  - `gradient_accumulation_steps=2`
+  - `warmup_steps=2`
+  - `decay_steps=20`
+- LoRA DPO recipe 与 full DPO 的训练超参数相同，仅额外增加：
+  - `rank=64`
+  - `alpha=64`
+  - `module_path=.*q_proj|.*k_proj|.*v_proj|.*o_proj|.*gate_proj|.*up_proj|.*down_proj`
+
+### Known risks / TODO
+
+- 当前这些 DPO 参数属于偏保守的 full-finetuning 设定；后续若 DBC 触发率仍偏低，可以优先从 `curation_threshold` 而不是整体学习率开始调。
+
+## 2026-03-17 - Runtime environment clarification
+
+### Scope
+
+- 说明当前 `qwen2.5-1.5b` SFT/DPO workflow 相比之前的运行环境是否发生变化。
+- 本轮无代码改动，仅记录结论。
+
+### Changed files
+
+1. `develop.md`
+
+### Validation
+
+- 核对当前 launcher 与文档中的环境入口：
+  - `examples/sft/ultrafeedback/run_qwen2p5_1p5b_ultrafeedback.sh`
+  - `examples/dpo/run_qwen2p5_1p5b_ultrafeedback_from_sft.sh`
+  - `examples/ultrafeedback/README.md`
+  - `examples/ultrafeedback/paper_experiment.md`
+
+### Validation results
+
+- 运行环境本身没有本质变化：
+  - 仍然使用 `/home/lhf_hongfu_gmail_com/.venvs/DPO`
+  - 仍然在同一台 TPU worker 上运行
+  - 仍然需要先加载 `my_example/.env` 或 `.env`
+  - 仍然依赖 `HF_TOKEN`
+- 相比之前变化的是 workflow 和代码路径，而不是基础环境：
+  - 默认改成了 `qwen2.5-1.5b` 的 `SFT -> DPO`
+  - DPO 会从本地 `SFT exported_model` 读取 actor/reference base
+  - DPO 默认 `ft-mode` 现在是 `full`
+- 运行时需要额外注意的环境问题：
+  - 当前根分区空间需要在 full DPO 前留出足够余量
+  - 在 Codex 沙箱里跑 TPU 任务会被 metadata/network 限制，因此真实训练需要在沙箱外执行
+
+### Known risks / TODO
+
+- 如果后续更换 worker、TPU 拓扑或 venv，再单独补记录。

@@ -114,6 +114,8 @@ def create_dataset(
     sft_fraction: float = 0.5,
     subset: str = "all",
     eval_fraction: float = 0.0,
+    flip_ratio: float = 0.0,
+    flip_seed: int = 123,
 ):
   """Loads UltraFeedback preference pairs as a Grain dataset."""
   dataset = load_dataset(_DATASET_NAME, split=split)
@@ -141,4 +143,12 @@ def create_dataset(
     dataset = dataset.shuffle(seed=seed).select(range(min(limit, len(dataset))))
   elif split.startswith("train"):
     dataset = dataset.shuffle(seed=seed)
+  if flip_ratio > 0.0:
+    _n = len(dataset)
+    _flip_indices = set(range(int(_n * flip_ratio)))
+    def _maybe_flip(row, idx):
+      if idx in _flip_indices:
+        return {**row, "chosen": row["rejected"], "rejected": row["chosen"]}
+      return row
+    dataset = dataset.map(_maybe_flip, with_indices=True)
   return grain.MapDataset.source(dataset).map(_to_preference_record)
