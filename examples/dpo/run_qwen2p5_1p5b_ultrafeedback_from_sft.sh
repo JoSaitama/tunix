@@ -92,7 +92,7 @@ PYTHON_BIN="${PYTHON_BIN:-python3}"
 RUN_TS="${RUN_TS:-$(date +%Y%m%d_%H%M%S)}"
 RUN_ROOT="${RUN_ROOT:-${REPO_ROOT}/runs/dpo_qwen2p5_1p5b_ultrafeedback_from_sft_${VARIANT}_${FT_MODE}_${PROFILE}_${RUN_TS}}"
 RUN_NAME="qwen2p5-1p5b-ultrafeedback-from-sft-${VARIANT}-${FT_MODE}-${PROFILE}-${RUN_TS}"
-TMP_CONFIG="$(mktemp "/tmp/qwen2p5_1p5b_ultrafeedback_dpo_${VARIANT}_${FT_MODE}_${PROFILE}_XXXX.yaml")"
+TMP_CONFIG="$(mktemp "/mnt/qwen2p5_1p5b_ultrafeedback_dpo_${VARIANT}_${FT_MODE}_${PROFILE}_XXXX.yaml")"
 trap 'rm -f "${TMP_CONFIG}"' EXIT
 
 "${PYTHON_BIN}" - <<'PY' \
