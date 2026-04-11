@@ -112,6 +112,9 @@ class DPOTrainingConfig(peft_trainer.TrainingConfig):
   curation_variant: str = "outlier_l2"
   curation_threshold: float = 3.0
   self_influence_dot_threshold: float = 0.0
+  late_flip_ratio: float = 0.0
+  late_flip_start_step: int | None = None
+  late_flip_seed: int = 123
 
   def __post_init__(self) -> None:
     self.curation_variant = _normalize_curation_variant(self.curation_variant)
@@ -496,6 +499,8 @@ class DPOTrainer(peft_trainer.PeftTrainer):
 
     # If reference model is not provided, we don't use it in the loss term.
     self._ref_model_exists = self.ref_model is not None
+    self._is_running_eval = False
+    self._late_flip_activation_logged = False
 
     self._aux_metrics_to_log = {
         "rewards/chosen": np.mean,
@@ -509,6 +514,92 @@ class DPOTrainer(peft_trainer.PeftTrainer):
     if self.algorithm == "orpo":
       self._aux_metrics_to_log["odds_ratio"] = np.mean
 
+  def _maybe_apply_late_flip(
+      self,
+      training_input: DataInput | TrainingInput,
+  ) -> DataInput | TrainingInput:
+    """Applies dynamic chosen/rejected swapping after a configured step."""
+    late_flip_ratio = self.dpo_config.late_flip_ratio
+    late_flip_start_step = self.dpo_config.late_flip_start_step
+    if (
+        self._is_running_eval
+        or late_flip_ratio <= 0.0
+        or late_flip_start_step is None
+        or self._train_steps < late_flip_start_step
+    ):
+      return training_input
+
+    if not self._late_flip_activation_logged:
+      logging.info(
+          "Activating late preference flip at train step %d (configured start=%d, ratio=%.3f).",
+          self._train_steps,
+          late_flip_start_step,
+          late_flip_ratio,
+      )
+      self._late_flip_activation_logged = True
+
+    if isinstance(training_input, DataInput):
+      batch_size = len(training_input.prompts)
+    else:
+      batch_size = int(training_input.prompt_ids.shape[0])
+
+    if batch_size <= 0:
+      return training_input
+
+    num_to_flip = int(batch_size * late_flip_ratio)
+    if late_flip_ratio > 0.0:
+      num_to_flip = max(1, num_to_flip)
+    num_to_flip = min(num_to_flip, batch_size)
+    if num_to_flip <= 0:
+      return training_input
+
+    rng = np.random.default_rng(self.dpo_config.late_flip_seed + self._iter_steps)
+    flip_indices = np.sort(rng.choice(batch_size, size=num_to_flip, replace=False))
+
+    if isinstance(training_input, DataInput):
+      chosen = list(training_input.chosen_responses)
+      rejected = list(training_input.rejected_responses)
+      for idx in flip_indices.tolist():
+        chosen[idx], rejected[idx] = rejected[idx], chosen[idx]
+      return DataInput(
+          prompts=list(training_input.prompts),
+          chosen_responses=chosen,
+          rejected_responses=rejected,
+      )
+
+    chosen_ids = np.array(training_input.chosen_ids, copy=True)
+    rejected_ids = np.array(training_input.rejected_ids, copy=True)
+    chosen_mask = np.array(training_input.chosen_mask, copy=True)
+    rejected_mask = np.array(training_input.rejected_mask, copy=True)
+    chosen_ids[flip_indices], rejected_ids[flip_indices] = (
+        rejected_ids[flip_indices].copy(),
+        chosen_ids[flip_indices].copy(),
+    )
+    chosen_mask[flip_indices], rejected_mask[flip_indices] = (
+        rejected_mask[flip_indices].copy(),
+        chosen_mask[flip_indices].copy(),
+    )
+    return TrainingInput(
+        prompt_ids=training_input.prompt_ids,
+        prompt_mask=training_input.prompt_mask,
+        chosen_ids=chosen_ids,
+        chosen_mask=chosen_mask,
+        rejected_ids=rejected_ids,
+        rejected_mask=rejected_mask,
+    )
+
+  @override
+  def _run_eval(
+      self,
+      eval_ds: Iterable[Any],
+      eval_step_fn: Any,
+  ) -> None:
+    self._is_running_eval = True
+    try:
+      super()._run_eval(eval_ds, eval_step_fn)
+    finally:
+      self._is_running_eval = False
+
   @override
   def _prepare_inputs(
       self,
@@ -516,6 +607,8 @@ class DPOTrainer(peft_trainer.PeftTrainer):
   ) -> Any:
     if isinstance(training_input, dict):
       training_input = _preprocess_dict(training_input)
+
+    training_input = self._maybe_apply_late_flip(training_input)
 
     # If the inputs are list of strings, let's tokenise them and pad them.
     if isinstance(training_input, DataInput):
