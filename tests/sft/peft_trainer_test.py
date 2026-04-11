@@ -177,6 +177,327 @@ class PeftTrainerTest(parameterized.TestCase):
 
     trainer.train(self.train_ds)  # No eval dataset.
 
+  @mock.patch.object(
+      peft_trainer.system_metrics_calculator,
+      'measure_tflops_per_step',
+      autospec=True,
+      return_value=123.0,
+  )
+  def test_tflops_measurement_enabled_by_default(self, mock_measure_tflops):
+    config = peft_trainer.TrainingConfig(eval_every_n_steps=2, max_steps=1)
+    rngs = nnx.Rngs(0)
+    model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=rngs)
+    trainer = peft_trainer.PeftTrainer(model, optax.sgd(1e-3), config)
+    trainer = trainer.with_gen_model_input_fn(dummy_gen_model_input_fn)
+
+    with mock.patch.dict(
+        os.environ, {'TUNIX_DISABLE_TFLOPS_MEASUREMENT': ''}, clear=False
+    ):
+      trainer.train(dummy_datasets(batch_size=4, repeat=1), None)
+
+    mock_measure_tflops.assert_called_once()
+    self.assertEqual(
+        trainer.metrics_logger.get_metric('', 'tflops_per_step', 'train'),
+        123.0,
+    )
+
+  @mock.patch.object(
+      peft_trainer.system_metrics_calculator,
+      'measure_tflops_per_step',
+      autospec=True,
+      return_value=123.0,
+  )
+  def test_tflops_measurement_can_be_disabled(self, mock_measure_tflops):
+    config = peft_trainer.TrainingConfig(eval_every_n_steps=2, max_steps=1)
+    rngs = nnx.Rngs(0)
+    model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=rngs)
+    trainer = peft_trainer.PeftTrainer(model, optax.sgd(1e-3), config)
+    trainer = trainer.with_gen_model_input_fn(dummy_gen_model_input_fn)
+
+    with mock.patch.dict(
+        os.environ, {'TUNIX_DISABLE_TFLOPS_MEASUREMENT': '1'}, clear=False
+    ):
+      trainer.train(dummy_datasets(batch_size=4, repeat=1), None)
+
+    mock_measure_tflops.assert_not_called()
+
+  def test_actor_heartbeat_interval_defaults_to_16(self):
+    with mock.patch.dict(
+        os.environ, {'TUNIX_ACTOR_HEARTBEAT_INTERVAL': ''}, clear=False
+    ):
+      self.assertEqual(peft_trainer._actor_heartbeat_interval(), 16)
+
+  def test_actor_heartbeat_interval_invalid_values_fall_back(self):
+    with mock.patch.dict(
+        os.environ, {'TUNIX_ACTOR_HEARTBEAT_INTERVAL': 'invalid'}, clear=False
+    ):
+      self.assertEqual(peft_trainer._actor_heartbeat_interval(), 16)
+    with mock.patch.dict(
+        os.environ, {'TUNIX_ACTOR_HEARTBEAT_INTERVAL': '0'}, clear=False
+    ):
+      self.assertEqual(peft_trainer._actor_heartbeat_interval(), 16)
+
+  def test_actor_progress_metrics_disabled_by_default(self):
+    config = peft_trainer.TrainingConfig(
+        eval_every_n_steps=2,
+        max_steps=1,
+        gradient_accumulation_steps=4,
+    )
+    rngs = nnx.Rngs(0)
+    model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=rngs)
+    trainer = peft_trainer.PeftTrainer(model, optax.sgd(1e-3), config)
+    trainer = trainer.with_gen_model_input_fn(dummy_gen_model_input_fn)
+
+    with mock.patch.dict(
+        os.environ, {'TUNIX_DISABLE_TFLOPS_MEASUREMENT': '1'}, clear=False
+    ):
+      trainer.train(dummy_datasets(batch_size=4, repeat=4), None)
+
+    self.assertFalse(
+        trainer.metrics_logger.metric_exists(
+            '',
+            'perf/profile/actor_accumulation_progress',
+            'train',
+        )
+    )
+
+  def test_actor_progress_metrics_log_when_enabled(self):
+    config = peft_trainer.TrainingConfig(
+        eval_every_n_steps=2,
+        max_steps=1,
+        gradient_accumulation_steps=4,
+    )
+    rngs = nnx.Rngs(0)
+    model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=rngs)
+    trainer = peft_trainer.PeftTrainer(model, optax.sgd(1e-3), config)
+    trainer = trainer.with_gen_model_input_fn(dummy_gen_model_input_fn)
+
+    with mock.patch.dict(
+        os.environ,
+        {
+            'TUNIX_DISABLE_TFLOPS_MEASUREMENT': '1',
+            'TUNIX_ENABLE_ACTOR_PROGRESS_METRICS': '1',
+            'TUNIX_ACTOR_HEARTBEAT_INTERVAL': '2',
+        },
+        clear=False,
+    ):
+      trainer.train(dummy_datasets(batch_size=4, repeat=4), None)
+
+    progress_history = trainer.metrics_logger.get_metric_history(
+        '', 'perf/profile/actor_accumulation_progress', 'train'
+    )
+    index_history = trainer.metrics_logger.get_metric_history(
+        '', 'perf/profile/actor_accumulation_index', 'train'
+    )
+    elapsed_history = trainer.metrics_logger.get_metric_history(
+        '', 'perf/profile/actor_accumulation_elapsed_sec', 'train'
+    )
+    self.assertNotEmpty(progress_history)
+    self.assertNotEmpty(index_history)
+    self.assertNotEmpty(elapsed_history)
+    self.assertAlmostEqual(float(progress_history[-1]), 1.0)
+    self.assertEqual(int(index_history[-1]), 4)
+    self.assertGreaterEqual(float(elapsed_history[-1]), 0.0)
+
+  def test_checkpoint_save_wait_enabled_by_default(self):
+    class _FakeCheckpointManager:
+
+      def __init__(self):
+        self.latest = None
+        self.save_calls = 0
+        self.wait_calls = 0
+        self.error_checks = 0
+
+      def save(self, step, model, **kwargs):
+        del model, kwargs
+        self.latest = step
+        self.save_calls += 1
+        return True
+
+      def wait_until_finished(self):
+        self.wait_calls += 1
+
+      def check_for_errors(self):
+        self.error_checks += 1
+
+      def latest_step(self):
+        return self.latest
+
+      def close(self):
+        return None
+
+    config = peft_trainer.TrainingConfig(eval_every_n_steps=2, max_steps=1)
+    rngs = nnx.Rngs(0)
+    model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=rngs)
+    trainer = peft_trainer.PeftTrainer(model, optax.sgd(1e-3), config)
+    trainer = trainer.with_gen_model_input_fn(dummy_gen_model_input_fn)
+    trainer.checkpoint_manager = _FakeCheckpointManager()
+
+    with mock.patch.dict(
+        os.environ, {'TUNIX_DISABLE_TFLOPS_MEASUREMENT': '1'}, clear=False
+    ):
+      trainer.train(dummy_datasets(batch_size=4, repeat=1), None)
+
+    self.assertEqual(trainer.checkpoint_manager.save_calls, 1)
+    self.assertEqual(trainer.checkpoint_manager.wait_calls, 1)
+    self.assertEqual(trainer.checkpoint_manager.error_checks, 1)
+
+  def test_checkpoint_save_wait_can_be_disabled(self):
+    class _FakeCheckpointManager:
+
+      def __init__(self):
+        self.latest = None
+        self.save_calls = 0
+        self.wait_calls = 0
+        self.error_checks = 0
+
+      def save(self, step, model, **kwargs):
+        del model, kwargs
+        self.latest = step
+        self.save_calls += 1
+        return True
+
+      def wait_until_finished(self):
+        self.wait_calls += 1
+
+      def check_for_errors(self):
+        self.error_checks += 1
+
+      def latest_step(self):
+        return self.latest
+
+      def close(self):
+        return None
+
+    config = peft_trainer.TrainingConfig(eval_every_n_steps=2, max_steps=1)
+    rngs = nnx.Rngs(0)
+    model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=rngs)
+    trainer = peft_trainer.PeftTrainer(model, optax.sgd(1e-3), config)
+    trainer = trainer.with_gen_model_input_fn(dummy_gen_model_input_fn)
+    trainer.checkpoint_manager = _FakeCheckpointManager()
+
+    with mock.patch.dict(
+        os.environ,
+        {
+            'TUNIX_DISABLE_TFLOPS_MEASUREMENT': '1',
+            'TUNIX_DISABLE_CHECKPOINT_SAVE_WAIT': '1',
+        },
+        clear=False,
+    ):
+      trainer.train(dummy_datasets(batch_size=4, repeat=1), None)
+
+    self.assertEqual(trainer.checkpoint_manager.save_calls, 1)
+    self.assertEqual(trainer.checkpoint_manager.wait_calls, 0)
+    self.assertEqual(trainer.checkpoint_manager.error_checks, 0)
+
+  def test_close_does_not_force_save_step_zero(self):
+    class _FakeCheckpointManager:
+
+      def __init__(self):
+        self.save_calls = 0
+
+      def latest_step(self):
+        return None
+
+      def save(self, step, model, **kwargs):
+        del step, model, kwargs
+        self.save_calls += 1
+        return True
+
+      def close(self):
+        return None
+
+    config = peft_trainer.TrainingConfig(eval_every_n_steps=2, max_steps=1)
+    rngs = nnx.Rngs(0)
+    model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=rngs)
+    trainer = peft_trainer.PeftTrainer(model, optax.sgd(1e-3), config)
+    trainer.checkpoint_manager = _FakeCheckpointManager()
+    trainer.close()
+
+    self.assertEqual(trainer.checkpoint_manager.save_calls, 0)
+
+  @mock.patch.object(peft_trainer.gc, "collect", autospec=True)
+  @mock.patch.object(peft_trainer.jax, "clear_caches", autospec=True)
+  def test_clear_jitted_step_caches(
+      self, mock_clear_caches, mock_gc_collect
+  ):
+    config = peft_trainer.TrainingConfig(eval_every_n_steps=2, max_steps=1)
+    rngs = nnx.Rngs(0)
+    model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=rngs)
+    trainer = peft_trainer.PeftTrainer(model, optax.sgd(1e-3), config)
+    trainer._jitted_train_step_fn = object()
+    trainer._jitted_eval_step_fn = object()
+
+    trainer.clear_jitted_step_caches()
+
+    self.assertIsNone(trainer._jitted_train_step_fn)
+    self.assertIsNone(trainer._jitted_eval_step_fn)
+    mock_clear_caches.assert_called_once_with()
+    mock_gc_collect.assert_called_once_with()
+
+  @mock.patch.object(
+      peft_trainer.system_metrics_calculator,
+      'measure_tflops_per_step',
+      autospec=True,
+      return_value=123.0,
+  )
+  def test_actor_phase_timing_disabled_by_default(self, mock_measure_tflops):
+    config = peft_trainer.TrainingConfig(eval_every_n_steps=2, max_steps=1)
+    rngs = nnx.Rngs(0)
+    model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=rngs)
+    trainer = peft_trainer.PeftTrainer(model, optax.sgd(1e-3), config)
+    trainer = trainer.with_gen_model_input_fn(dummy_gen_model_input_fn)
+
+    with mock.patch.dict(os.environ, {}, clear=False):
+      trainer.train(dummy_datasets(batch_size=4, repeat=1), None)
+
+    mock_measure_tflops.assert_called_once()
+    self.assertFalse(
+        trainer.metrics_logger.metric_exists(
+            '', 'perf/profile/actor_train_step_compute_time', 'train'
+        )
+    )
+
+  @mock.patch.object(
+      peft_trainer.system_metrics_calculator,
+      'measure_tflops_per_step',
+      autospec=True,
+      return_value=123.0,
+  )
+  def test_actor_phase_timing_logs_when_enabled(self, mock_measure_tflops):
+    config = peft_trainer.TrainingConfig(eval_every_n_steps=2, max_steps=1)
+    rngs = nnx.Rngs(0)
+    model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=rngs)
+    trainer = peft_trainer.PeftTrainer(model, optax.sgd(1e-3), config)
+    trainer = trainer.with_gen_model_input_fn(dummy_gen_model_input_fn)
+
+    with mock.patch.dict(
+        os.environ,
+        {
+            'TUNIX_ENABLE_ACTOR_PHASE_TIMING': '1',
+            'TUNIX_DISABLE_TFLOPS_MEASUREMENT': '',
+        },
+        clear=False,
+    ):
+      trainer.train(dummy_datasets(batch_size=4, repeat=1), None)
+
+    mock_measure_tflops.assert_called_once()
+    train_step_history = trainer.metrics_logger.get_metric_history(
+        '', 'perf/profile/actor_train_step_compute_time', 'train'
+    )
+    tflops_history = trainer.metrics_logger.get_metric_history(
+        '', 'perf/profile/actor_tflops_measure_time', 'train'
+    )
+    close_write_history = trainer.metrics_logger.get_metric_history(
+        '', 'perf/profile/actor_close_write_train_metrics_time', 'train'
+    )
+    self.assertLen(train_step_history, 1)
+    self.assertLen(tflops_history, 1)
+    self.assertLen(close_write_history, 1)
+    self.assertGreater(float(train_step_history[-1]), 0.0)
+    self.assertGreater(float(tflops_history[-1]), 0.0)
+    self.assertGreaterEqual(float(close_write_history[-1]), 0.0)
+
   def test_basic_training_with_hooks(self):
     train_ds = dummy_datasets(batch_size=4, repeat=2)
     config = peft_trainer.TrainingConfig(eval_every_n_steps=2, max_steps=100)

@@ -16,6 +16,7 @@
 
 import dataclasses
 import enum
+import os
 from typing import Tuple
 
 import flax
@@ -35,6 +36,65 @@ K_MASK = -2.3819763e38
 
 LayerCache = dict[str, jaxtyping.Array]
 Cache = dict[str, LayerCache]
+
+
+def _qwen2_fused_attention_enabled() -> bool:
+  return os.environ.get('TUNIX_DISABLE_QWEN2_FUSED_ATTENTION', '0') != '1'
+
+
+def _expand_attention_mask(
+    attn_mask: jaxtyping.Array | None,
+) -> jaxtyping.Array | None:
+  if attn_mask is None:
+    return None
+  if attn_mask.ndim == 3:
+    return jnp.expand_dims(attn_mask.astype(jnp.bool_), axis=1)
+  if attn_mask.ndim == 4:
+    return attn_mask.astype(jnp.bool_)
+  raise ValueError(
+      '`attn_mask` must have rank 3 or 4. '
+      f'Got shape: {attn_mask.shape}.'
+  )
+
+
+def _manual_grouped_query_attention(
+    query_proj: jaxtyping.Array,
+    key_proj: jaxtyping.Array,
+    value_proj: jaxtyping.Array,
+    attn_mask: jaxtyping.Array | None,
+    scale: float,
+) -> jaxtyping.Array:
+  b, t, qh, d = query_proj.shape
+  _, s, kh, _ = key_proj.shape
+  query_proj = query_proj.reshape((b, t, kh, qh // kh, d))
+  attn = jnp.einsum('BTHGD,BSHD->BHGTS', query_proj, key_proj) * scale
+  attn = attn.reshape((b, qh, t, s))
+
+  if attn_mask is not None:
+    attn = jnp.where(_expand_attention_mask(attn_mask), attn, K_MASK)
+
+  attn = jax.nn.softmax(attn.astype(jnp.float32), axis=-1).astype(
+      key_proj.dtype
+  )
+  attn = attn.reshape((b, kh, qh // kh, t, s))
+  qkv = jnp.einsum('BHGTS,BSHD->BTHGD', attn, value_proj)
+  return qkv.reshape((b, t, qh, d))
+
+
+def _fused_grouped_query_attention(
+    query_proj: jaxtyping.Array,
+    key_proj: jaxtyping.Array,
+    value_proj: jaxtyping.Array,
+    attn_mask: jaxtyping.Array | None,
+    scale: float,
+) -> jaxtyping.Array:
+  return jax.nn.dot_product_attention(
+      query_proj,
+      key_proj,
+      value_proj,
+      mask=_expand_attention_mask(attn_mask),
+      scale=scale,
+  )
 
 
 class RematConfig(enum.Enum):
@@ -443,24 +503,22 @@ class Attention(nnx.Module):
           cache['k'], key_proj, slice_indices
       )
 
-    b, t, qh, d = query_proj.shape
-    _, s, kh, _ = key_proj.shape
-
-    # GQA
-    query_proj = query_proj.reshape((b, t, kh, qh // kh, d))
-    attn = jnp.einsum('BTHGD,BSHD->BHGTS', query_proj, key_proj) * self.scale
-    attn = attn.reshape((b, qh, t, s))
-
-    if attn_mask is not None:
-      attn = jnp.where((jnp.expand_dims(attn_mask, -3)), attn, K_MASK)
-
-    attn = jax.nn.softmax(attn.astype(jnp.float32), axis=-1).astype(
-        key_proj.dtype
-    )
-
-    attn = attn.reshape((b, kh, qh // kh, t, s))
-    qkv = jnp.einsum('BHGTS,BSHD->BTHGD', attn, value_proj)
-    qkv = qkv.reshape((b, t, qh, d))
+    if cache is None and _qwen2_fused_attention_enabled():
+      qkv = _fused_grouped_query_attention(
+          query_proj,
+          key_proj,
+          value_proj,
+          attn_mask,
+          self.scale,
+      )
+    else:
+      qkv = _manual_grouped_query_attention(
+          query_proj,
+          key_proj,
+          value_proj,
+          attn_mask,
+          self.scale,
+      )
 
     outputs = self.o_proj(qkv)
     outputs = shard(outputs, self.shd_config.act_btd)

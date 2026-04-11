@@ -14,6 +14,7 @@
 
 """Checkpoint manager for PEFT."""
 
+import dataclasses
 import os
 import time
 from typing import Any, Tuple
@@ -29,6 +30,36 @@ _DEFAULT_CHECKPOINTING_OPTIONS = ocp.CheckpointManagerOptions(
     ),
     max_to_keep=3,
 )
+
+
+def _with_strict_step_interval_policy(
+    options: ocp.CheckpointManagerOptions,
+) -> ocp.CheckpointManagerOptions:
+  """Installs a step-based should_save policy when Orbax would eagerly save step 1.
+
+  Orbax's default `should_save` behavior saves the first checkpoint even when the
+  configured `save_interval_steps` has not been reached yet. For RL short runs,
+  that means `max_steps=2` still triggers a full save at step 1, which can
+  overlap with the next actor step. When callers explicitly pass
+  `save_interval_steps` without their own save policy, honor that interval
+  strictly and keep `force=True` saves available for final checkpointing.
+  """
+  if options.should_save_fn is not None or options.save_decision_policy is not None:
+    return options
+
+  save_interval_steps = options.save_interval_steps
+  save_on_steps = frozenset(options.save_on_steps or ())
+
+  def _strict_should_save(step: int, last_saved_step: int | None) -> bool:
+    if last_saved_step is not None and step <= last_saved_step:
+      return False
+    if step in save_on_steps:
+      return True
+    if save_interval_steps <= 0:
+      return False
+    return step % save_interval_steps == 0
+
+  return dataclasses.replace(options, should_save_fn=_strict_should_save)
 
 
 class CheckpointManager:
@@ -47,6 +78,11 @@ class CheckpointManager:
       options: The options for the checkpoint manager.
     """
     self._checkpoint_manager: ocp.CheckpointManager | None = None
+    resolved_options = (
+        _DEFAULT_CHECKPOINTING_OPTIONS
+        if options is None
+        else _with_strict_step_interval_policy(options)
+    )
     if root_directory is not None:
       # When using Pathways, the checkpoint manager only supports persistence
       # APIs now.
@@ -66,7 +102,7 @@ class CheckpointManager:
       self._checkpoint_manager = ocp.CheckpointManager(
           root_directory,
           item_handlers=item_handlers,
-          options=options or _DEFAULT_CHECKPOINTING_OPTIONS,
+          options=resolved_options,
       )
 
   def latest_step(self) -> int | None:
@@ -180,3 +216,21 @@ class CheckpointManager:
     if self._checkpoint_manager is None:
       return
     self._checkpoint_manager.close()
+
+  def wait_until_finished(self):
+    """Waits for any in-flight asynchronous save to finish."""
+    if self._checkpoint_manager is None:
+      return
+    self._checkpoint_manager.wait_until_finished()
+
+  def is_saving_in_progress(self) -> bool:
+    """Returns whether an asynchronous save is still in progress."""
+    if self._checkpoint_manager is None:
+      return False
+    return self._checkpoint_manager.is_saving_in_progress()
+
+  def check_for_errors(self):
+    """Raises if a background checkpoint save failed."""
+    if self._checkpoint_manager is None:
+      return
+    self._checkpoint_manager.check_for_errors()

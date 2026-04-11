@@ -187,6 +187,54 @@ class ClusterConfig:
   )
 
 
+def _get_positive_integer_env_var(env_name: str) -> int | None:
+  """Returns a positive integer from env or None when unset."""
+  raw_value = os.environ.get(env_name, "").strip()
+  if not raw_value:
+    return None
+  try:
+    value = int(raw_value)
+  except ValueError as exc:
+    raise ValueError(
+        f"{env_name} must be a positive integer. Received: {raw_value!r}"
+    ) from exc
+  if value <= 0:
+    raise ValueError(
+        f"{env_name} must be a positive integer. Received: {value}"
+    )
+  return value
+
+
+def _resolve_actor_grad_acc_factor() -> tuple[int, int]:
+  """Returns the effective actor grad-acc factor and prompt-group coalesce."""
+  actor_grad_acc_factor = _get_positive_integer_env_var(
+      "TUNIX_ACTOR_GRAD_ACC_FACTOR"
+  )
+  actor_prompt_group_coalesce = _get_positive_integer_env_var(
+      "TUNIX_ACTOR_PROMPT_GROUP_COALESCE"
+  )
+  if actor_grad_acc_factor is None:
+    return 1, actor_prompt_group_coalesce or 1
+  if actor_prompt_group_coalesce and actor_prompt_group_coalesce > 1:
+    rl_utils.check_divisibility(
+        actor_prompt_group_coalesce,
+        actor_grad_acc_factor,
+        "TUNIX_ACTOR_PROMPT_GROUP_COALESCE",
+        "TUNIX_ACTOR_GRAD_ACC_FACTOR",
+    )
+    adjusted_actor_grad_acc_factor = (
+        actor_grad_acc_factor // actor_prompt_group_coalesce
+    )
+    if adjusted_actor_grad_acc_factor < 1:
+      raise ValueError(
+          "TUNIX_ACTOR_GRAD_ACC_FACTOR must remain >= 1 after coalescing. "
+          f"Received factor={actor_grad_acc_factor}, "
+          f"coalesce={actor_prompt_group_coalesce}"
+      )
+    return adjusted_actor_grad_acc_factor, actor_prompt_group_coalesce
+  return actor_grad_acc_factor, actor_prompt_group_coalesce or 1
+
+
 class RLCluster:
   """RLCluster."""
 
@@ -511,35 +559,29 @@ class RLCluster:
     actor_config = copy.deepcopy(self.cluster_config.training_config)
     actor_config.metrics_prefix = "actor"
     actor_config.pbar_description = "Actor Training"
-    actor_grad_acc_factor_env = os.environ.get(
-        "TUNIX_ACTOR_GRAD_ACC_FACTOR", ""
-    ).strip()
-    if actor_grad_acc_factor_env:
-      try:
-        actor_grad_acc_factor = int(actor_grad_acc_factor_env)
-      except ValueError as exc:
-        raise ValueError(
-            "TUNIX_ACTOR_GRAD_ACC_FACTOR must be a positive integer. "
-            f"Received: {actor_grad_acc_factor_env!r}"
-        ) from exc
-      if actor_grad_acc_factor <= 0:
-        raise ValueError(
-            "TUNIX_ACTOR_GRAD_ACC_FACTOR must be a positive integer. "
-            f"Received: {actor_grad_acc_factor}"
-        )
-      if actor_grad_acc_factor > 1:
-        base_grad_acc_steps = actor_config.get_with_default(
-            "gradient_accumulation_steps", 1
-        )
-        actor_config.gradient_accumulation_steps = (
-            base_grad_acc_steps * actor_grad_acc_factor
-        )
-        logging.info(
-            "Actor chunking enabled: scaling actor gradient_accumulation_steps "
-            "from %d to %d.",
-            base_grad_acc_steps,
-            actor_config.gradient_accumulation_steps,
-        )
+    actor_grad_acc_factor, actor_prompt_group_coalesce = (
+        _resolve_actor_grad_acc_factor()
+    )
+    if actor_grad_acc_factor > 1:
+      base_grad_acc_steps = actor_config.get_with_default(
+          "gradient_accumulation_steps", 1
+      )
+      actor_config.gradient_accumulation_steps = (
+          base_grad_acc_steps * actor_grad_acc_factor
+      )
+      logging.info(
+          "Actor chunking enabled: scaling actor gradient_accumulation_steps "
+          "from %d to %d (coalesce=%d).",
+          base_grad_acc_steps,
+          actor_config.gradient_accumulation_steps,
+          actor_prompt_group_coalesce,
+      )
+    elif actor_prompt_group_coalesce > 1:
+      logging.info(
+          "Actor prompt-group coalescing enabled without extra gradient "
+          "accumulation scaling (coalesce=%d).",
+          actor_prompt_group_coalesce,
+      )
     if actor_config.checkpoint_root_directory is not None:
       actor_config.checkpoint_root_directory = os.path.join(
           actor_config.checkpoint_root_directory, "actor"
@@ -679,6 +721,10 @@ class RLCluster:
     self.actor_trainer.close()
     if getattr(self, "critic_trainer", None):
       self.critic_trainer.close()
+    rollout = getattr(self, "_rollout", None)
+    rollout_close = getattr(rollout, "close", None)
+    if callable(rollout_close):
+      rollout_close()
 
   def _log_metrics(self, metrics_buffer: MetricsBuffer) -> None:
     """Log metrics."""
@@ -698,6 +744,22 @@ class RLCluster:
       )
     if self._external_metrics_logger is not None:
       self._external_metrics_logger(metrics_buffer)
+
+  def log_scalar_immediately(
+      self,
+      metric_name: str,
+      value: float,
+      mode: Mode = Mode.TRAIN,
+      step: int | None = None,
+  ) -> None:
+    """Logs a scalar immediately without waiting for buffered RL metrics."""
+    self._rl_metrics_logger.log(
+        "global",
+        metric_name,
+        np.asarray(value),
+        str(mode),
+        self.global_steps if step is None else step,
+    )
 
   def with_external_metrics_logger(
       self, external_metrics_logger: Callable[[MetricsBuffer], None]
@@ -770,22 +832,26 @@ class RLCluster:
     else:
       buffered_metrics = self._buffered_eval_metrics
 
-    if not buffered_metrics:
-      buffered_metrics.append(MetricsBuffer(self.global_steps, mode=str(mode)))
-    else:
-      if step != buffered_metrics[-1].global_steps:
-        buffered_metrics.append(MetricsBuffer(step, mode=str(mode)))
+    normalized_step = max(int(step), int(self.global_steps))
 
     # Global steps are incremented, log the previous metrics.
-    if self._buffered_train_metrics[0].global_steps < self.global_steps:
-      for m in [self._buffered_train_metrics.pop(0)]:
-        self._log_metrics(m)
+    while (
+        self._buffered_train_metrics
+        and self._buffered_train_metrics[0].global_steps < self.global_steps
+    ):
+      self._log_metrics(self._buffered_train_metrics.pop(0))
     if (
         self._buffered_eval_metrics
         and self._buffered_eval_metrics[0].global_steps < self.global_steps
     ):
-      for m in [self._buffered_eval_metrics.pop(0)]:
-        self._log_metrics(m)
+      while (
+          self._buffered_eval_metrics
+          and self._buffered_eval_metrics[0].global_steps < self.global_steps
+      ):
+        self._log_metrics(self._buffered_eval_metrics.pop(0))
+
+    if not buffered_metrics or normalized_step != buffered_metrics[-1].global_steps:
+      buffered_metrics.append(MetricsBuffer(normalized_step, mode=str(mode)))
 
     cur_metrics = buffered_metrics[-1]
     for metric_name, (value, op) in metrics.items():
@@ -821,6 +887,7 @@ class RLCluster:
       apply_chat_template: bool = False,
       mode: Mode = Mode.TRAIN,
       micro_batch_size: int | None = None,
+      multi_sampling: int = 1,
   ) -> base_rollout.RolloutOutput:
     """Generates text from the given prompts.
 
@@ -833,6 +900,8 @@ class RLCluster:
       mode: The mode of rollout, either TRAIN or EVAL.
       micro_batch_size: The micro-batch size for generation. If None, no
         micro-batching is performed.
+      multi_sampling: Number of samples to generate per prompt. Rollout workers
+        may flatten the outputs as prompt-major, generation-minor.
 
     Returns:
       A `RolloutOutput` object containing the generated text and other info.
@@ -871,7 +940,11 @@ class RLCluster:
 
       with self._perf.span("rollout", mesh.devices) as span:
         outputs = [
-            self.rollout.generate(string_prompts[s], rollout_config)
+            self.rollout.generate(
+                string_prompts[s],
+                rollout_config,
+                multi_sampling=multi_sampling,
+            )
             for s in rl_utils.chunk_slices_by_size(
                 stop=len(string_prompts), step=micro_batch_size
             )

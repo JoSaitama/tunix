@@ -20,6 +20,7 @@ from jax import sharding
 import jax.numpy as jnp
 import numpy as np
 from tunix.generate import utils
+from tunix.models.qwen2 import mapping_sglang_jax as qwen2_mapping_sglang_jax
 from tunix.rl import reshard
 
 
@@ -610,6 +611,74 @@ class UtilsTest(parameterized.TestCase):
     self.assertTrue(
         jnp.allclose(result.params[dst_key][1::2, ...], src_k_proj, atol=1e-1)
     )
+
+  def test_transfer_state_with_qwen2_bias_hook_repeats_for_tp_target(self):
+    src_key = 'layers.0.attn.k_bias'
+    dst_key = 'model.layers.0.self_attn.k_proj.bias'
+    src = MockState({
+        src_key: MockParam(jnp.arange(256, dtype=jnp.float32)),
+    })
+    dst = MockState({
+        dst_key: MockParam(jnp.zeros((512,), dtype=jnp.float32)),
+    })
+
+    result = utils.transfer_state_with_mappings(
+        src,
+        dst,
+        key_mappings=qwen2_mapping_sglang_jax.SGLANG_JAX_MAPPING[
+            'to_hf_mappings'
+        ],
+        key_mapping_hook_fns=qwen2_mapping_sglang_jax.SGLANG_JAX_MAPPING[
+            'to_hf_hook_fns'
+        ],
+    )
+
+    expected = jnp.repeat(jnp.arange(256, dtype=jnp.float32), 2)
+    np.testing.assert_array_equal(result.params[dst_key], expected)
+
+  def test_transfer_state_with_qwen2_k_proj_weight_tp_repeat_and_flatten(self):
+    src_key = 'layers.0.attn.k_proj.w'
+    dst_key = 'model.layers.0.self_attn.k_proj.weight'
+    src_val = jnp.arange(1536 * 2 * 128, dtype=jnp.float32).reshape(
+        1536, 2, 128
+    )
+    src = MockState({src_key: MockParam(src_val)})
+    dst = MockState({
+        dst_key: MockParam(jnp.zeros((1536, 512), dtype=jnp.float32)),
+    })
+
+    result = utils.transfer_state_with_mappings(
+        src,
+        dst,
+        key_mappings=qwen2_mapping_sglang_jax.SGLANG_JAX_MAPPING[
+            'to_hf_mappings'
+        ],
+    )
+
+    expected = jnp.repeat(src_val, 2, axis=1).reshape(1536, 512)
+    np.testing.assert_array_equal(result.params[dst_key], expected)
+
+  def test_transfer_state_with_qwen2_o_proj_weight_flattens_without_repeat(self):
+    src_key = 'layers.0.attn.o_proj.w'
+    dst_key = 'model.layers.0.self_attn.o_proj.weight'
+    src_val = jnp.arange(12 * 128 * 1536, dtype=jnp.float32).reshape(
+        12, 128, 1536
+    )
+    src = MockState({src_key: MockParam(src_val)})
+    dst = MockState({
+        dst_key: MockParam(jnp.zeros((1536, 1536), dtype=jnp.float32)),
+    })
+
+    result = utils.transfer_state_with_mappings(
+        src,
+        dst,
+        key_mappings=qwen2_mapping_sglang_jax.SGLANG_JAX_MAPPING[
+            'to_hf_mappings'
+        ],
+    )
+
+    expected = src_val.reshape(1536, 1536)
+    np.testing.assert_array_equal(result.params[dst_key], expected)
 
   def test_non_attention_weight_padding_fails(self):
     """Test that padding non-attention weights raises an error."""

@@ -17,6 +17,8 @@
 from collections.abc import Iterable, Mapping
 import contextlib
 import dataclasses
+import gc
+import os
 import time
 from typing import Any, Callable, Concatenate, Dict, List, Optional, ParamSpec, Tuple
 
@@ -46,6 +48,72 @@ _ModelInputT = Dict[str, ArrayLike]
 P = ParamSpec("P")
 MetricsLogger = sft_metrics_logger.MetricsLogger
 MetricsLoggerOptions = sft_metrics_logger.MetricsLoggerOptions
+
+
+def _tflops_measurement_enabled() -> bool:
+  return os.environ.get("TUNIX_DISABLE_TFLOPS_MEASUREMENT", "").lower() not in (
+      "1",
+      "true",
+      "yes",
+      "on",
+  )
+
+
+def _actor_phase_timing_enabled() -> bool:
+  return os.environ.get("TUNIX_ENABLE_ACTOR_PHASE_TIMING", "").lower() in (
+      "1",
+      "true",
+      "yes",
+      "on",
+  )
+
+
+def _checkpoint_save_wait_enabled() -> bool:
+  return os.environ.get("TUNIX_DISABLE_CHECKPOINT_SAVE_WAIT", "").lower() not in (
+      "1",
+      "true",
+      "yes",
+      "on",
+  )
+
+
+def _actor_heartbeat_enabled() -> bool:
+  return os.environ.get("TUNIX_ENABLE_ACTOR_HEARTBEAT", "").lower() in (
+      "1",
+      "true",
+      "yes",
+      "on",
+  )
+
+
+def _actor_heartbeat_interval() -> int:
+  raw_value = os.environ.get("TUNIX_ACTOR_HEARTBEAT_INTERVAL", "").strip()
+  if not raw_value:
+    return 16
+  try:
+    interval = int(raw_value)
+  except ValueError:
+    logging.warning(
+        "Invalid TUNIX_ACTOR_HEARTBEAT_INTERVAL=%r; falling back to 16.",
+        raw_value,
+    )
+    return 16
+  if interval <= 0:
+    logging.warning(
+      "Non-positive TUNIX_ACTOR_HEARTBEAT_INTERVAL=%d; falling back to 16.",
+      interval,
+    )
+    return 16
+  return interval
+
+
+def _actor_progress_metrics_enabled() -> bool:
+  return os.environ.get("TUNIX_ENABLE_ACTOR_PROGRESS_METRICS", "").lower() in (
+      "1",
+      "true",
+      "yes",
+      "on",
+  )
 
 
 def _truncate_partition_spec_to_ndim(
@@ -466,6 +534,13 @@ class PeftTrainer:
         self._jitted_eval_step_fn = nnx.jit(eval_step)
       return self._jitted_train_step_fn, self._jitted_eval_step_fn
 
+  def clear_jitted_step_caches(self) -> None:
+    """Drops cached jitted step functions between RL full steps."""
+    self._jitted_train_step_fn = None
+    self._jitted_eval_step_fn = None
+    jax.clear_caches()
+    gc.collect()
+
   def _prepare_inputs(self, input_data: Any) -> Any:
     """Override this function for additional input preparation."""
     return input_data
@@ -597,6 +672,80 @@ class PeftTrainer:
         },
     )
 
+  def _log_actor_phase_timing(self, metric_name: str, duration: float, step: int):
+    if not _actor_phase_timing_enabled():
+      return
+    self.metrics_logger.log(
+        self.metrics_prefix,
+        f"perf/profile/{metric_name}",
+        duration,
+        self._mode,
+        step,
+    )
+
+  def _maybe_log_actor_heartbeat(
+      self,
+      *,
+      status: str,
+      iter_step: int,
+      grad_acc_steps: int,
+      actor_loop_start_time: float,
+  ) -> None:
+    if not _actor_heartbeat_enabled():
+      return
+    accumulation_index = ((iter_step - 1) % grad_acc_steps) + 1
+    interval = _actor_heartbeat_interval()
+    should_log = accumulation_index in (1, grad_acc_steps)
+    should_log = should_log or accumulation_index % interval == 0
+    if not should_log:
+      return
+    print(
+        "Actor heartbeat"
+        f" [{status}]: train_steps={self._train_steps}"
+        f" iter_steps={iter_step}"
+        f" accumulation={accumulation_index}/{grad_acc_steps}"
+        f" elapsed={time.perf_counter() - actor_loop_start_time:.2f}s",
+        flush=True,
+    )
+
+  def _maybe_log_actor_progress_metrics(
+      self,
+      *,
+      iter_step: int,
+      grad_acc_steps: int,
+      actor_loop_start_time: float,
+  ) -> None:
+    """Logs low-overhead actor accumulation progress before a train step ends."""
+    if not _actor_progress_metrics_enabled():
+      return
+    accumulation_index = ((iter_step - 1) % grad_acc_steps) + 1
+    interval = _actor_heartbeat_interval()
+    should_log = accumulation_index in (1, grad_acc_steps)
+    should_log = should_log or accumulation_index % interval == 0
+    if not should_log:
+      return
+    self.metrics_logger.log(
+        self.metrics_prefix,
+        "perf/profile/actor_accumulation_index",
+        accumulation_index,
+        self._mode,
+        self._train_steps,
+    )
+    self.metrics_logger.log(
+        self.metrics_prefix,
+        "perf/profile/actor_accumulation_progress",
+        accumulation_index / grad_acc_steps,
+        self._mode,
+        self._train_steps,
+    )
+    self.metrics_logger.log(
+        self.metrics_prefix,
+        "perf/profile/actor_accumulation_elapsed_sec",
+        time.perf_counter() - actor_loop_start_time,
+        self._mode,
+        self._train_steps,
+    )
+
   @contextlib.contextmanager
   def _switch_mode(self, mode: sft_metrics_logger.Mode):
     original_mode = self._mode
@@ -674,6 +823,10 @@ class PeftTrainer:
     train_iterator = iter(train_ds)
     index = 0
     last_step_completion_time = time.perf_counter()
+    actor_loop_start_time = time.perf_counter()
+    actor_grad_acc_steps = self.config.get_with_default(
+        "gradient_accumulation_steps", 1
+    )
     with utils.time_measure("Train loop"):
       while True:
         self._prof.maybe_activate(self._iter_steps)
@@ -707,38 +860,70 @@ class PeftTrainer:
           ):
             break
 
+          prepare_inputs_start = time.perf_counter()
           train_example = self._prepare_inputs(train_example)
           train_example = sharding_utils.shard_input(
               train_example, self.config.data_sharding_axis
+          )
+          self._log_actor_phase_timing(
+              "actor_prepare_inputs_time",
+              time.perf_counter() - prepare_inputs_start,
+              self._train_steps,
           )
 
           if not self._flops_measured and not skip_jit:
             self._flops_measured = True
 
-            tflops_per_step = system_metrics_calculator.measure_tflops_per_step(
-                train_step_fn=train_step,
-                model=self.model,
-                optimizer=self.optimizer,
-                train_example=train_example,
-            )
-            if tflops_per_step is not None:
-              self.metrics_logger.log(
-                  self.metrics_prefix,
-                  "tflops_per_step",
-                  tflops_per_step,
-                  self._mode,
-                  0,
+            if _tflops_measurement_enabled():
+              tflops_measure_start = time.perf_counter()
+              tflops_per_step = (
+                  system_metrics_calculator.measure_tflops_per_step(
+                      train_step_fn=train_step,
+                      model=self.model,
+                      optimizer=self.optimizer,
+                      train_example=train_example,
+                  )
               )
+              self._log_actor_phase_timing(
+                  "actor_tflops_measure_time",
+                  time.perf_counter() - tflops_measure_start,
+                  self._train_steps,
+              )
+              if tflops_per_step is not None:
+                self.metrics_logger.log(
+                    self.metrics_prefix,
+                    "tflops_per_step",
+                    tflops_per_step,
+                    self._mode,
+                    0,
+                )
 
           self._throttler.wait_for_next()
           if self.training_hooks:
             self.training_hooks.on_train_step_start(self)
 
+          self._maybe_log_actor_heartbeat(
+              status="start",
+              iter_step=self._iter_steps + 1,
+              grad_acc_steps=actor_grad_acc_steps,
+              actor_loop_start_time=actor_loop_start_time,
+          )
+          self._maybe_log_actor_progress_metrics(
+              iter_step=self._iter_steps + 1,
+              grad_acc_steps=actor_grad_acc_steps,
+              actor_loop_start_time=actor_loop_start_time,
+          )
+          train_step_compute_start = time.perf_counter()
           with self._perf_tracer.span(
               "peft_train_step", pxla.thread_resources.env.physical_mesh.devices
           ) as span:
             train_loss, aux = partial_train_step(train_example)
             span.device_end([train_loss])
+          self._log_actor_phase_timing(
+              "actor_train_step_compute_time",
+              time.perf_counter() - train_step_compute_start,
+              self._train_steps,
+          )
 
           current_time = time.perf_counter()
           step_time_delta = current_time - last_step_completion_time
@@ -754,22 +939,54 @@ class PeftTrainer:
           # NB: put this after self._buffer_metrics is important
           self._post_process_train_step(aux)
           self._iter_steps += 1
+          self._maybe_log_actor_heartbeat(
+              status="done",
+              iter_step=self._iter_steps,
+              grad_acc_steps=actor_grad_acc_steps,
+              actor_loop_start_time=actor_loop_start_time,
+          )
+          self._maybe_log_actor_progress_metrics(
+              iter_step=self._iter_steps,
+              grad_acc_steps=actor_grad_acc_steps,
+              actor_loop_start_time=actor_loop_start_time,
+          )
 
           if (
               self._iter_steps
-              % self.config.get_with_default("gradient_accumulation_steps", 1)
+              % actor_grad_acc_steps
               == 0
           ):
             self._train_steps += 1
+            write_train_metrics_start = time.perf_counter()
             self._write_train_metrics()
+            self._log_actor_phase_timing(
+                "actor_write_train_metrics_time",
+                time.perf_counter() - write_train_metrics_start,
+                self._train_steps,
+            )
 
             # Checkpoint frequency is configured by checkpointing_options.
-            self.checkpoint_manager.save(
+            checkpoint_save_start = time.perf_counter()
+            checkpoint_saved = self.checkpoint_manager.save(
                 self._train_steps,
                 self.model,
                 save_only_lora_params=self._lora_enabled,
                 custom_metadata=self.custom_checkpoint_metadata(),
             )
+            self._log_actor_phase_timing(
+                "actor_checkpoint_save_time",
+                time.perf_counter() - checkpoint_save_start,
+                self._train_steps,
+            )
+            if checkpoint_saved and _checkpoint_save_wait_enabled():
+              checkpoint_wait_start = time.perf_counter()
+              self.checkpoint_manager.wait_until_finished()
+              self.checkpoint_manager.check_for_errors()
+              self._log_actor_phase_timing(
+                  "actor_checkpoint_wait_time",
+                  time.perf_counter() - checkpoint_wait_start,
+                  self._train_steps,
+              )
 
             if (
                 eval_ds
@@ -786,6 +1003,8 @@ class PeftTrainer:
       self.close()
 
   def _save_last_checkpoint(self):
+    if self._train_steps <= 0:
+      return
     last_saved_step = self.checkpoint_manager.latest_step()
     if last_saved_step is None or last_saved_step < self._train_steps:
       self.checkpoint_manager.save(
@@ -815,8 +1034,20 @@ class PeftTrainer:
     This includes writing any buffered metrics, saving the last checkpoint,
     and closing the checkpoint manager and metrics logger.
     """
+    close_write_train_metrics_start = time.perf_counter()
     self._write_train_metrics()
+    self._log_actor_phase_timing(
+        "actor_close_write_train_metrics_time",
+        time.perf_counter() - close_write_train_metrics_start,
+        self._train_steps,
+    )
+    close_save_last_checkpoint_start = time.perf_counter()
     self._save_last_checkpoint()
+    self._log_actor_phase_timing(
+        "actor_close_save_last_checkpoint_time",
+        time.perf_counter() - close_save_last_checkpoint_start,
+        self._train_steps,
+    )
     self.checkpoint_manager.close()
     self.metrics_logger.close()
     if self._pbar is not None:

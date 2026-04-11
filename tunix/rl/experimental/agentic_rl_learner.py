@@ -22,6 +22,9 @@ from concurrent import futures
 import contextlib
 import dataclasses
 import itertools
+import os
+import threading
+import time
 from typing import Any, Callable, Coroutine, Dict, Generic, Iterable, Iterator, List, Sequence, TypeVar
 
 from absl import logging
@@ -41,16 +44,77 @@ from tunix.rl.agentic.pipeline import rollout_orchestrator
 from tunix.rl.agentic.rewards import reward
 from tunix.rl.agentic.trajectory import trajectory_collect_engine
 from tunix.rl.queue import data_queue as queue_lib
+from tunix.rl.rollout import base_rollout
 from tunix.sft import utils as sft_utils
 
 TrainingInputT = Dict[str, List[str] | ArrayLike]
 RewardFn = Callable[..., List[float]]
 MetricFn = Callable[..., rl_cluster_lib.MetricsT]
 _DEFAULT_FAST_PATH_ROLLOUT_PROMPT_BATCH_SIZE = 4
+_LOG_TRAJECTORY_DETAILS = os.environ.get(
+    "TUNIX_LOG_TRAJECTORY_DETAILS", ""
+).lower() in ("1", "true", "yes", "on")
+
+
+def _phase_timing_enabled() -> bool:
+  return os.environ.get("TUNIX_ENABLE_PHASE_TIMING", "").lower() in (
+      "1",
+      "true",
+      "yes",
+      "on",
+  )
+
+
+def _sglang_jax_safe_actor_chunking_enabled() -> bool:
+  if os.environ.get(
+      "TUNIX_DISABLE_SGLANG_JAX_SAFE_ACTOR_CHUNKING", ""
+  ).lower() in ("1", "true", "yes", "on"):
+    return False
+  return os.environ.get(
+      "TUNIX_ENABLE_SGLANG_JAX_SAFE_ACTOR_CHUNKING", ""
+  ).lower() in ("1", "true", "yes", "on")
+
+
+def _sglang_jax_rollout_release_enabled() -> bool:
+  return os.environ.get(
+      "TUNIX_ENABLE_SGLANG_JAX_ROLLOUT_RELEASE", ""
+  ).lower() in ("1", "true", "yes", "on")
+
+
+def _deepscaler_adaptive_actor_chunking_enabled() -> bool:
+  return os.environ.get(
+      "TUNIX_ENABLE_DEEPSCALER_ADAPTIVE_ACTOR_CHUNKING", ""
+  ).lower() in ("1", "true", "yes", "on")
+
+
+def _dynamic_actor_grad_acc_steps_enabled() -> bool:
+  return os.environ.get(
+      "TUNIX_ENABLE_DYNAMIC_ACTOR_GRAD_ACC_STEPS", ""
+  ).lower() in ("1", "true", "yes", "on")
+
+
+def _actor_prompt_group_coalesce_factor() -> int:
+  raw_value = os.environ.get("TUNIX_ACTOR_PROMPT_GROUP_COALESCE", "").strip()
+  if not raw_value:
+    return 1
+  try:
+    value = int(raw_value)
+  except ValueError as exc:
+    raise ValueError(
+        "TUNIX_ACTOR_PROMPT_GROUP_COALESCE must be a positive integer. "
+        f"Received: {raw_value!r}"
+    ) from exc
+  if value <= 0:
+    raise ValueError(
+        "TUNIX_ACTOR_PROMPT_GROUP_COALESCE must be a positive integer. "
+        f"Received: {value}"
+    )
+  return value
 
 
 @flax.struct.dataclass(frozen=True)
 class TrainExample(common.TrainExample):
+  completion_bucket_len: jax.Array | None = None
   policy_version: jax.Array | None = None
 
 
@@ -181,27 +245,77 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       )
     return configured
 
-  def _resolve_actor_generation_chunk_size(self) -> int:
+  @staticmethod
+  def _resolve_adaptive_actor_generation_chunk_size(
+      *,
+      base_chunk_size: int,
+      num_generations: int,
+      completion_bucket_len: int,
+  ) -> int:
+    """Returns a larger actor chunk size for shorter completion buckets."""
+    if completion_bucket_len <= 0:
+      return base_chunk_size
+    if completion_bucket_len <= 1024:
+      max_chunk_size = min(num_generations, base_chunk_size * 4)
+    elif completion_bucket_len <= 4096:
+      max_chunk_size = min(num_generations, base_chunk_size * 2)
+    else:
+      max_chunk_size = base_chunk_size
+    for candidate in range(max_chunk_size, base_chunk_size - 1, -1):
+      if (
+          candidate % base_chunk_size == 0
+          and num_generations % candidate == 0
+      ):
+        return candidate
+    return base_chunk_size
+
+  def _resolve_actor_generation_chunk_size(
+      self, completion_bucket_len: int | None = None
+  ) -> int:
     """Returns actor-side generation chunk size for training updates."""
     configured = self.algo_config.actor_generation_chunk_size
     if configured is None:
-      return self._num_generations()
-    if configured <= 0:
-      raise ValueError(
-          "`actor_generation_chunk_size` must be a positive integer when set."
+      resolved = self._num_generations()
+    else:
+      if configured <= 0:
+        raise ValueError(
+            "`actor_generation_chunk_size` must be a positive integer when set."
+        )
+      if configured > self._num_generations():
+        raise ValueError(
+            "`actor_generation_chunk_size` must be <= num_generations. Received:"
+            f" {configured} > {self._num_generations()}"
+        )
+      if self._num_generations() % configured != 0:
+        raise ValueError(
+            "`actor_generation_chunk_size` must divide num_generations exactly."
+            f" Received: actor_generation_chunk_size={configured},"
+            f" num_generations={self._num_generations()}"
+        )
+      resolved = configured
+    rollout = getattr(getattr(self, "rl_cluster", None), "rollout", None)
+    if (
+        resolved > 1
+        and rollout is not None
+        and rollout.__class__.__name__ == "SglangJaxRollout"
+        and _sglang_jax_safe_actor_chunking_enabled()
+    ):
+      # Keep the external experiment batch the same, but split actor updates
+      # down to one generation at a time to reduce JIT executable size on TPU.
+      return 1
+    if (
+        completion_bucket_len is not None
+        and resolved > 1
+        and rollout is not None
+        and rollout.__class__.__name__ == "SglangJaxRollout"
+        and _deepscaler_adaptive_actor_chunking_enabled()
+    ):
+      return self._resolve_adaptive_actor_generation_chunk_size(
+          base_chunk_size=resolved,
+          num_generations=self._num_generations(),
+          completion_bucket_len=completion_bucket_len,
       )
-    if configured > self._num_generations():
-      raise ValueError(
-          "`actor_generation_chunk_size` must be <= num_generations. Received:"
-          f" {configured} > {self._num_generations()}"
-      )
-    if self._num_generations() % configured != 0:
-      raise ValueError(
-          "`actor_generation_chunk_size` must divide num_generations exactly."
-          f" Received: actor_generation_chunk_size={configured},"
-          f" num_generations={self._num_generations()}"
-      )
-    return configured
+    return resolved
 
   def _num_actor_chunks_per_prompt_group(self) -> int:
     """Returns how many actor chunks each prompt group is split into."""
@@ -215,16 +329,92 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     if len(train_examples) == 1:
       return train_examples[0]
     return jax.tree.map(
-        lambda *xs: jnp.concatenate(xs, axis=0), *train_examples
+        AgenticRLLearner._merge_train_example_leaf, *train_examples
     )
+
+  @staticmethod
+  def _merge_train_example_leaf(*xs):
+    """Concatenates a TrainExample leaf while preserving optional fields."""
+    if all(x is None for x in xs):
+      return None
+    if any(x is None for x in xs):
+      raise ValueError(
+          "TrainExample leaves must either all be arrays or all be None when "
+          "merging actor batches."
+      )
+    return jnp.concatenate(xs, axis=0)
+
+  def _split_train_examples_into_prompt_groups(
+      self, train_examples: list[TrainExample]
+  ) -> list[list[TrainExample]]:
+    """Splits a flat per-sequence list into prompt groups of size G."""
+    num_generations = self._num_generations()
+    if len(train_examples) % num_generations != 0:
+      raise ValueError(
+          "Expected per-sequence train examples to be divisible by "
+          f"num_generations={num_generations}. Received batch size="
+          f"{len(train_examples)}."
+      )
+    return [
+        train_examples[i : i + num_generations]
+        for i in range(0, len(train_examples), num_generations)
+    ]
+
+  @staticmethod
+  def _completion_bucket_len_for_prompt_group(
+      prompt_group: list[TrainExample],
+  ) -> int:
+    """Returns the bucketed completion length shared by a prompt group."""
+    if not prompt_group:
+      raise ValueError("Cannot resolve completion bucket for an empty group.")
+    bucket_lens = []
+    for train_example in prompt_group:
+      if train_example.completion_bucket_len is None:
+        bucket_lens.append(int(train_example.completion_ids.shape[-1]))
+        continue
+      bucket_array = np.asarray(train_example.completion_bucket_len).reshape(-1)
+      if bucket_array.size != 1:
+        raise ValueError(
+            "Each per-sequence TrainExample must carry exactly one "
+            f"`completion_bucket_len`. Received shape="
+            f"{np.asarray(train_example.completion_bucket_len).shape}."
+        )
+      bucket_lens.append(int(bucket_array[0]))
+    if len(set(bucket_lens)) != 1:
+      raise ValueError(
+          "All examples from the same prompt group must share the same "
+          f"completion bucket. Received: {bucket_lens}"
+      )
+    return bucket_lens[0]
+
+  def _group_prompt_groups_by_completion_bucket(
+      self,
+      prompt_groups: list[list[TrainExample]],
+  ) -> list[tuple[int, list[list[TrainExample]]]]:
+    """Groups prompt groups by completion bucket without crossing group order."""
+    grouped_prompt_groups: dict[int, list[list[TrainExample]]] = {}
+    bucket_order: list[int] = []
+    for prompt_group in prompt_groups:
+      bucket_len = self._completion_bucket_len_for_prompt_group(prompt_group)
+      if bucket_len not in grouped_prompt_groups:
+        grouped_prompt_groups[bucket_len] = []
+        bucket_order.append(bucket_len)
+      grouped_prompt_groups[bucket_len].append(prompt_group)
+    return [
+        (bucket_len, grouped_prompt_groups[bucket_len])
+        for bucket_len in bucket_order
+    ]
 
   def _chunk_and_merge_train_micro_batch(
       self,
       train_micro_batch: list[TrainExample],
       prompts_per_train_micro_batch: int,
+      completion_bucket_len: int | None = None,
   ) -> list[TrainExample]:
     """Splits a prompt micro-batch into smaller actor-side sequence chunks."""
-    chunk_size = self._resolve_actor_generation_chunk_size()
+    chunk_size = self._resolve_actor_generation_chunk_size(
+        completion_bucket_len=completion_bucket_len
+    )
     num_generations = self._num_generations()
     if chunk_size >= num_generations:
       return [self._merge_train_examples(train_micro_batch)]
@@ -299,7 +489,94 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         or "memory exhausted" in msg
     )
 
-  async def _producer_fast_path(self, dataset_iterator, train_data_queue):
+  @staticmethod
+  def _should_stop_production(
+      stop_event: threading.Event | None,
+  ) -> bool:
+    return stop_event is not None and stop_event.is_set()
+
+  async def _wait_for_fast_path_step_budget(
+      self,
+      next_prompt_index: int,
+      stop_event: threading.Event | None,
+  ) -> bool:
+    """Blocks fast-path producer from getting more than one full batch ahead."""
+    full_batch_size = getattr(self, "_full_batch_size", 0)
+    if full_batch_size <= 0:
+      return not self._should_stop_production(stop_event)
+
+    max_steps = getattr(getattr(self, "_training_config", None), "max_steps", None)
+    while True:
+      global_steps = getattr(self.rl_cluster, "global_steps", 0)
+      if not isinstance(global_steps, (int, np.integer)):
+        global_steps = 0
+      if isinstance(max_steps, (int, np.integer)) and global_steps >= max_steps:
+        return False
+      if next_prompt_index < (global_steps + 1) * full_batch_size:
+        return True
+      if self._should_stop_production(stop_event):
+        return False
+      await asyncio.sleep(0.01)
+
+  def _profile_step_for_prompt_index(self, prompt_index: int) -> int:
+    """Returns a stable profiling step for fast-path rollout timing."""
+    full_batch_size = getattr(self, "_full_batch_size", 0)
+    global_steps = getattr(self.rl_cluster, "global_steps", 0)
+    if not isinstance(global_steps, (int, np.integer)):
+      global_steps = 0
+    if full_batch_size <= 0:
+      return global_steps + 1
+    return max(global_steps + 1, (prompt_index // full_batch_size) + 1)
+
+  def _async_metrics_step_for_prompt_index(
+      self,
+      prompt_index: int,
+      mode: rl_cluster_lib.Mode,
+  ) -> int:
+    """Returns a non-stale metrics step for async fast-path logging."""
+    global_steps = getattr(self.rl_cluster, "global_steps", 0)
+    if not isinstance(global_steps, (int, np.integer)):
+      global_steps = 0
+    if mode != rl_cluster_lib.Mode.TRAIN:
+      return global_steps
+    full_batch_size = getattr(self, "_full_batch_size", 0)
+    if full_batch_size <= 0:
+      return global_steps
+    return max(global_steps, prompt_index // full_batch_size)
+
+  def _maybe_get_rollout_completion_tokens(
+      self,
+      rollout_output: base_rollout.RolloutOutput,
+      output_index: int,
+  ) -> list[int] | None:
+    """Extracts unpadded completion tokens from rollout output when available."""
+    output_tokens = getattr(rollout_output, "tokens", None)
+    if output_tokens is None:
+      return None
+    try:
+      completion_tokens = np.asarray(output_tokens[output_index], dtype=np.int32)
+    except (IndexError, TypeError, ValueError):
+      return None
+
+    if completion_tokens.ndim == 0:
+      completion_tokens = completion_tokens.reshape(1)
+    elif completion_tokens.ndim > 1:
+      completion_tokens = completion_tokens.reshape(-1)
+
+    pad_id_fn = getattr(getattr(self.rl_cluster, "rollout", None), "pad_id", None)
+    if callable(pad_id_fn):
+      pad_id = pad_id_fn()
+      while completion_tokens.size and completion_tokens[-1] == pad_id:
+        completion_tokens = completion_tokens[:-1]
+
+    return completion_tokens.tolist()
+
+  async def _producer_fast_path(
+      self,
+      dataset_iterator,
+      train_data_queue,
+      stop_event: threading.Event | None = None,
+  ):
     """Produces training examples using batched rollout generate calls."""
     num_generations = self.algo_config.num_generations
     rollout_prompt_batch_size = self._resolve_rollout_prompt_batch_size()
@@ -307,6 +584,8 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
 
     try:
       for full_batch in dataset_iterator:
+        if self._should_stop_production(stop_event):
+          return
         single_examples = list(
             self._create_micro_batch_iterator(iter([full_batch]), 1)
         )
@@ -314,11 +593,16 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
             stop=len(single_examples),
             step=rollout_prompt_batch_size,
         ):
+          if self._should_stop_production(stop_event):
+            return
+          if not await self._wait_for_fast_path_step_budget(
+              prompt_index, stop_event
+          ):
+            return
           chunk_examples = single_examples[prompt_slice]
           chunk_prompt_indices: list[int] = []
           chunk_chat_messages: list[list[dict[str, str]]] = []
           chunk_prompt_tokens: list[list[int]] = []
-          expanded_chat_messages: list[list[dict[str, str]]] = []
 
           for single_example in chunk_examples:
             messages = self._build_fast_path_chat_messages(single_example)
@@ -330,17 +614,18 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
             chunk_prompt_indices.append(prompt_index)
             chunk_chat_messages.append(messages)
             chunk_prompt_tokens.append(prompt_tokens)
-            expanded_chat_messages.extend([messages] * num_generations)
             prompt_index += 1
 
           try:
+            rollout_start = time.perf_counter()
             # Run synchronous rollout generation in a worker thread to avoid
             # nested event-loop execution conflicts with uvloop-backed engines.
             rollout_output = await asyncio.to_thread(
-                self.rl_cluster.generate,
-                prompts=expanded_chat_messages,
+                self._generate_with_rollout_lock,
+                prompts=chunk_chat_messages,
                 apply_chat_template=True,
                 mode=rl_cluster_lib.Mode.TRAIN,
+                multi_sampling=num_generations,
             )
           except Exception as e:
             if self._is_memory_exhausted_error(e):
@@ -351,8 +636,27 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
                   "`--total-generation-steps`."
               ) from e
             raise
+          self._buffer_phase_timing(
+              "perf/profile/rollout_generate_time",
+              time.perf_counter() - rollout_start,
+              step=self._profile_step_for_prompt_index(
+                  chunk_prompt_indices[0]
+              ),
+          )
+
+          if self._should_stop_production(stop_event):
+            return
+          expected_outputs = len(chunk_examples) * num_generations
+          if len(rollout_output.text) != expected_outputs:
+            raise RuntimeError(
+                "Rollout fast-path received an unexpected number of sampled "
+                f"outputs: expected {expected_outputs}, got "
+                f"{len(rollout_output.text)}."
+            )
 
           for local_prompt_i, single_example in enumerate(chunk_examples):
+            if self._should_stop_production(stop_event):
+              return
             pair_index = chunk_prompt_indices[local_prompt_i]
             base = local_prompt_i * num_generations
             chat_messages = chunk_chat_messages[local_prompt_i]
@@ -364,11 +668,15 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
                   "role": "assistant",
                   "content": completion_text,
               }
-              completion_tokens = self._tokenize_chat_messages(
-                  [completion_message],
-                  contains_first_msg=False,
-                  contains_generation_msg=False,
+              completion_tokens = self._maybe_get_rollout_completion_tokens(
+                  rollout_output, base + generation_i
               )
+              if completion_tokens is None:
+                completion_tokens = self._tokenize_chat_messages(
+                    [completion_message],
+                    contains_first_msg=False,
+                    contains_generation_msg=False,
+                )
               batch_results.append(
                   _FastPathTrajectoryItem(
                       pair_index=pair_index,
@@ -389,6 +697,8 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
               )
               for _ in range(self.algo_config.num_iterations):
                 for train_example in train_examples:
+                  if self._should_stop_production(stop_event):
+                    return
                   train_data_queue.put(train_example)
             except Exception as e:
               if not isinstance(e, RuntimeError):
@@ -456,32 +766,34 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     # Sum rewards across all reward functions for each prompt.
     sum_rewards = np.nansum(rewards, axis=1)
 
-    # Log all metrics in a single loop
-    for j, (prompt, completion) in enumerate(zip(prompts, completions)):
-      metrics_to_log = {}
+    batch_metrics_to_log = {
+        "rewards/sum": (sum_rewards, np.mean),
+        "rewards/min": (np.min(rewards, axis=1), np.min),
+        "rewards/max": (np.max(rewards, axis=1), np.max),
+    }
+    for i, reward_fn in enumerate(self.reward_fns):
+      metric_name = f"rewards/{reward_fn.__name__}"
+      batch_metrics_to_log[metric_name] = (rewards[:, i], np.mean)
 
-      # Log prompts and completions.
-      metrics_to_log["prompts"] = (prompt, None)
-      metrics_to_log["completions"] = (completion, None)
+    if step is not None:
+      self.rl_cluster.buffer_metrics_async(
+          batch_metrics_to_log, mode=mode, step=step
+      )
+    else:
+      self.rl_cluster.buffer_metrics(batch_metrics_to_log, mode=mode)
 
-      # Log the summed rewards for this trajectory.
-      trajectory_sum = sum_rewards[j]
-      metrics_to_log["rewards/sum"] = (trajectory_sum, np.mean)
-      metrics_to_log["rewards/min"] = (np.min(rewards[j]), np.min)
-      metrics_to_log["rewards/max"] = (np.max(rewards[j]), np.max)
-
-      # Log individual rewards for this trajectory
-      for i, reward_fn in enumerate(self.reward_fns):
-        metric_name = f"rewards/{reward_fn.__name__}"
-        metrics_to_log[metric_name] = (rewards[j, i], np.mean)
-
-      # Log all metrics for this trajectory in one call
-      if step is not None:
-        self.rl_cluster.buffer_metrics_async(
-            metrics_to_log, mode=mode, step=step
-        )
-      else:
-        self.rl_cluster.buffer_metrics(metrics_to_log, mode=mode)
+    if _LOG_TRAJECTORY_DETAILS:
+      for prompt, completion in zip(prompts, completions):
+        trajectory_metrics = {
+            "prompts": (prompt, None),
+            "completions": (completion, None),
+        }
+        if step is not None:
+          self.rl_cluster.buffer_metrics_async(
+              trajectory_metrics, mode=mode, step=step
+          )
+        else:
+          self.rl_cluster.buffer_metrics(trajectory_metrics, mode=mode)
 
     return jnp.array(sum_rewards)
 
@@ -526,6 +838,53 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
           buffer[key] = buffer[key][micro_batch_size:]
 
         yield micro_batch
+
+  def _generate_with_rollout_lock(
+      self,
+      *,
+      prompts,
+      apply_chat_template: bool,
+      mode: rl_cluster_lib.Mode,
+      multi_sampling: int = 1,
+  ):
+    """Runs rollout generation while holding the shared rollout lock."""
+    self._rollout_sync_lock.acquire_rollout()
+    try:
+      return self.rl_cluster.generate(
+          prompts=prompts,
+          apply_chat_template=apply_chat_template,
+          mode=mode,
+          multi_sampling=multi_sampling,
+      )
+    finally:
+      self._rollout_sync_lock.release_rollout()
+
+  def _update_actor_with_rollout_lock(
+      self, train_ds, eval_ds, skip_jit: bool
+  ) -> None:
+    """Runs actor updates as an exclusive section against rollout prefetch."""
+    self._rollout_sync_lock.acquire_weight_sync()
+    try:
+      rollout = getattr(self.rl_cluster, "rollout", None)
+      flush_cache = getattr(rollout, "flush_cache", None)
+      if callable(flush_cache):
+        flush_cache()
+      release_memory_occupation = getattr(
+          rollout, "release_memory_occupation", None
+      )
+      should_release_rollout = (
+          callable(release_memory_occupation)
+          and (
+              rollout is None
+              or rollout.__class__.__name__ != "SglangJaxRollout"
+              or _sglang_jax_rollout_release_enabled()
+          )
+      )
+      if should_release_rollout:
+        release_memory_occupation()
+      self.rl_cluster.update_actor(train_ds, eval_ds, skip_jit)
+    finally:
+      self._rollout_sync_lock.release_weight_sync()
 
   def _make_agent_env_pair(
       self, single_example: TrainingInputT, group_id: int | None = None
@@ -682,21 +1041,19 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     training_input = rl_utils.merge_micro_batches(micro_batches)
 
     prompt_index = batch_results[0].pair_index
-    if mode == rl_cluster_lib.Mode.TRAIN and self._full_batch_size:
-      step = prompt_index // self._full_batch_size
-    else:
-      step = self.rl_cluster.global_steps
+    step = self._async_metrics_step_for_prompt_index(prompt_index, mode)
     trajectory_ids = self._compute_trajectory_ids(training_input, prompt_index)
     assert "trajectory_ids" not in training_input
     training_input["trajectory_ids"] = trajectory_ids
-    for t_id in trajectory_ids:
-      self.rl_cluster.buffer_metrics_async(
-          {
-              "trajectory_ids": (t_id, None),
-          },
-          mode=mode,
-          step=step,
-      )
+    if _LOG_TRAJECTORY_DETAILS:
+      for t_id in trajectory_ids:
+        self.rl_cluster.buffer_metrics_async(
+            {
+                "trajectory_ids": (t_id, None),
+            },
+            mode=mode,
+            step=step,
+        )
     return self._process_results(
         results=batch_results,
         training_input=training_input,
@@ -757,6 +1114,80 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     """Returns the number of generations per prompt."""
     return self.algo_config.num_generations
 
+  def _buffer_phase_timing(
+      self,
+      metric_name: str,
+      duration_s: float,
+      *,
+      step: int,
+      mode: rl_cluster_lib.Mode = rl_cluster_lib.Mode.TRAIN,
+  ) -> None:
+    """Buffers phase timing metrics when profiling is explicitly enabled."""
+    if not _phase_timing_enabled():
+      return
+    self.rl_cluster.buffer_metrics_async(
+        {metric_name: (float(duration_s), np.sum)},
+        mode=mode,
+        step=step,
+    )
+
+  def _log_completed_rl_step(
+      self,
+      *,
+      step_start_time: float | None,
+      mode: rl_cluster_lib.Mode = rl_cluster_lib.Mode.TRAIN,
+  ) -> None:
+    """Logs a low-overhead marker once an RL step has fully completed."""
+    if step_start_time is None:
+      return
+    completed_step = self.rl_cluster.global_steps
+    self.rl_cluster.log_scalar_immediately(
+        "perf/profile/rl_step_complete_marker",
+        1.0,
+        mode=mode,
+        step=completed_step,
+    )
+    self.rl_cluster.log_scalar_immediately(
+        "perf/profile/rl_step_wall_time",
+        float(time.perf_counter() - step_start_time),
+        mode=mode,
+        step=completed_step,
+    )
+
+  def _configure_actor_trainer_grad_acc_steps(
+      self,
+      *,
+      actor_train_batch_count: int,
+      bucket_group_count: int,
+  ) -> None:
+    """Aligns actor grad-acc steps with the actual actor train batches."""
+    actor_trainer = getattr(getattr(self, "rl_cluster", None), "actor_trainer", None)
+    if (
+        actor_trainer is None
+        or actor_train_batch_count <= 0
+        or not _dynamic_actor_grad_acc_steps_enabled()
+    ):
+      return
+    actor_trainer.config.gradient_accumulation_steps = actor_train_batch_count
+    self.rl_cluster.log_scalar_immediately(
+        "perf/profile/actor_train_batch_count",
+        float(actor_train_batch_count),
+        mode=rl_cluster_lib.Mode.TRAIN,
+        step=self.rl_cluster.global_steps,
+    )
+    self.rl_cluster.log_scalar_immediately(
+        "perf/profile/actor_bucket_group_count",
+        float(bucket_group_count),
+        mode=rl_cluster_lib.Mode.TRAIN,
+        step=self.rl_cluster.global_steps,
+    )
+    self.rl_cluster.log_scalar_immediately(
+        "perf/profile/actor_dynamic_grad_acc_steps",
+        float(actor_train_batch_count),
+        mode=rl_cluster_lib.Mode.TRAIN,
+        step=self.rl_cluster.global_steps,
+    )
+
   @staticmethod
   def _run_async(coro: Coroutine[Any, Any, Any]) -> Any:
     """Runs a coroutine, handling existing event loops correctly."""
@@ -770,16 +1201,26 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       # If a loop is already running, use it to run the coroutine.
       return loop.run_until_complete(coro)
 
-  async def _producer(self, orchestrator, dataset_iterator, train_data_queue):
+  async def _producer(
+      self,
+      orchestrator,
+      dataset_iterator,
+      train_data_queue,
+      stop_event: threading.Event | None = None,
+  ):
     """Produces training examples from prompts in the dataset_iterator."""
     if self.algo_config.enable_rollout_fast_path:
-      await self._producer_fast_path(dataset_iterator, train_data_queue)
+      await self._producer_fast_path(
+          dataset_iterator, train_data_queue, stop_event
+      )
       return
     if orchestrator is None:
       raise ValueError("`orchestrator` must be provided for non-fast-path.")
 
     def _iterate_micro_batches():
       for item in dataset_iterator:
+        if self._should_stop_production(stop_event):
+          return
         for prompt in self._create_micro_batch_iterator(iter([item]), 1):
           yield prompt
 
@@ -791,6 +1232,8 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
           num_generations=self.algo_config.num_generations,
           collect_mode="Token",
       ):
+        if self._should_stop_production(stop_event):
+          break
         try:
           train_examples = self._batch_to_train_example(
               batch_results=batch,
@@ -800,6 +1243,8 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
           iterations = self.algo_config.num_iterations
           for _ in range(iterations):
             for train_example in train_examples:
+              if self._should_stop_production(stop_event):
+                return
               train_data_queue.put(train_example)
         except Exception as e:
           if not isinstance(e, RuntimeError):
@@ -847,8 +1292,14 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     )
     actor_generation_chunk_size = self._resolve_actor_generation_chunk_size()
     actor_chunks_per_prompt_group = self._num_actor_chunks_per_prompt_group()
-    self._rollout_micro_batch_size = 1
-    self._compute_logps_micro_batch_size = 1
+    actor_prompt_group_coalesce = _actor_prompt_group_coalesce_factor()
+    prompts_per_actor_call = (
+        train_micro_batch_size * actor_prompt_group_coalesce
+    )
+    self._rollout_micro_batch_size = self._rollout_micro_batch_size or 1
+    self._compute_logps_micro_batch_size = (
+        self._compute_logps_micro_batch_size or 1
+    )
     for v, n in [
         (self._rollout_micro_batch_size, f"{self._rollout_micro_batch_size=}"),
         (
@@ -856,6 +1307,11 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
             f"{self._compute_logps_micro_batch_size=}",
         ),
         (mini_batch_size, f"{mini_batch_size=}"),
+        (
+            prompts_per_actor_call,
+            f"{prompts_per_actor_call=} (train_micro_batch_size *"
+            " actor_prompt_group_coalesce)",
+        ),
     ]:
       rl_utils.check_divisibility(v, full_batch_size, n, f"{full_batch_size=}")
     grad_acc_steps = self._training_config.get_with_default(
@@ -869,6 +1325,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         f" {self._compute_logps_micro_batch_size=},"
         f" actor_generation_chunk_size={actor_generation_chunk_size},"
         f" actor_chunks_per_prompt_group={actor_chunks_per_prompt_group},"
+        f" actor_prompt_group_coalesce={actor_prompt_group_coalesce},"
         f" effective_actor_grad_acc_steps={effective_actor_grad_acc_steps}"
     )
 
@@ -884,6 +1341,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     training_config = self.rl_cluster.cluster_config.training_config
 
     train_data_queue = queue_lib.SimpleDataQueue(maxsize=0)
+    producer_stop_event = threading.Event()
 
     # 1. Start producer thread to generate rollouts and training examples.
     orchestrator = None
@@ -897,123 +1355,199 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       )
     producer_future = self.executor.submit(
         self._run_async,
-        self._producer(orchestrator, full_dataset_iterator, train_data_queue),
+        self._producer(
+            orchestrator,
+            full_dataset_iterator,
+            train_data_queue,
+            producer_stop_event,
+        ),
     )
 
     # 2. Consume training examples and train.
     train_data_gen = self._data_consumer_batch_generator(
         train_data_queue, train_micro_batch_size * self._num_generations()
     )
-    micro_batches_since_last_sync = 0
-    micro_batches_per_full_batch = (
-        full_batch_size
-        // train_micro_batch_size
-        * actor_chunks_per_prompt_group
-    )
-    for train_micro_batch in train_data_gen:
-      if self.rl_cluster.global_steps >= self._training_config.max_steps:
-        logging.info(
-            "Reached max_steps: %d >= %d",
-            self.rl_cluster.global_steps,
-            self._training_config.max_steps,
-        )
-        break
-      self._iter_steps += 1
-
-      # Filter out examples that are too old (off-policy).
-      filtered_train_micro_batch = []
-      for train_example in train_micro_batch:
-        if train_example.policy_version is not None and (
-            train_example.policy_version[0] == -1
-            or (
-                self.policy_version - train_example.policy_version[0]
-                <= self.algo_config.off_policy_steps
+    train_data_iter = iter(train_data_gen)
+    prompt_groups_since_last_sync = 0
+    current_rl_step_start_time: float | None = None
+    train_error: Exception | None = None
+    try:
+      while True:
+        if self.rl_cluster.global_steps >= self._training_config.max_steps:
+          producer_stop_event.set()
+          logging.info(
+              "Reached max_steps: %d >= %d",
+              self.rl_cluster.global_steps,
+              self._training_config.max_steps,
+          )
+          break
+        try:
+          if prompt_groups_since_last_sync == 0:
+            current_rl_step_start_time = time.perf_counter()
+          window_prompt_groups = []
+          while len(window_prompt_groups) < prompts_per_actor_call:
+            try:
+              next_prompt_batch = next(train_data_iter)
+            except StopIteration:
+              break
+            window_prompt_groups.extend(
+                self._split_train_examples_into_prompt_groups(next_prompt_batch)
             )
-        ):
-          filtered_train_micro_batch.append(train_example)
-      if not filtered_train_micro_batch:
-        logging.warning(
-            "Skipping microbatch: all %d examples are too old."
-            " Current policy version: %d, data versions: %s,"
-            " off_policy_steps: %d",
-            len(train_micro_batch),
-            self.policy_version,
-            str([
-                train_example.policy_version[0]
-                for train_example in train_micro_batch
-            ]),
-            self.algo_config.off_policy_steps,
-        )
-        continue
-      train_micro_batch = filtered_train_micro_batch
+          if not window_prompt_groups:
+            break
+        except StopIteration:
+          break
+        self._iter_steps += 1
 
-      actor_train_batches = self._chunk_and_merge_train_micro_batch(
-          train_micro_batch=train_micro_batch,
-          prompts_per_train_micro_batch=train_micro_batch_size,
-      )
-
-      # --- Evaluation Logic ---
-      current_eval_dataset = None
-      if (
-          all_eval_prompts
-          and self.rl_cluster.actor_trainer.train_steps
-          % training_config.eval_every_n_steps
-          == 0
-      ):
-        self._eval_iter_steps = 0
-        eval_orchestrator = self._build_orchestrator()
-
-        async def _eval_runner_async(current_eval_orchestrator):
-          eval_examples = []
-          async for batch, cached_inputs in self._orchestrator_producer(
-              current_eval_orchestrator,
-              all_eval_prompts,
-              num_generations=self._num_generations(),
+        # Filter out examples that are too old (off-policy).
+        filtered_prompt_groups = []
+        filtered_policy_versions = []
+        for prompt_group in window_prompt_groups:
+          group_policy_version = prompt_group[0].policy_version
+          if group_policy_version is None:
+            filtered_prompt_groups.append(prompt_group)
+            continue
+          version_value = group_policy_version[0]
+          filtered_policy_versions.append(version_value)
+          if version_value == -1 or (
+              self.policy_version - version_value
+              <= self.algo_config.off_policy_steps
           ):
-            train_examples = self._batch_to_train_example(
-                batch,
-                cached_inputs,
-                rl_cluster_lib.Mode.EVAL,
-            )
-            eval_examples.extend(train_examples)
-          return eval_examples
+            filtered_prompt_groups.append(prompt_group)
+        if not filtered_prompt_groups:
+          logging.warning(
+              "Skipping prompt-group window: all %d prompt groups are too old."
+              " Current policy version: %d, data versions: %s,"
+              " off_policy_steps: %d",
+              len(window_prompt_groups),
+              self.policy_version,
+              str(filtered_policy_versions),
+              self.algo_config.off_policy_steps,
+          )
+          continue
+        window_prompt_groups = filtered_prompt_groups
+        train_micro_batch = list(itertools.chain.from_iterable(window_prompt_groups))
 
-        eval_future = self.executor.submit(
-            self._run_async, _eval_runner_async(eval_orchestrator)
+        grouped_bucket_prompt_groups = self._group_prompt_groups_by_completion_bucket(
+            window_prompt_groups
         )
-        eval_examples = eval_future.result()
-        self._eval_iter_steps += 1
-        current_eval_dataset = eval_examples
-
-      # --- Training Step ---
-      self.rl_cluster.update_actor(
-          actor_train_batches, current_eval_dataset, skip_jit
-      )
-      if hasattr(self.rl_cluster, "critic_trainer"):
-        self.rl_cluster.update_critic(
-            train_micro_batch, current_eval_dataset, skip_jit
+        actor_train_batches = []
+        for bucket_len, bucket_prompt_groups in grouped_bucket_prompt_groups:
+          bucket_train_micro_batch = list(
+              itertools.chain.from_iterable(bucket_prompt_groups)
+          )
+          actor_train_batches.extend(
+              self._chunk_and_merge_train_micro_batch(
+                  train_micro_batch=bucket_train_micro_batch,
+                  prompts_per_train_micro_batch=len(bucket_prompt_groups),
+                  completion_bucket_len=bucket_len,
+              )
+          )
+        self._configure_actor_trainer_grad_acc_steps(
+            actor_train_batch_count=len(actor_train_batches),
+            bucket_group_count=len(grouped_bucket_prompt_groups),
         )
 
-      # --- Weight Sync Logic ---
-      micro_batches_since_last_sync += len(actor_train_batches)
-      if micro_batches_since_last_sync >= micro_batches_per_full_batch:
-        if self.should_sync_weights:
-          logging.info("Requesting sync lock to sync weights...")
-          self._rollout_sync_lock.acquire_weight_sync()
-          try:
-            logging.info("Sync lock acquired. Syncing weights.")
-            self.rl_cluster.sync_weights()
-            self.policy_version += 1
-            logging.info(
-                "Weights synced. Policy version incremented to %d.",
-                self.policy_version,
-            )
-          finally:
-            self._rollout_sync_lock.release_weight_sync()
-            logging.info("Sync lock released.")
-        else:
-          self.rl_cluster.global_steps += 1
-        micro_batches_since_last_sync = 0
+        # --- Evaluation Logic ---
+        current_eval_dataset = None
+        if (
+            all_eval_prompts
+            and self.rl_cluster.actor_trainer.train_steps
+            % training_config.eval_every_n_steps
+            == 0
+        ):
+          self._eval_iter_steps = 0
+          eval_orchestrator = self._build_orchestrator()
 
-    _ = producer_future.result()
-    self.rl_cluster.close()
+          async def _eval_runner_async(current_eval_orchestrator):
+            eval_examples = []
+            async for batch, cached_inputs in self._orchestrator_producer(
+                current_eval_orchestrator,
+                all_eval_prompts,
+                num_generations=self._num_generations(),
+            ):
+              train_examples = self._batch_to_train_example(
+                  batch,
+                  cached_inputs,
+                  rl_cluster_lib.Mode.EVAL,
+              )
+              eval_examples.extend(train_examples)
+            return eval_examples
+
+          eval_future = self.executor.submit(
+              self._run_async, _eval_runner_async(eval_orchestrator)
+          )
+          eval_examples = eval_future.result()
+          self._eval_iter_steps += 1
+          current_eval_dataset = eval_examples
+
+        # --- Training Step ---
+        profile_step = self.rl_cluster.global_steps + 1
+        actor_update_start = time.perf_counter()
+        self._update_actor_with_rollout_lock(
+            actor_train_batches, current_eval_dataset, skip_jit
+        )
+        self._buffer_phase_timing(
+            "perf/profile/actor_update_time",
+            time.perf_counter() - actor_update_start,
+            step=profile_step,
+        )
+        if hasattr(self.rl_cluster, "critic_trainer"):
+          self.rl_cluster.update_critic(
+              train_micro_batch, current_eval_dataset, skip_jit
+          )
+
+        # --- Weight Sync Logic ---
+        prompt_groups_since_last_sync += len(window_prompt_groups)
+        if prompt_groups_since_last_sync >= full_batch_size:
+          if self.should_sync_weights:
+            logging.info("Requesting sync lock to sync weights...")
+            self._rollout_sync_lock.acquire_weight_sync()
+            try:
+              logging.info("Sync lock acquired. Syncing weights.")
+              sync_start = time.perf_counter()
+              self.rl_cluster.sync_weights()
+              self._buffer_phase_timing(
+                  "perf/profile/sync_weights_time",
+                  time.perf_counter() - sync_start,
+                  step=profile_step,
+              )
+              self.policy_version += 1
+              logging.info(
+                  "Weights synced. Policy version incremented to %d.",
+                  self.policy_version,
+              )
+            finally:
+              self._rollout_sync_lock.release_weight_sync()
+              logging.info("Sync lock released.")
+          else:
+            self.rl_cluster.global_steps += 1
+          self._log_completed_rl_step(
+              step_start_time=current_rl_step_start_time,
+              mode=rl_cluster_lib.Mode.TRAIN,
+          )
+          if (
+              self.rl_cluster.global_steps < self._training_config.max_steps
+              and hasattr(self.rl_cluster, "actor_trainer")
+          ):
+            # The next RL step re-enters actor training after rollout/ref work on
+            # the same TPU slice. Drop cached JIT handles so JAX can release the
+            # previous executable before the next step loads it again.
+            self.rl_cluster.actor_trainer.clear_jitted_step_caches()
+          prompt_groups_since_last_sync = 0
+          current_rl_step_start_time = None
+    except Exception as e:
+      train_error = e
+      raise
+    finally:
+      producer_stop_event.set()
+      try:
+        _ = producer_future.result()
+      except Exception:
+        if train_error is None:
+          raise
+        logging.exception(
+            "Producer failed while shutting down after a training error."
+        )
+      finally:
+        self.rl_cluster.close()

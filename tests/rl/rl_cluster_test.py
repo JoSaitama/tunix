@@ -200,6 +200,95 @@ class RlClusterTest(parameterized.TestCase):
             eval_every_n_steps=1,
         )
 
+  def test_resolve_actor_grad_acc_factor_defaults(self):
+    with mock.patch.dict(os.environ, {}, clear=False):
+      self.assertEqual(
+          rl_cluster_lib._resolve_actor_grad_acc_factor(),
+          (1, 1),
+      )
+
+  def test_resolve_actor_grad_acc_factor_applies_prompt_coalesce(self):
+    with mock.patch.dict(
+        os.environ,
+        {
+            'TUNIX_ACTOR_GRAD_ACC_FACTOR': '4',
+            'TUNIX_ACTOR_PROMPT_GROUP_COALESCE': '2',
+        },
+        clear=False,
+    ):
+      self.assertEqual(
+          rl_cluster_lib._resolve_actor_grad_acc_factor(),
+          (2, 2),
+      )
+
+  def test_resolve_actor_grad_acc_factor_requires_divisibility(self):
+    with mock.patch.dict(
+        os.environ,
+        {
+            'TUNIX_ACTOR_GRAD_ACC_FACTOR': '4',
+            'TUNIX_ACTOR_PROMPT_GROUP_COALESCE': '3',
+        },
+        clear=False,
+    ):
+      with self.assertRaisesRegex(
+          ValueError,
+          'TUNIX_ACTOR_GRAD_ACC_FACTOR must be a multiple of '
+          'TUNIX_ACTOR_PROMPT_GROUP_COALESCE',
+      ):
+        rl_cluster_lib._resolve_actor_grad_acc_factor()
+
+  def test_close_closes_rollout_if_available(self):
+    rl_cluster = object.__new__(rl_cluster_lib.RLCluster)
+    rl_cluster._buffered_train_metrics = []
+    rl_cluster._buffered_eval_metrics = []
+    rl_cluster._actor_trainer = mock.Mock()
+    rl_cluster._critic_trainer = mock.Mock()
+    rl_cluster._rollout = mock.Mock()
+
+    rl_cluster.close()
+
+    rl_cluster.actor_trainer.close.assert_called_once_with()
+    rl_cluster.critic_trainer.close.assert_called_once_with()
+    rl_cluster._rollout.close.assert_called_once_with()
+
+  def test_buffer_metrics_async_resumes_with_stale_train_buffer(self):
+    rl_cluster = object.__new__(rl_cluster_lib.RLCluster)
+    rl_cluster._buffered_train_metrics = [
+        rl_cluster_lib.MetricsBuffer(0, mode=str(rl_cluster_lib.Mode.TRAIN))
+    ]
+    rl_cluster._buffered_eval_metrics = []
+    rl_cluster.global_steps = 3
+    rl_cluster._log_metrics = mock.Mock()
+
+    rl_cluster.buffer_metrics_async(
+        {"rewards/test": (1.0, np.mean)},
+        mode=rl_cluster_lib.Mode.TRAIN,
+        step=0,
+    )
+
+    rl_cluster._log_metrics.assert_called_once()
+    self.assertLen(rl_cluster._buffered_train_metrics, 1)
+    self.assertEqual(rl_cluster._buffered_train_metrics[0].global_steps, 3)
+    self.assertIn("rewards/test", rl_cluster._buffered_train_metrics[0].metrics)
+
+  def test_log_scalar_immediately_uses_metrics_logger(self):
+    rl_cluster = object.__new__(rl_cluster_lib.RLCluster)
+    rl_cluster._rl_metrics_logger = mock.Mock()
+    rl_cluster.global_steps = 7
+
+    rl_cluster.log_scalar_immediately(
+        "perf/profile/rl_step_complete_marker",
+        1.0,
+        mode=rl_cluster_lib.Mode.TRAIN,
+    )
+
+    rl_cluster._rl_metrics_logger.log.assert_called_once()
+    call = rl_cluster._rl_metrics_logger.log.call_args
+    self.assertEqual(call.args[0], "global")
+    self.assertEqual(call.args[1], "perf/profile/rl_step_complete_marker")
+    self.assertEqual(call.args[3], "train")
+    self.assertEqual(call.args[4], 7)
+
   def test_generate_with_chat_template(self):  # pylint: disable=g-doc-args
     mesh = Mesh(
         np.array(jax.devices()).reshape(self.device_count, 1), ('fsdp', 'tp')

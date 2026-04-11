@@ -14,6 +14,7 @@
 
 """Sampler for sglang-jax-style autoregressive decoding using JAX and NNX models."""
 
+import asyncio
 import dataclasses
 import math
 import os
@@ -85,6 +86,7 @@ class SglangJaxSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-nam
     self.mappings = config.mapping_config.to_hf_mappings
     self.to_hf_transpose_keys = config.mapping_config.to_hf_transpose_keys
     self.to_hf_hook_fns = config.mapping_config.to_hf_hook_fns
+    self._weights_offloaded_to_host = False
 
   # TODO(b/434969743): Optimize weight sharing between trainer and sglang-jax sampler.
   # TODO(b/434975493): Consider Release KV cache on the fly
@@ -99,11 +101,21 @@ class SglangJaxSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-nam
           src_state=updated_weights,
           dst_state=self.transformer_state,
           key_mappings=self.mappings,
+          key_mapping_hook_fns=self.to_hf_hook_fns,
           transpose_keys=self.to_hf_transpose_keys,
-          reshard_fn=reshard.reshard_pytree,
+          reshard_fn=self._reshard_params_to_engine,
       )
       new_model_state_leaves, _ = jax.tree_util.tree_flatten(new_state)
       self._model_runner.model_state_leaves = new_model_state_leaves
+      self._weights_offloaded_to_host = False
+
+  @staticmethod
+  def _reshard_params_to_engine(
+      source: jaxtyping.PyTree, dst_shardings: jaxtyping.PyTree
+  ) -> jaxtyping.PyTree:
+    # Route through host memory to avoid TPU device-order incompatibilities
+    # when trainer and rollout meshes enumerate the same devices differently.
+    return reshard.reshard_pytree(jax.device_get(source), dst_shardings)
 
   def load_checkpoint(self, path_or_weights: str | jaxtyping.PyTree):
     # TODO(b/434741253): Consider support orbax checkpoint loading
@@ -176,6 +188,67 @@ class SglangJaxSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-nam
     )
     return bos_tok + input_ids + eos_tok
 
+  def _cancel_engine_asyncio_tasks(self) -> None:
+    """Cancels tokenizer-manager tasks to avoid pending-task warnings on exit."""
+    tokenizer_manager = getattr(self.engine, "tokenizer_manager", None)
+    loop = getattr(self.engine, "loop", None)
+    if tokenizer_manager is None or loop is None or loop.is_closed():
+      return
+
+    tasks = list(getattr(tokenizer_manager, "asyncio_tasks", ()))
+    if not tasks:
+      return
+    for task in tasks:
+      task.cancel()
+
+    if loop.is_running():
+      future = asyncio.run_coroutine_threadsafe(
+          asyncio.gather(*tasks, return_exceptions=True), loop
+      )
+      future.result(timeout=5)
+    else:
+      loop.run_until_complete(asyncio.gather(*tasks, return_exceptions=True))
+    tokenizer_manager.asyncio_tasks.clear()
+
+  def close(self) -> None:
+    """Releases engine resources and stops its internal event loop."""
+    with self._engine_lock:
+      self._cancel_engine_asyncio_tasks()
+      shutdown = getattr(self.engine, "shutdown", None)
+      if callable(shutdown):
+        shutdown()
+
+  def flush_cache(self) -> None:
+    """Flushes engine-side KV/cache state when rollout is idle."""
+    with self._engine_lock:
+      flush = getattr(self.engine, "flush_cache", None)
+      if callable(flush):
+        flush()
+
+  def release_memory_occupation(self) -> None:
+    """Moves rollout weights to host so actor training can reclaim TPU HBM."""
+    with self._engine_lock:
+      model_runner = self._model_runner
+      if model_runner is None or getattr(
+          self, "_weights_offloaded_to_host", False
+      ):
+        return
+      model = getattr(model_runner, "model", None)
+      if model is None:
+        return
+      model_def, model_state = nnx.split(model)
+      host_state = jax.device_get(model_state)
+      model_runner.model = nnx.merge(model_def, host_state)
+      host_leaves, _ = jax.tree_util.tree_flatten(host_state)
+      model_runner.model_state_leaves = host_leaves
+      self._weights_offloaded_to_host = True
+
+  def resume_memory_occupation(self) -> None:
+    """Restores rollout weights onto device after a host offload."""
+    if not getattr(self, "_weights_offloaded_to_host", False):
+      return
+    self.update_params(updated_weights=self.transformer_state, filter_types=None)
+
   @staticmethod
   def _normalize_output_ids(
       output_ids: Any, max_generation_steps: int
@@ -198,6 +271,42 @@ class SglangJaxSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-nam
         return ""
       return str(output_text[0])
     return str(output_text)
+
+  @classmethod
+  def _normalize_multisampled_output_ids(
+      cls, output_ids: Any, max_generation_steps: int, multi_sampling: int
+  ) -> list[np.ndarray]:
+    """Normalizes one engine output into 1..N sampled token sequences."""
+    if multi_sampling <= 1:
+      return [cls._normalize_output_ids(output_ids, max_generation_steps)]
+    if output_ids is None:
+      return [np.array([], dtype=np.int32) for _ in range(multi_sampling)]
+    if isinstance(output_ids, list):
+      if output_ids and isinstance(output_ids[0], (list, tuple, np.ndarray)):
+        return [
+            cls._normalize_output_ids(sample, max_generation_steps)
+            for sample in output_ids
+        ]
+      return [cls._normalize_output_ids(output_ids, max_generation_steps)]
+
+    output_ids_arr = np.asarray(output_ids, dtype=object)
+    if output_ids_arr.ndim == 2 and output_ids_arr.shape[0] == multi_sampling:
+      return [
+          cls._normalize_output_ids(output_ids_arr[i], max_generation_steps)
+          for i in range(output_ids_arr.shape[0])
+      ]
+    return [cls._normalize_output_ids(output_ids, max_generation_steps)]
+
+  @classmethod
+  def _normalize_multisampled_output_text(
+      cls, output_text: Any, multi_sampling: int
+  ) -> list[str]:
+    """Normalizes one engine output into 1..N sampled strings."""
+    if multi_sampling <= 1:
+      return [cls._normalize_output_text(output_text)]
+    if isinstance(output_text, list):
+      return [str(text) for text in output_text]
+    return [str(output_text)]
 
   def __call__(
       self,
@@ -262,29 +371,76 @@ class SglangJaxSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-nam
 
     if max_prompt_length is None or max_prompt_length < max_tokens_length:
       max_prompt_length = utils.next_power_of_2(max_tokens_length)
+    repeated_prompt_ids: list[list[int]] = []
+    output_texts: list[str] = []
+    all_output_ids: list[np.ndarray] = []
+
+    # Keep prompt-major, generation-minor ordering so RL callers can index the
+    # flattened outputs as `[prompt_i * n + generation_i]`.
+    if multi_sampling > 1 and len(outputs) == len(prompt_ids) * multi_sampling:
+      for output_i, output in enumerate(outputs):
+        prompt_i = output_i // multi_sampling
+        repeated_prompt_ids.append(prompt_ids[prompt_i])
+        output_texts.append(self._normalize_output_text(output["text"]))
+        all_output_ids.append(
+            utils.pad_to_length(
+                self._normalize_output_ids(
+                    output["output_ids"], max_generation_steps
+                ),
+                target_length=max_generation_steps,
+                pad_value=self.tokenizer.pad_id(),
+                left=False,
+            )
+        )
+    else:
+      if len(outputs) != len(prompt_ids):
+        raise ValueError(
+            "SGLang-JAX returned an unexpected number of outputs. Expected "
+            f"{len(prompt_ids)} prompt outputs, got {len(outputs)}."
+        )
+      for prompt_token_ids, output in zip(prompt_ids, outputs):
+        normalized_output_ids = self._normalize_multisampled_output_ids(
+            output.get("output_ids"), max_generation_steps, multi_sampling
+        )
+        normalized_texts = self._normalize_multisampled_output_text(
+            output.get("text"), multi_sampling
+        )
+        if len(normalized_output_ids) != len(normalized_texts):
+          raise ValueError(
+              "SGLang-JAX returned mismatched token/text sample counts: "
+              f"{len(normalized_output_ids)} token outputs vs "
+              f"{len(normalized_texts)} text outputs."
+          )
+        if multi_sampling > 1 and len(normalized_output_ids) != multi_sampling:
+          raise ValueError(
+              "SGLang-JAX returned an unexpected number of multi-samples. "
+              f"Expected {multi_sampling}, got {len(normalized_output_ids)}."
+          )
+        for normalized_ids, normalized_text in zip(
+            normalized_output_ids, normalized_texts
+        ):
+          repeated_prompt_ids.append(prompt_token_ids)
+          output_texts.append(normalized_text)
+          all_output_ids.append(
+              utils.pad_to_length(
+                  normalized_ids,
+                  target_length=max_generation_steps,
+                  pad_value=self.tokenizer.pad_id(),
+                  left=False,
+              )
+          )
+
     all_input_ids = [
         utils.pad_to_length(
-            np.array(x, dtype=np.int32),
+            np.array(prompt_token_ids, dtype=np.int32),
             target_length=max_prompt_length,
             pad_value=self.tokenizer.pad_id(),
             left=True,
         )
-        for x in prompt_ids
+        for prompt_token_ids in repeated_prompt_ids
     ]
     all_input_ids = np.array(all_input_ids, dtype=np.int32)
-
-    all_output_ids = [
-        utils.pad_to_length(
-            self._normalize_output_ids(x["output_ids"], max_generation_steps),
-            target_length=max_generation_steps,
-            pad_value=self.tokenizer.pad_id(),
-            left=False,
-        )
-        for x in outputs
-    ]
     all_output_ids = jnp.array(all_output_ids)
-    output_texts = [self._normalize_output_text(o["text"]) for o in outputs]
-    # To support multisampling, just return the whole list of SamplerOutput
     return base_sampler.SamplerOutput(
         text=output_texts,
         logits=None,

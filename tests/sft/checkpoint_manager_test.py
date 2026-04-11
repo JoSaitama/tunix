@@ -25,6 +25,7 @@ import jax
 import jax.numpy as jnp
 import jax.sharding as shd
 import numpy as np
+import orbax.checkpoint as ocp
 import qwix
 from tunix.sft import checkpoint_manager
 
@@ -132,6 +133,37 @@ class CheckpointManagerTest(parameterized.TestCase):
     model_param_path = epath.Path(self.temp_path) / '1' / 'model_params'
     # Verify the model params are saved.
     self.assertTrue(model_param_path.exists())
+
+  def test_explicit_save_interval_skips_initial_checkpoint(self):
+    peft_checkpoint_manager = checkpoint_manager.CheckpointManager(
+        self.temp_path,
+        options=ocp.CheckpointManagerOptions(
+            save_interval_steps=79,
+            max_to_keep=2,
+            enable_async_checkpointing=False,
+        ),
+    )
+    model, _ = create_sharded_model(TestModel, nnx.Rngs(0), self.mesh)
+
+    self.assertFalse(peft_checkpoint_manager.save(1, model))
+    self.assertIsNone(peft_checkpoint_manager.latest_step())
+
+    self.assertTrue(peft_checkpoint_manager.save(79, model))
+    self.assertEqual(peft_checkpoint_manager.latest_step(), 79)
+
+  def test_force_save_still_works_with_explicit_save_interval(self):
+    peft_checkpoint_manager = checkpoint_manager.CheckpointManager(
+        self.temp_path,
+        options=ocp.CheckpointManagerOptions(
+            save_interval_steps=79,
+            max_to_keep=2,
+            enable_async_checkpointing=False,
+        ),
+    )
+    model, _ = create_sharded_model(TestModel, nnx.Rngs(0), self.mesh)
+
+    self.assertTrue(peft_checkpoint_manager.save(1, model, force=True))
+    self.assertEqual(peft_checkpoint_manager.latest_step(), 1)
 
   def test_restore(self):
     peft_checkpoint_manager = checkpoint_manager.CheckpointManager(

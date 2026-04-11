@@ -5,8 +5,25 @@ from __future__ import annotations
 import os
 from typing import Any, Dict, Tuple
 
+import jax.numpy as jnp
+
 Sharding = Tuple[str | None, ...]
 MappingEntry = Tuple[str, Sharding]
+
+
+def _repeat_qkv_bias_for_target_shape(
+    val: jnp.ndarray,
+    tgt_shape: Tuple[int, ...],
+    src_key: str,
+) -> jnp.ndarray:
+  """Repeats Qwen2 q/k/v bias vectors when the rollout TP target is wider."""
+  del src_key
+  if val.ndim != 1 or len(tgt_shape) != 1 or val.shape == tgt_shape:
+    return val
+  if val.shape[0] > tgt_shape[0] or tgt_shape[0] % val.shape[0] != 0:
+    return val
+  repeat_factor = tgt_shape[0] // val.shape[0]
+  return jnp.repeat(val, repeat_factor)
 
 
 def _to_sglang_jax_mappings() -> Dict[str, MappingEntry]:
@@ -81,7 +98,11 @@ def _to_sglang_jax_transpose_keys():
 
 def _to_sglang_jax_hook_fns() -> Dict[str, Any] | None:
   """Additional parameter manipulation hook between Tunix vanilla model and Sglang Jax backend"""
-  return None
+  return {
+      'layers.*.attn.q_bias': _repeat_qkv_bias_for_target_shape,
+      'layers.*.attn.k_bias': _repeat_qkv_bias_for_target_shape,
+      'layers.*.attn.v_bias': _repeat_qkv_bias_for_target_shape,
+  }
 
 
 SGLANG_JAX_MAPPING: Dict[str, Any] = {

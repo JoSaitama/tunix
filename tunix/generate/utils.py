@@ -17,6 +17,7 @@
 
 import functools
 import gc
+import inspect
 import logging
 import math
 import re
@@ -507,10 +508,36 @@ def _reshape_attention(
         new_shape,
     )
     return jnp.reshape(val, new_shape)
+  repeated_proj_pattern = re.compile(r'layers\..*\.attn\.(q|k|v)_proj(\.w)?')
+  proj_pattern = re.compile(r'layers\..*\.attn\.(q|k|v|o)_proj(\.w)?')
+  if (
+      repeated_proj_pattern.match(src_key)
+      and len(val.shape) == 3
+      and len(tgt_shape) == 2
+  ):
+    if val.shape[0] != tgt_shape[0]:
+      raise ShapeMismatchError(
+          f'Cannot reshape attention proj on {src_key}: '
+          f'{val.shape} vs {tgt_shape}'
+      )
+    src_flat_dim = val.shape[1] * val.shape[2]
+    if tgt_shape[1] % src_flat_dim != 0:
+      raise ShapeMismatchError(
+          f'Cannot expand attention proj on {src_key}: '
+          f'{val.shape} vs {tgt_shape}'
+      )
+    repeat_factor = tgt_shape[1] // src_flat_dim
+    if repeat_factor > 1:
+      val = jnp.repeat(val, repeat_factor, axis=1)
+    logging.debug(
+        'Reshaping attention proj on %s: %s -> %s',
+        src_key,
+        val.shape,
+        tgt_shape,
+    )
+    return jnp.reshape(val, tgt_shape)
   ## here exists tgt_shape is (4096, 1024), but the val shape is (4096, 8, 128) case, so needs reshape
-  if re.compile(r'layers\..*\.attn\.(q|k|v|o)_proj').match(
-      src_key
-  ) and math.prod(tgt_shape) == math.prod(val.shape):
+  if proj_pattern.match(src_key) and math.prod(tgt_shape) == math.prod(val.shape):
     logging.debug(
         'Reshaping attention proj on %s: %s -> %s',
         src_key,
@@ -610,6 +637,46 @@ def _apply_dtype_cast(
   return val
 
 
+def _resolve_mapping_hook_fn(
+    src_key: str,
+    key_mapping_hook_fns: Optional[Dict[str, Callable[..., jnp.ndarray]]],
+) -> Optional[Callable[..., jnp.ndarray]]:
+  if not key_mapping_hook_fns:
+    return None
+  if src_key in key_mapping_hook_fns:
+    return key_mapping_hook_fns[src_key]
+
+  for hook_key, hook_fn in key_mapping_hook_fns.items():
+    if '*' not in hook_key:
+      continue
+    regex = '^' + re.escape(hook_key).replace('\\*', r'[^.]+') + '$'
+    if re.match(regex, src_key):
+      return hook_fn
+  return None
+
+
+def _apply_mapping_hook(
+    val: jnp.ndarray,
+    src_key: str,
+    tgt_shape: Tuple[int, ...],
+    key_mapping_hook_fns: Optional[Dict[str, Callable[..., jnp.ndarray]]],
+) -> jnp.ndarray:
+  hook_fn = _resolve_mapping_hook_fn(src_key, key_mapping_hook_fns)
+  if hook_fn is None:
+    return val
+
+  try:
+    num_params = len(inspect.signature(hook_fn).parameters)
+  except (TypeError, ValueError):
+    num_params = 1
+
+  if num_params >= 3:
+    return hook_fn(val, tgt_shape, src_key)
+  if num_params == 2:
+    return hook_fn(val, tgt_shape)
+  return hook_fn(val)
+
+
 def transfer_state_with_mappings(
     src_state,
     dst_state,
@@ -665,8 +732,9 @@ def transfer_state_with_mappings(
     val = _apply_transpose(val, flat_src_key, transpose_keys)
 
     # Apply optional hook function
-    if key_mapping_hook_fns and flat_src_key in key_mapping_hook_fns:
-      val = key_mapping_hook_fns[flat_src_key](val)
+    val = _apply_mapping_hook(
+        val, flat_src_key, tgt_param.value.shape, key_mapping_hook_fns
+    )
 
     # Align shapes (padding/repeating as needed)
     val = _align_shape(val, tgt_param.value.shape, flat_src_key)
