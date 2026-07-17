@@ -5754,3 +5754,654 @@ This file tracks engineering changes made in this repository.
 ### Known risks / TODO
 
 - 如果后续更换 worker、TPU 拓扑或 venv，再单独补记录。
+
+---
+
+## 2026-07-17 - GSM8K GRPO reproduction guide review
+
+### Scope
+
+- Read `GSM8K_GRPO_Reproduction_Guide.md` and checked the documented GSM8K GRPO reproduction workflow against the current repository.
+- No code changes; this entry only records the review.
+
+### Changed files
+
+1. `develop.md`
+
+### Validation
+
+- `git branch --show-current`
+- `git rev-parse HEAD`
+- `git status --short`
+- `sed -n '1,240p' GSM8K_GRPO_Reproduction_Guide.md`
+- `sed -n '1,240p' ENV_SETUP.md`
+- Reviewed `my_example/run_baseline.sh`, `my_example/run_dbc_self_inf_batch.sh`, `my_example/run_dbc_self_inf_group.sh`, and `my_example/run_dbc_outlier_l2.sh`.
+
+### Validation results
+
+- Current commit is the guide's reference commit: `a448e1f72cd7eafd6e490d66ec1066b10c5a5906`.
+- Current local branch is `for_GRPO`, rather than the guide's branch name `my-changes`; the commit identity matches.
+- All four documented experiment launchers exist and consistently invoke `my_example/run_grpo_gemma.sh`.
+- The workflow expects `.venv_jax081`, JAX 0.8.1, and a TPU backend with four visible JAX devices for `--mesh-counts 4,1`.
+- No training was launched during this documentation review.
+
+### Known risks / TODO
+
+- Before running, verify TPU visibility, dependency versions, model/data credentials, and sufficient disk space.
+- Use unique checkpoint and metrics directories for every run; do not reuse a completed checkpoint when checking whether training starts normally.
+- Run a short smoke test before committing TPU time to all four full experiments.
+
+---
+
+## 2026-07-17 - GSM8K server JAX import failure diagnosis
+
+### Scope
+
+- Diagnosed `ModuleNotFoundError: No module named 'jax'` after activating `.venv_jax081` on the TPU worker.
+- Clarified that the `for_GRPO` branch is a user-owned copy of the collaborator's reference commit and is suitable for reproduction.
+- No experiment code changes; this entry only records the diagnosis.
+
+### Changed files
+
+1. `develop.md`
+
+### Validation
+
+- Reviewed the dependency declarations in `pyproject.toml`.
+- Reviewed the virtual-environment and JAX installation instructions in `ENV_SETUP.md`.
+- Reviewed `.gitignore` rules for virtual environments.
+
+### Validation results
+
+- Git branches and clones carry repository files, but do not carry packages installed in a Python virtual environment.
+- `jax[tpu]>=0.6.0,!=0.7.2,<=0.8.1` is declared in the `prod` optional dependency group.
+- The `dev` optional dependency group is empty, so `pip install -e ".[dev]"` alone does not install JAX.
+- The exception occurs before TPU discovery; it proves only that JAX is absent from the active interpreter.
+- The previously used DTV-PPO environment is separate unless that exact environment is activated or deliberately reused.
+
+### Known risks / TODO
+
+- Confirm that `python` and `pip` both resolve inside `.venv_jax081` before installing.
+- Install the TPU-compatible JAX 0.8.1 build and the project dependencies, then verify `backend=tpu` and four visible devices.
+- If TPU detection fails after JAX imports successfully, separately inspect `/dev/accel*`, libtpu initialization, and TPU VM configuration.
+
+---
+
+## 2026-07-17 - TPU device discovery hang diagnosis
+
+### Scope
+
+- Interpreted the server output after JAX 0.8.1 installation: `/dev/accel*` is absent and JAX TPU client initialization hangs until interrupted.
+- Accounted for the previously working DTV-PPO environment at `/home/jason_chia925_gmail_com/.venvs/PPO311` as a control environment.
+- No experiment code changes; this entry only records the diagnosis.
+
+### Changed files
+
+1. `develop.md`
+
+### Validation
+
+- Compared the reported traceback with JAX TPU backend initialization behavior.
+- Consulted the current Google Cloud TPU JAX troubleshooting, TPU FAQ, TPU runtime, and JAX slice documentation.
+
+### Validation results
+
+- JAX 0.8.1 imports successfully, so Python package installation is no longer the blocker.
+- `ls: cannot access '/dev/accel*': No such file or directory` is not a Unix permission-denied result; `sudo` alone is therefore not the likely fix.
+- The traceback ends in TPU client creation only because the user interrupted a hanging initialization; it does not establish a Python-code failure.
+- A TPU slice can also make `jax.device_count()` wait for other hosts, so the resource topology and whether all workers must participate need to be confirmed.
+- Testing the same bounded JAX probe in `PPO311` will distinguish a machine/resource problem from a new-environment compatibility problem.
+
+### Known risks / TODO
+
+- Confirm whether `PPO311` can still see TPU devices on this exact worker.
+- Check `tpu-info`, PCI/device nodes, TPU-related environment variables, active TPU processes, TPU logs, and the Cloud resource READY/topology state.
+- Do not restart TPU services or the VM until the read-only checks identify the resource type and likely failure mode.
+
+---
+
+## 2026-07-17 - TPU topology confirmed with PPO311 control environment
+
+### Scope
+
+- Reviewed the attached server diagnostics from the known-good `PPO311` environment.
+- Determined the TPU topology and narrowed the new environment failure to its JAX/libtpu software stack.
+- No experiment code changes; this entry only records the diagnosis.
+
+### Changed files
+
+1. `develop.md`
+
+### Validation
+
+- Reviewed the attached output for JAX device discovery, package versions, PCI devices, `/dev/vfio`, TPU agents, and running processes.
+- Cross-checked current Google Cloud TPU and libtpu compatibility documentation.
+
+### Validation results
+
+- The worker is a single-host `v5p-8` resource (`ACCELERATOR_TYPE=v5p-8`, `WORKER_ID=0`) with four local TPU devices.
+- `PPO311` successfully initializes the TPU with `jax==0.10.2`, `jaxlib==0.10.2`, and `libtpu==0.0.42.1`.
+- Four Google accelerator PCI functions and `/dev/vfio` are present; absence of `/dev/accel*` is not evidence of failure on this VM.
+- The TPU hardware, runtime, user permissions, and single-host topology are therefore not the blocker.
+- The remaining likely difference is the exact `jax`, `jaxlib`, and `libtpu` package set in `.venv_jax081`.
+
+### Known risks / TODO
+
+- Capture `pip show` and `pip check` output from `.venv_jax081` before changing packages.
+- Avoid switching the Tunix experiment directly to JAX 0.10.2 because the repository declares JAX `<=0.8.1` and compatibility has not been validated.
+- If testing a newer libtpu with JAX 0.8.1, do so only in `.venv_jax081` and retain the known-good PPO311 environment unchanged.
+
+---
+
+## 2026-07-17 - GSM8K JAX 0.8.1 TPU environment validated
+
+### Scope
+
+- Reviewed the final dependency and TPU discovery output from `.venv_jax081`.
+- Confirmed that no libtpu replacement is needed before beginning the GSM8K smoke test.
+- No experiment code changes; this entry only records the environment validation.
+
+### Changed files
+
+1. `develop.md`
+
+### Validation
+
+- `python -m pip show jax jaxlib libtpu`
+- `python -m pip check`
+- Bounded JAX TPU probe using `timeout 30s`.
+
+### Validation results
+
+- `.venv_jax081` contains `jax==0.8.1`, `jaxlib==0.8.1`, and `libtpu==0.0.30`.
+- `pip check` reports no broken requirements.
+- JAX initializes the `tpu` backend and reports four local `TpuDevice` instances on process 0.
+- The environment now satisfies the launcher's `--mesh-counts 4,1` device requirement.
+- No package change is warranted; the proposed libtpu 0.0.42.1 experiment was not performed.
+
+### Known risks / TODO
+
+- The earlier one-off TPU initialization hang may have been transient startup latency or temporary runtime contention; retain bounded probes if it recurs.
+- Before a full experiment, validate imports, credentials, disk capacity, and launch a short baseline smoke test with fresh metrics and checkpoint directories.
+- Do not run PPO and GSM8K GRPO concurrently because both workloads may attempt to claim the same four TPU devices.
+
+---
+
+## 2026-07-17 - GSM8K credential-file check interpretation
+
+### Scope
+
+- Explained the meaning and impact of a missing `my_example/.env` file for the default GSM8K launcher.
+- Checked the launcher's actual data source and authentication-variable usage.
+- No experiment code changes; this entry only records the review.
+
+### Changed files
+
+1. `develop.md`
+
+### Validation
+
+- Reviewed `my_example/run_grpo_gemma.sh`, `my_example/auth.py`, `my_example/data.py`, and `my_example/model.py`.
+
+### Validation results
+
+- `my_example/.env missing` means only that the optional local shell environment file does not exist.
+- The default launcher uses TFDS (`--source tfds`), not Kaggle, so `KAGGLE_USERNAME` and `KAGGLE_KEY` are not required for this default command.
+- The launcher downloads `google/gemma-3-1b-it` from Hugging Face and reads `HF_TOKEN` or `HUGGINGFACE_TOKEN`; a token or an existing authenticated/cache state may therefore be required.
+- WandB is disabled by the default launcher, so `WANDB_API_KEY` is not required.
+- The environment and TPU import checks passed; the root filesystem currently has approximately 25 GB free.
+
+### Known risks / TODO
+
+- Verify Hugging Face authentication and acceptance of the gated Gemma model terms without printing the token.
+- Verify that the GCS tokenizer path is readable and that enough disk remains for the model, dataset, checkpoints, and logs.
+- Keep secrets out of Git, terminal transcripts, and chat messages; `my_example/.env` is intended to remain local.
+
+---
+
+## 2026-07-17 - Hugging Face token permission guidance
+
+### Scope
+
+- Clarified token recovery and minimum permissions needed to download the gated Gemma model for GSM8K reproduction.
+- No experiment code changes; this entry only records credential guidance.
+
+### Changed files
+
+1. `develop.md`
+
+### Validation
+
+- Consulted the current official Hugging Face user-token, authentication, and gated-model documentation.
+
+### Validation results
+
+- If the full secret value of an existing token was not retained and the UI exposes only its name, a new token should be created rather than attempting to recover the old secret.
+- Downloading `google/gemma-3-1b-it` requires only read access; write permission is unnecessary.
+- A fine-grained token restricted to `google/gemma-3-1b-it` is the least-privilege option; a general read token is the simpler acceptable alternative.
+- Gated-model access is granted to the individual Hugging Face account, so that same account must first accept/request access to the Gemma repository in the browser.
+
+### Known risks / TODO
+
+- Store the newly displayed `hf_...` secret immediately and do not expose it in chat, screenshots, shell history, or Git.
+- Verify authentication with `hf auth whoami` and a small authorized model-file download before launching training.
+
+---
+
+## 2026-07-17 - Local `.env` loading clarification
+
+### Scope
+
+- Explained why `HF_TOKEN` is absent from the current shell even though `my_example/.env` exists.
+- No experiment code changes; this entry only records credential-loading guidance.
+
+### Changed files
+
+1. `develop.md`
+
+### Validation
+
+- Rechecked the environment-loading block at the beginning of `my_example/run_grpo_gemma.sh`.
+
+### Validation results
+
+- Creating `my_example/.env` does not automatically export its variables into an already-running interactive shell.
+- `run_grpo_gemma.sh` sources the file with `set -a`, so a correctly formatted `HF_TOKEN=hf_...` entry will be exported for the Python process when the launcher runs.
+- A pre-source interactive-shell check is therefore expected to report that `HF_TOKEN` is unset.
+
+### Known risks / TODO
+
+- Validate `.env` shell syntax and variable presence without printing the secret.
+- Test authenticated access to `google/gemma-3-1b-it/config.json` before starting the full training run.
+
+---
+
+## 2026-07-17 - Gemma gated-repository 403 diagnosis
+
+### Scope
+
+- Interpreted the Hugging Face `GatedRepoError` returned for `google/gemma-3-1b-it/config.json`.
+- Clarified that model authorization is account-scoped rather than server-scoped.
+- No experiment code changes; this entry only records access guidance.
+
+### Changed files
+
+1. `develop.md`
+
+### Validation
+
+- Reviewed the reported Hugging Face HTTP 403 traceback and its explicit authorization message.
+- Rechecked the official Hugging Face gated-model access workflow.
+
+### Validation results
+
+- Network connectivity and the download code path reached Hugging Face successfully.
+- Hugging Face rejected the authenticated account because it is not in the authorized list for `google/gemma-3-1b-it`.
+- Moving to a colleague's server is not required; the user must request/accept access in the browser using the same account that issued the token.
+- Once access is granted, the existing token may work if it has general read access; a repository-scoped fine-grained token may need its resource scope updated or a new token created.
+
+### Known risks / TODO
+
+- Do not use or request a colleague's personal token; gated-model authorization and license acceptance are individual-account matters.
+- Repeat the small `config.json` download test after approval before starting training.
+
+---
+
+## 2026-07-17 - Gemma gated access validated
+
+### Scope
+
+- Recorded successful authenticated access to `google/gemma-3-1b-it` from the TPU worker.
+- No experiment code changes; this entry only records the validation result.
+
+### Changed files
+
+1. `develop.md`
+
+### Validation
+
+- Loaded `my_example/.env` into the shell.
+- Downloaded `google/gemma-3-1b-it/config.json` with `huggingface_hub.hf_hub_download` and `HF_TOKEN`.
+
+### Validation results
+
+- The request completed successfully and cached `config.json` under the user's Hugging Face cache.
+- The token is valid, the account has accepted/received Gemma gated access, and the worker can reach Hugging Face.
+- Hugging Face model authorization is no longer a blocker for the GSM8K experiment.
+
+### Known risks / TODO
+
+- A successful small-file test does not yet prove that the full model download will fit in the approximately 25 GB of remaining root-disk space.
+- Proceed with a short baseline smoke run using fresh checkpoint and metrics directories before launching the complete experiment matrix.
+
+---
+
+## 2026-07-17 - GSM8K baseline smoke command review
+
+### Scope
+
+- Reviewed the guide, baseline wrapper, launcher argument ordering, dataset splitting, max-step calculation, checkpoint configuration, and post-train restore path.
+- Derived a one-step baseline smoke command without changing experiment code or scripts.
+- No experiment code changes; this entry only records the review.
+
+### Changed files
+
+1. `develop.md`
+
+### Validation
+
+- Reviewed `GSM8K_GRPO_Reproduction_Guide.md`.
+- Reviewed `my_example/run_baseline.sh`, `my_example/run_grpo_gemma.sh`, `my_example/config.py`, `my_example/main.py`, and `my_example/train.py`.
+- Confirmed the CLI help output supplied from the TPU worker.
+
+### Validation results
+
+- The existing scripts are the intended entrypoints; no new launcher is necessary.
+- User arguments occur after launcher defaults, so duplicate argparse options are safely overridden by the final user-provided values.
+- With `train_micro_batch_size=4`, `max_train_examples=8`, `train_fraction=0.9`, and one epoch, the effective training split contains one batch and produces `max_steps=1`.
+- `save_interval_steps=1` exercises checkpoint save, and retaining post-train evaluation exercises the explicit Orbax restore path that previously failed around WandB monitoring.
+- `--num-test-batches 1` assumes a default test micro-batch size of 32 in the compatibility layer; explicitly passing `--test-micro-batch-size 1` makes this smoke evaluate one example.
+- The Grain jaxlib-extension warning concerns optional multiprocess worker profiling and is non-fatal for this launcher.
+
+### Known risks / TODO
+
+- The first smoke run still needs to download the full model, tokenizer, and TFDS data, so initialization may be much longer than the single training step.
+- Monitor disk usage because only about 25 GB was free before the model/checkpoint download.
+- Treat the smoke as successful only if training completes, checkpoint restore completes, post-train evaluation completes, and the wrapper exits with status 0.
+
+---
+
+## 2026-07-17 - First GSM8K baseline smoke failure diagnosis
+
+### Scope
+
+- Reviewed the attached output from the one-step baseline smoke run.
+- Identified a missing environment dependency during TFDS GSM8K preparation.
+- No experiment code changes; this entry only records the diagnosis.
+
+### Changed files
+
+1. `develop.md`
+
+### Validation
+
+- Read the complete attached traceback from `run_baseline.sh` through `tfds.data_source`.
+- Mapped the failure to TFDS/etils importing the backport module `importlib_resources`.
+
+### Validation results
+
+- The run failed before model loading, TPU compilation, training, checkpoint save, or checkpoint restore.
+- The fatal error is `ModuleNotFoundError: No module named 'importlib_resources'`.
+- The Grain profiling warning is unrelated and non-fatal.
+- The `data/train/gsm8k/1.0.0 has no dataset_info.json` warning indicates an absent or incomplete prepared TFDS dataset, which is expected around a failed first preparation attempt.
+- Installing the missing `importlib_resources` package in `.venv_jax081` is the minimal next action; no repository code change is warranted.
+
+### Known risks / TODO
+
+- After installing the package, retry with fresh metrics/checkpoint directories while reusing the dataset directory.
+- If TFDS then reports corruption or refuses to prepare the incomplete directory, move that specific GSM8K version directory aside before retrying rather than deleting broad data paths.
+
+---
+
+## 2026-07-17 - GSM8K run and log output-path review
+
+### Scope
+
+- Mapped the existing launcher's model, checkpoint, TensorBoard, stdout, and exported-result output controls.
+- Derived a command layout that stores run artifacts under repository-root `runs/` and logs under repository-root `logs/` without modifying scripts.
+- No experiment code changes; this entry only records the review.
+
+### Changed files
+
+1. `develop.md`
+
+### Validation
+
+- Reviewed the post-train save section in `my_example/main.py`.
+- Reviewed output-path handling in `my_example/run_baseline.sh` and `my_example/run_grpo_gemma.sh`.
+- Checked `.gitignore` coverage for root `runs/` and `logs/` directories.
+
+### Validation results
+
+- `--checkpoint-root` controls Orbax training checkpoints.
+- `--output-dir` controls the final merged LoRA model directory and is destructively recreated by the program, so it must be unique per run.
+- `--metrics-log-dir` controls TensorBoard event files.
+- `TUNIX_MY_RESULT_DIR` controls wrapper stdout logs and exported summaries/plots.
+- Root `runs/` and `logs/` are not currently ignored by Git.
+
+### Known risks / TODO
+
+- Do not stage or commit model/checkpoint/log artifacts from `runs/` or `logs/`.
+- Keep timestamped unique run directories because an existing `--output-dir` is removed before saving the merged model.
+- Continue monitoring the approximately 25 GB free root filesystem when storing artifacts inside the repository filesystem.
+
+---
+
+## 2026-07-17 - Second GSM8K baseline smoke failure diagnosis
+
+### Scope
+
+- Reviewed the next smoke-run traceback after TFDS dependency repair.
+- Identified a missing GCS filesystem plugin while loading the tokenizer.
+- No experiment code changes; this entry only records the diagnosis.
+
+### Changed files
+
+1. `develop.md`
+
+### Validation
+
+- Traced the reported failure from `Tokenizer` through `etils.epath`, `fsspec`, and the `gcs` filesystem registry.
+- Rechecked the repository's `ENV_SETUP.md` GCS tokenizer dependency note.
+
+### Validation results
+
+- The Gemma model download completed successfully and is now cached locally.
+- Mesh creation reported `(4, 1)` successfully.
+- The fatal error is `ImportError: Please install gcsfs to access Google Storage` while reading `gs://gemma-data/tokenizers/tokenizer_gemma3.model`.
+- `pip check` can still pass because `gcsfs` is an optional runtime plugin not represented as a broken installed-package requirement.
+- The Qwix `rngs` message is a warning and did not cause this process termination.
+
+### Known risks / TODO
+
+- Prefer a `gcsfs` version matching the installed `fsspec` version to minimize dependency churn and avoid a `datasets`/`fsspec` conflict.
+- Run `pip check` again after installation and perform a direct tokenizer-path read test before rerunning training.
+- Reuse the cached model but use fresh run/log paths for the next smoke attempt.
+
+---
+
+## 2026-07-17 - Third GSM8K baseline smoke failure diagnosis
+
+### Scope
+
+- Reviewed the tokenizer initialization failure after GCS access was repaired.
+- Identified an installed SentencePiece Python API incompatibility with the reference commit.
+- No experiment code changes; this entry only records the diagnosis.
+
+### Changed files
+
+1. `develop.md`
+
+### Validation
+
+- Reviewed `tunix/generate/tokenizer_adapter.py` around tokenizer construction.
+- Compared the repository call to the current SentencePiece package/release API information.
+
+### Validation results
+
+- TFDS configuration is correct for the one-step smoke (`max_steps=1`, one train batch, one validation batch, one test example).
+- Model cache lookup, GCS tokenizer byte loading, and mesh creation succeeded.
+- The fatal call is `SentencePieceProcessor.SetEncodeExtraOptions`, which is absent from the installed processor object.
+- The repository has an unpinned `sentencepiece` dependency and expects the legacy CamelCase API.
+- Pinning `sentencepiece==0.2.0` in the virtual environment is the minimal compatibility experiment; changing baseline tokenizer code is not yet warranted.
+
+### Known risks / TODO
+
+- Record the currently installed SentencePiece version and exposed method names before changing it.
+- After pinning, directly instantiate the repository Tokenizer and encode a short string before restarting training.
+- Continue treating the Qwix LoRA RNG message as a warning unless a later failure demonstrates that it affects initialization or training.
+
+---
+
+## 2026-07-17 - Post-train smoke evaluation cache-size diagnosis
+
+### Scope
+
+- Reviewed the smoke failure after one training step completed.
+- Traced the post-train sampling length and cache-size calculations.
+- No experiment code changes; this entry only records the diagnosis.
+
+### Changed files
+
+1. `develop.md`
+
+### Validation
+
+- Reviewed `my_example/main.py`, `my_example/eval.py`, `my_example/generate.py`, and `tunix/generate/sampler.py`.
+- Compared the smoke overrides with launcher/parser defaults.
+
+### Validation results
+
+- The one-step baseline training completed successfully.
+- Execution reached `main.py:290`, which is after the explicit checkpoint restore at lines 252-276; checkpoint save and post-train restore therefore completed without the prior WandB/Orbax failure.
+- `SamplerWrapper.generate` defaults `max_generation_steps` to 768 and `evaluate` does not override it.
+- The smoke's `--total-generation-steps 64` built a cache of `256 + 64 + 256 = 576`, while post-train sampling required a power-of-two padded prompt of 128 plus 768 generation steps, totaling 896.
+- The formal launcher default uses 768 generation steps and creates a larger cache, so this specific error is caused by the shortened smoke override rather than the documented baseline command.
+
+### Known risks / TODO
+
+- For a fast clean-exit smoke, skip post-train evaluation while retaining the checkpoint restore and merged-model save path.
+- For an end-to-end evaluation smoke, do not reduce `--total-generation-steps` below the standalone evaluator's fixed 768-step request unless the sampler/evaluator interface is changed in a separate branch.
+- Do not modify the baseline command or shared sampler behavior solely to accommodate the artificial 64-token smoke override.
+
+---
+
+## 2026-07-17 - Merged LoRA safetensors export failure diagnosis
+
+### Scope
+
+- Reviewed the failure after training, checkpoint restore, and the start of merged-model export.
+- Confirmed a JAX-to-NumPy type conversion defect in the shared safetensors saver.
+- No experiment code changes; this entry only records the diagnosis.
+
+### Changed files
+
+1. `develop.md`
+
+### Validation
+
+- Reviewed `my_example/model.py`, `tunix/models/gemma3/params.py`, and `tunix/models/safetensors_saver.py`.
+- Searched saver implementations and tests for `np.asarray`, `jax.device_get`, and safetensors NumPy serialization.
+
+### Validation results
+
+- Training completed and execution entered final merged-LoRA export.
+- `safe_np.load_file` produces NumPy arrays, but `_apply_lora_delta` creates the LoRA delta with `jax.numpy` and augmented assignment can replace a state-dict value with `jaxlib._jax.ArrayImpl`.
+- `safetensors.numpy.save_file` requires NumPy-compatible arrays and accesses `.ctypes`; JAX arrays do not expose that NumPy attribute.
+- The failure is therefore a repository code compatibility defect, not a missing dependency, TPU problem, or smoke-only length setting.
+- The Orbax training checkpoint remains the authoritative successful training artifact even though final merged-model export failed.
+
+### Known risks / TODO
+
+- The documented full baseline will likely encounter the same final export failure unless the saver conversion is fixed or merged export is bypassed.
+- Any fix should explicitly transfer updated tensors to host NumPy arrays before `safe_np.save_file` and should include a regression test for JAX LoRA deltas.
+- Respect the project constraint against altering protected baseline behavior; implement only after the user authorizes an appropriately scoped branch/fix.
+
+---
+
+## 2026-07-17 - Dependency-only workaround assessment for safetensors export
+
+### Scope
+
+- Assessed whether dependency pinning alone is a sound solution for the JAX-array failure in the NumPy safetensors saver.
+- No experiment code changes; this entry only records the assessment.
+
+### Changed files
+
+1. `develop.md`
+
+### Validation
+
+- Rechecked project JAX constraints and the shared saver implementation.
+- Consulted the official safetensors NumPy API contract and JAX host-transfer documentation.
+
+### Validation results
+
+- `safetensors.numpy.save_file` explicitly requires a dictionary of `numpy.ndarray` values.
+- JAX `jnp.asarray` and JAX `astype` produce JAX arrays, while `jax.device_get` is the supported explicit device-to-host transfer.
+- No safetensors version can be relied on to make the NumPy backend accept arbitrary TPU-backed JAX arrays as NumPy arrays.
+- Older JAX/NumPy combinations might accidentally change mixed-array dispatch behavior, but relying on that would be fragile and would undermine the validated JAX 0.8.1 reproduction environment.
+- A small explicit conversion at the serialization boundary is the correct and version-stable solution.
+
+### Known risks / TODO
+
+- Do not downgrade JAX solely for export; it could invalidate TPU, Flax, Orbax, and Tunix compatibility already established by the smoke run.
+- If dependency archaeology is desired for exact historical reproduction, compare the collaborator's complete lockfile or `pip freeze`; absent that evidence, avoid speculative version changes.
+
+---
+
+## 2026-07-17 - Safetensors export fix-scope search
+
+### Scope
+
+- Performed a read-only scope search before modifying the merged-LoRA exporter.
+- Compared local call sites, model tests, and the current upstream Tunix implementation.
+- No experiment code changes; this entry only records the findings.
+
+### Changed files
+
+1. `develop.md`
+
+### Validation
+
+- Searched all local callers of `save_lora_merged_model_as_safetensors`, `_apply_lora_delta`, and `safe_np.save_file`.
+- Reviewed Gemma3, Qwen2, and Qwen3 LoRA merge tests and their shared test base.
+- Inspected the current `google/tunix` upstream `tunix/models/safetensors_saver.py`.
+
+### Validation results
+
+- The minimal production fix location is `tunix/models/safetensors_saver.py`, specifically `_apply_lora_delta` around lines 105-117.
+- `my_example/model.py` and `tunix/models/gemma3/params.py` only delegate to the shared saver and do not need modification.
+- GRPO, trainer, checkpoint, CLI, reward, and launcher files do not need modification.
+- The shared saver is also used by Gemma3, Qwen2, and Qwen3, so the conversion fix should be architecture-neutral.
+- Existing `test_save_lora_merged_model` coverage in `tunix/tests/lora_params_test_base.py` exercises the save operation; Gemma3-specific coverage is wired through `tests/models/gemma_all/gemma_params_test.py`.
+- Current upstream Tunix still performs the same JAX delta into a NumPy state followed by `safe_np.save_file`, so no upstream fix was found to cherry-pick.
+
+### Known risks / TODO
+
+- Keep the patch at the serialization boundary: explicitly transfer only the computed LoRA delta to host NumPy before updating `base_state`.
+- Validate both numerical merge correctness and serialized array types; run at least the Gemma3 LoRA merge test before repeating the TPU smoke export.
+- Do not touch protected `robust_trainer.py`, CLI structure, reward logic, or baseline launcher behavior.
+
+---
+
+## 2026-07-17 - Fix JAX LoRA delta conversion for safetensors export
+
+### Scope
+
+- Fixed merged-LoRA safetensors export by explicitly transferring the computed JAX delta to host NumPy before updating the NumPy state dictionary.
+- Kept the change limited to the shared serialization boundary; training, GRPO, checkpoint, reward, CLI, and launcher logic are unchanged.
+
+### Changed files
+
+1. `tunix/models/safetensors_saver.py`
+2. `develop.md`
+
+### Validation
+
+- `python3 -m py_compile tunix/models/safetensors_saver.py`
+- `git diff --check`
+- Attempted: `python3 -m pytest tests/models/gemma_all/gemma_params_test.py -q`
+
+### Validation results
+
+- Python syntax compilation passed.
+- Git whitespace validation passed.
+- The local Gemma3 test could not run because the host Python 3.13 environment does not have `pytest` installed (`No module named pytest`).
+- The patch now converts `combined_lora` with `np.asarray(jax.device_get(...))` before NumPy in-place addition, preserving `numpy.ndarray` values for `safetensors.numpy.save_file`.
+
+### Known risks / TODO
+
+- Run the existing Gemma3 LoRA merge test in the server's `.venv_jax081` environment if its test dependencies are installed.
+- Repeat the one-step TPU smoke export to confirm the merged model writes and reloads successfully with real sharded LoRA parameters.
+- The existing Qwix RNG warning remains outside this narrowly scoped serialization fix.
