@@ -45,6 +45,7 @@ from tunix.perf import trace as perf_trace
 from tunix.rl import reshard
 from tunix.rl import robust_trainer
 from tunix.rl import self_inf_trainer
+from tunix.rl import self_inf_loo_trainer
 from tunix.rl import trainer as rl_trainer
 from tunix.rl import utils as rl_utils
 from tunix.rl.inference import inference_worker
@@ -589,7 +590,14 @@ class RLCluster:
     actor_trainer_kwargs = {}
     dbc_variant = os.environ.get("TUNIX_DBC_VARIANT", "").strip().lower()
     if actor_config.use_dynamic_batch_curation and dbc_variant == "self_inf":
-      actor_trainer_cls = self_inf_trainer.SelfInfTrainer
+      use_self_inf_loo = os.environ.get(
+          "TUNIX_DBC_SELF_INF_LOO", ""
+      ).strip().lower() in ("1", "true", "yes", "on")
+      actor_trainer_cls = (
+          self_inf_loo_trainer.SelfInfLooTrainer
+          if use_self_inf_loo
+          else self_inf_trainer.SelfInfTrainer
+      )
       actor_trainer_kwargs["scope"] = os.environ.get(
           "TUNIX_DBC_SELF_INF_SCOPE", "batch"
       ).strip().lower()
@@ -599,12 +607,24 @@ class RLCluster:
         )
       except ValueError:
         actor_trainer_kwargs["num_generations"] = 0
-      logging.info(
-          "Dynamic batch curation enabled: using SelfInfTrainer"
-          " (scope=%s, num_generations=%s).",
-          actor_trainer_kwargs["scope"],
-          actor_trainer_kwargs["num_generations"],
-      )
+      if use_self_inf_loo:
+        actor_trainer_kwargs["min_keep_fraction"] = 0.25
+        actor_trainer_kwargs["decisions_path"] = os.environ.get(
+            "TUNIX_DBC_SELF_INF_DECISIONS_PATH"
+        )
+        logging.info(
+            "Dynamic batch curation enabled: using SelfInfLooTrainer"
+            " (scope=%s, num_generations=%s, min_keep_fraction=0.25).",
+            actor_trainer_kwargs["scope"],
+            actor_trainer_kwargs["num_generations"],
+        )
+      else:
+        logging.info(
+            "Dynamic batch curation enabled: using SelfInfTrainer"
+            " (scope=%s, num_generations=%s).",
+            actor_trainer_kwargs["scope"],
+            actor_trainer_kwargs["num_generations"],
+        )
     else:
       actor_trainer_cls = (
           robust_trainer.RobustTrainer

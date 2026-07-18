@@ -6405,3 +6405,438 @@ This file tracks engineering changes made in this repository.
 - Run the existing Gemma3 LoRA merge test in the server's `.venv_jax081` environment if its test dependencies are installed.
 - Repeat the one-step TPU smoke export to confirm the merged model writes and reloads successfully with real sharded LoRA parameters.
 - The existing Qwix RNG warning remains outside this narrowly scoped serialization fix.
+
+---
+
+## 2026-07-17 - Postprocessing dependency warning diagnosis
+
+### Scope
+
+- Reviewed the successful merged-model export followed by failures in optional result export and plotting helpers.
+- No experiment code changes; this entry only records the diagnosis and recovery commands.
+
+### Changed files
+
+1. `develop.md`
+
+### Validation
+
+- Reviewed `my_example/save_results_to_my_result.py` and `my_example/my result/plot_global_eval_rewards_sum.py` imports and CLI arguments.
+- Confirmed the reported command exit status and exported model file listing.
+
+### Validation results
+
+- The merged LoRA fix is validated on the TPU worker: `model.safetensors` was successfully written at approximately 1.9 GB with its support files.
+- The wrapper exited with status 0 as designed.
+- `tensorboard` is required only by the optional metrics-export helper, and Pillow (imported as `PIL`) is required by the optional overlay plot helper.
+- Both helper calls are guarded with `|| echo [warn]`, so their failures do not invalidate training, checkpoint restore, or model export.
+- Installing `tensorboard` and `Pillow` permits rerunning postprocessing without retraining.
+
+### Known risks / TODO
+
+- Run `pip check` after installing the two helper dependencies because TensorBoard may constrain protobuf-related packages.
+- A one-step smoke with skipped evaluation may not contain `global/eval/rewards/sum`; result export can legitimately skip that tag, and plotting may have no eligible series.
+- Add these helper packages to a reproducible environment specification later if the paper workflow depends on automatic CSV/plot generation.
+
+---
+
+## 2026-07-17 - Nohup end-to-end baseline smoke preparation
+
+### Scope
+
+- Interpreted the postprocessing output from a checkpoint-reuse/export-only run.
+- Prepared a fresh one-step nohup baseline smoke command that includes training-time validation, post-train evaluation, checkpoint restore, merged export, and result postprocessing.
+- No experiment code changes; this entry only records the run plan.
+
+### Changed files
+
+1. `develop.md`
+
+### Validation
+
+- Reviewed the reported TensorBoard scalar tags from the export-only run.
+- Rechecked smoke parameter interactions with max steps, checkpoint reuse, evaluation cadence, and standalone sampler cache sizing.
+
+### Validation results
+
+- The export-only run reused a step-1 checkpoint and skipped both pre/post evaluation, so the absence of training and evaluation result tags is expected.
+- `actor/train/skipped_samples` is DBC-specific and can legitimately be absent from a baseline run.
+- A fresh checkpoint plus `--eval-every-n-steps 1` should create training/evaluation metrics during the single training step.
+- Retaining post-train evaluation should produce parsable `post-train` accuracy text in stdout.
+- Omitting the artificial 64-token override restores the formal 768-step generation/cache relationship and avoids the previous 896-versus-576 cache failure.
+
+### Known risks / TODO
+
+- The end-to-end smoke is materially slower than the export-only check because it performs fresh rollout compilation, one validation rollout, and one post-train generation.
+- Confirm completion using the nohup exit-code file, process state, success markers, TensorBoard tags, and exported result files.
+
+---
+
+## 2026-07-17 - GSM8K baseline end-to-end smoke accepted
+
+### Scope
+
+- Reviewed the completed nohup end-to-end baseline smoke evidence and assessed readiness for the first formal GSM8K experiment.
+- No experiment code changes; this entry only records acceptance and the transition to the formal baseline run.
+
+### Changed files
+
+1. `develop.md`
+
+### Validation
+
+- Reviewed the nohup exit code, success markers, post-train accuracy, TensorBoard scalar tags, exported result files, and merged-model file listing supplied from the TPU worker.
+
+### Validation results
+
+- Nohup process completed with exit code 0.
+- One-step training, training-time validation, post-train evaluation, checkpoint save/restore, and merged safetensors export all completed.
+- Post-train single-example result was `num_correct=1/1`, `accuracy=100%`, `partial_accuracy=100%`, and `format_accuracy=0%`; this is a plumbing smoke result, not a paper-quality metric.
+- TensorBoard contains actor train/eval metrics plus global train/eval reward and completion metrics.
+- CSV, metadata JSON, stdout log, overlay PNG, and an approximately 1.9 GB merged model were generated successfully.
+- The environment and pipeline are ready for the documented formal GRPO baseline experiment.
+
+### Known risks / TODO
+
+- The formal baseline uses far more training data and the full evaluation set, so runtime and storage requirements are substantially larger than the smoke.
+- Check free disk space and save a package/environment snapshot inside the run directory before launch.
+- Run the formal baseline first and inspect its outputs before launching the three DBC variants, avoiding concurrent TPU jobs.
+
+---
+
+## 2026-07-18 - Formal GSM8K baseline completion-check procedure
+
+### Scope
+
+- Prepared a layered acceptance check for the completed formal baseline: process exit, configured/effective steps, errors, pre/post evaluation, checkpoint restore, merged model, TensorBoard metrics, and exported paper artifacts.
+- No experiment code changes; this entry only records the verification procedure.
+
+### Changed files
+
+1. `develop.md`
+
+### Validation
+
+- Reused the established timestamped `runs/gsm8k_baseline_full_*` and `logs/gsm8k_baseline_full_*` layout and the launcher's known success markers.
+
+### Validation results
+
+- A valid run should have exit code 0, `max_steps=691`, `Training complete`, pre/post evaluation output, a final actor checkpoint, successful merged-model export, and non-empty TensorBoard/result artifacts.
+- Error scanning must distinguish fatal tracebacks from expected warnings and DBC-only missing tags.
+
+### Known risks / TODO
+
+- Exit code 0 alone is insufficient if the wrong run directory is selected or an old completed checkpoint caused training to skip.
+- Compare config summary, progress/step metrics, checkpoint step, and wall-time metadata to prove the formal run actually trained.
+- Do not start the next DBC experiment until the baseline acceptance evidence is reviewed.
+
+---
+
+## 2026-07-18 - Formal GSM8K baseline accepted and terminology mapped
+
+### Scope
+
+- Reviewed the full formal baseline evidence and accepted the run for the GSM8K experiment series.
+- Recorded the terminology mapping: paper name `DTV`, laboratory name `DRPO`, and existing implementation/script name `DBC`.
+- No experiment code changes; this entry only records acceptance and naming conventions.
+
+### Changed files
+
+1. `develop.md`
+
+### Validation
+
+- Reviewed configuration/dataset summaries, pre/post evaluation, TensorBoard train/eval series, checkpoint steps and files, merged model readability, result artifacts, and reward CSV endpoints.
+
+### Validation results
+
+- Formal configuration was used: 3072 maximum training examples, 768 batches, 691 train batches, 77 validation batches, 1319 test examples, and 691 effective steps.
+- All 691 actor train loss/KL points and all 691 global train reward points were recorded.
+- Evaluation reward contains 22 points from step 0 through step 672, matching evaluation every 32 steps.
+- Accuracy improved from `623/1319 = 47.232752%` to `638/1319 = 48.369977%`, a gain of 15 correct answers or 1.137225 percentage points.
+- Partial accuracy improved from `49.962092%` to `51.250948%`; format accuracy improved from `4.169826%` to `79.681577%`.
+- Global eval reward sum increased from `-0.963474` at step 0 to `2.886364` at step 672.
+- Checkpoints exist at steps 500 and 691; the final step-691 checkpoint is populated.
+- The merged model is approximately 1.9 GB, is readable by safetensors, and contains 340 tensors.
+- Stdout, evaluation metadata, reward CSV/metadata, and overlay PNG were generated.
+- Baseline is accepted as valid and the first DTV/DRPO variant may proceed.
+
+### Terminology mapping
+
+- Paper/reporting: `DTV`.
+- Laboratory discussion: `DRPO`.
+- Repository implementation, CLI flags, and launchers: retain `DBC` to avoid unnecessary code changes.
+
+### Known risks / TODO
+
+- The 1.137-point final accuracy gain is a single run and should not yet be presented as a statistically robust effect without the planned variant runs and, if required, multiple seeds.
+- Preserve the complete baseline run/log directories and environment snapshot as the comparison reference.
+- Keep DBC names in commands and raw artifact metadata, while documenting the DTV/DRPO alias in paper tables and experiment notes.
+
+---
+
+## 2026-07-18 - First DTV/DRPO variant launch preparation
+
+### Scope
+
+- Confirmed the documented GSM8K experiment matrix and prepared the next full run: batch-level self-influence curation.
+- Retained the repository's DBC launcher/flag naming while using DTV terminology in run directories.
+- No experiment code changes; this entry only records the launch plan.
+
+### Changed files
+
+1. `develop.md`
+
+### Validation
+
+- Rechecked `GSM8K_GRPO_Reproduction_Guide.md` and `my_example/run_dbc_self_inf_batch.sh`.
+
+### Validation results
+
+- The guide defines four runs total: baseline, self-influence batch-level, self-influence GRPO-group-level, and L2 outlier curation.
+- Baseline is complete, leaving three DTV/DRPO variants.
+- The next launcher is `my_example/run_dbc_self_inf_batch.sh` with `TUNIX_REWARD_MODE=accuracy`.
+- Output-path arguments and `TUNIX_MY_RESULT_DIR` can be added without altering the launcher's algorithm defaults.
+
+### Known risks / TODO
+
+- Run variants sequentially because each claims all four TPU devices.
+- Confirm free disk space before each run; every successful run exports another approximately 1.9 GB merged model plus checkpoints and logs.
+- Apply the same acceptance checks used for baseline before moving to the group-level variant.
+
+---
+
+## 2026-07-18 - Self-influence batch result evaluation procedure
+
+### Scope
+
+- Prepared technical acceptance and baseline-comparison checks for the completed DTV/DRPO self-influence batch run.
+- Included checks proving that the self-influence filter actually activated, not merely that training completed.
+- No experiment code changes; this entry only records the evaluation procedure.
+
+### Changed files
+
+1. `develop.md`
+
+### Validation
+
+- Reviewed `tunix/rl/self_inf_trainer.py`, `tunix/rl/rl_cluster.py`, the batch launcher, and result-export conventions.
+
+### Validation results
+
+- The self-influence trainer exposes `skipped_samples`, `self_inf_dot_mean`, `self_inf_dot_std`, and `self_inf_kept_fraction` through training metrics.
+- A valid variant must match the baseline data/step configuration, finish at step 691, save/restore checkpoints, export a readable model, and produce evaluation artifacts.
+- Mechanism activation requires SelfInfTrainer batch scope plus nontrivial filtering metrics; a run with all-zero skipped samples and kept fraction always 1 would not demonstrate DTV curation.
+- Outcome quality should compare pre/post accuracy, final evaluation reward, reward trajectory, KL/loss stability, and filtering intensity against the accepted baseline.
+
+### Known risks / TODO
+
+- A single run can rank below baseline due to stochasticity; it is evidence for this seed/run, not a statistically robust conclusion.
+- Extreme filtering (kept fraction near zero) can make updates unstable even if a final metric happens to improve.
+- Do not launch the group variant until the batch run's technical validity and mechanism activation are both confirmed.
+
+---
+
+## 2026-07-18 - Self-influence batch outcome accepted and group variant prepared
+
+### Scope
+
+- Compared the completed batch-level DTV/DRPO run against the accepted baseline using identical pre-train evaluation and 22-point eval reward series.
+- Prepared the next documented comparison: GRPO-group-level self-influence curation.
+- No experiment code changes; this entry only records the result and launch transition.
+
+### Changed files
+
+1. `develop.md`
+
+### Validation
+
+- Reviewed baseline and batch-level pre/post accuracy, correct counts, format accuracy, and reward CSV summary statistics supplied from the TPU worker.
+
+### Validation results
+
+- Both runs have the same pre-train result: `623/1319`, `47.232752%`, supporting a direct paired configuration comparison.
+- Batch-level DTV reached `711/1319 = 53.904473%`, versus baseline `638/1319 = 48.369977%`.
+- Batch-level DTV exceeds baseline by 73 correct answers and 5.534496 percentage points post-train.
+- Pre-to-post gain was `+6.671721` points for batch DTV versus `+1.137225` for baseline.
+- Final eval reward was `3.451299` versus `2.886364` (+0.564935); mean across 22 eval points was `2.534792` versus `2.423259` (+0.111533).
+- Batch DTV format accuracy was `73.161486%`, lower than baseline `79.681577%` by 6.520091 points; this tradeoff must be reported alongside the accuracy gain.
+- The batch-level run is accepted as clearly stronger than baseline for this single run.
+
+### Known risks / TODO
+
+- Do not describe a single-run result as statistically significant without repeated seeds or an appropriate paired statistical analysis.
+- Preserve mechanism-activation metrics (`skipped_samples`, kept fraction, dot statistics) for the eventual methods table even though outcome metrics are already favorable.
+- Run the group-level method next, then the L2-outlier method, using the same baseline comparison protocol.
+
+---
+
+## 2026-07-18 - Group-level self-influence startup-log interpretation
+
+### Scope
+
+- Interpreted the absence of the `scope=group` trainer log during the first minute of the group-level run.
+- No experiment code changes; this entry only records the runtime-state explanation and verification method.
+
+### Changed files
+
+1. `develop.md`
+
+### Validation
+
+- Rechecked `my_example/main.py` execution order and `tunix/rl/rl_cluster.py` trainer-selection logging.
+
+### Validation results
+
+- The run is currently in the pre-train evaluation (`3/1319`), before `RLCluster` and `SelfInfTrainer` construction.
+- The `scope=group` log is emitted only after the complete pre-train evaluation finishes and the trainer is initialized.
+- The outer nohup bash process can show 0% CPU while its Python child performs model evaluation.
+- Immediate launch-mode verification should inspect the Python child command line for `--use-dbc-self-inf-group`.
+
+### Known risks / TODO
+
+- Do not terminate or restart solely because the trainer-selection line is absent during pre-train evaluation.
+- Once pre-train evaluation completes, verify the explicit `SelfInfTrainer (scope=group, num_generations=4)` log before accepting that training phase configuration.
+
+---
+
+## 2026-07-17 - Export-only smoke metrics interpretation
+
+### Scope
+
+- Interpreted the result export output after installing TensorBoard and Pillow.
+- Distinguished checkpoint/model-export validation from an evaluation-metrics smoke run.
+- No experiment code changes; this entry only records the interpretation.
+
+### Changed files
+
+1. `develop.md`
+
+### Validation
+
+- Reviewed the reported installed package versions, `pip check`, event file path, stdout path, and result-export messages.
+- Rechecked the flags used for the export-only rerun and the metrics tags exported by the helper.
+
+### Validation results
+
+- `tensorboard==2.21.0` and `Pillow==12.3.0` installed successfully, imports pass, and `pip check` reports no broken requirements.
+- The export-only rerun reused a checkpoint already at `max_steps=1`, so it performed no new training step.
+- Both pre- and post-train evaluation were explicitly skipped, so `no eval metrics found` is expected.
+- `global/eval/rewards/sum` is absent because no evaluation ran; `actor/train/skipped_samples` is a DBC-specific signal and need not exist in a baseline run.
+- The existing event file proves logging initialization, but this particular run is not suitable for accuracy/reward validation.
+
+### Known risks / TODO
+
+- Run a fresh one-step end-to-end baseline with a new checkpoint root, `eval_every_n_steps=1`, post-train evaluation enabled, and the default 768 generation length.
+- Do not reuse a completed checkpoint when validating metrics, or training and its scheduled evaluation will be skipped.
+- Evaluate only one test example for smoke purposes; do not interpret its accuracy as a paper result.
+
+---
+
+## 2026-07-18 - GRPO self-influence scope and leave-one-out feasibility analysis
+
+### Scope
+
+- Analyzed the mathematical and implementation differences between batch-level and group-level self-influence DTV in the current GRPO pipeline.
+- Assessed the feasibility and experimental risks of adding batch-level and group-level DTV leave-one-out scoring.
+- No code changes; this entry records analysis only.
+
+### Changed files
+
+1. `develop.md`
+
+### Validation
+
+- Read the current self-influence score implementation, GRPO sample-repeat/group construction, runtime trainer selection, configuration mapping, and launcher defaults.
+
+### Validation results
+
+- With the current defaults, one actor step contains 4 prompts times 4 generations, producing 16 per-completion gradients arranged as four contiguous prompt groups.
+- Batch scope compares each completion gradient with the mean of all 16 completion gradients.
+- Group scope compares each completion gradient only with the mean of the four generations belonging to the same prompt.
+- Batch and group LOO scores can be computed from a total/group gradient sum minus the current sample gradient, without additional gradient evaluations.
+- The core score change is locally small, but integration and scientific validation are medium difficulty because LOO can filter substantially more samples and requires explicit handling of singleton, malformed-group, and all-filtered cases.
+
+### Known risks / TODO
+
+- Preserve the existing batch/group behavior exactly and expose LOO only through new branches; do not modify the CLI argument structure.
+- Define whether the LOO normalization uses `N-1`/`G-1` or preserves the original `N`/`G` scale. The zero-threshold mask is unchanged by this denominator choice, but logged scores and nonzero thresholds are not.
+- Avoid silently falling back from malformed group LOO to batch LOO in paper experiments; fail clearly or emit an unmistakable configuration warning.
+- Add exact synthetic-gradient tests and one-step TPU smoke tests before full LOO runs.
+
+---
+
+## 2026-07-18 - DTV LOO retention-cap and observability requirements
+
+### Scope
+
+- Refined the proposed GRPO DTV LOO design based on the established DPO/PPO protocol.
+- No training code changes; this entry records requirements only.
+
+### Changed files
+
+1. `develop.md`
+
+### Validation
+
+- Checked the requested strict leave-one-out normalization and minimum-retention semantics against the current 4-prompts-by-4-generations GRPO batch layout.
+
+### Validation results
+
+- LOO must use the strict `N-1` definition for batch scope and `G-1` for group scope.
+- Initial threshold selection keeps samples with nonnegative LOO score.
+- A 75% filtering cap requires retaining at least `ceil(0.25 * population_size)` highest-score samples, implementable with vectorized top-k/rank selection and no Python sample loop.
+- With current defaults, batch LOO retains at least 4 of 16 completions; group LOO should retain at least 1 of 4 completions in each prompt group to preserve group-level semantics.
+- Existing methods and launchers must remain unchanged; LOO is exposed only through new `_loo` branches and independent launch scripts.
+
+### Known risks / TODO
+
+- Specify metric names and normalization explicitly so ordinary-DTV self/cross decomposition is not confused with the strict LOO score scale.
+- Preserve aggregate TensorBoard metrics and add structured per-step/per-sample decision records containing score, terms, selection reason, group/generation indices, filtered counts, and optimizer-update status.
+- Ensure the retention-cap implementation has deterministic tie handling and does not accidentally retain more or fewer samples at equal cutoff scores.
+
+---
+
+## 2026-07-18 - Add independent batch/group DTV LOO methods
+
+### Scope
+
+- Added strict leave-one-out self-influence curation as two opt-in GRPO methods: batch LOO and prompt-group LOO.
+- Preserved all existing methods, CLI arguments, trainers, and launch scripts.
+- Added a 25% minimum-retention cap; group LOO applies the cap independently within each prompt group.
+- Added aggregate TensorBoard metrics and per-step JSONL selection records.
+
+### Changed files
+
+1. `tunix/rl/self_inf_loo_trainer.py` (new)
+2. `tunix/rl/rl_cluster.py`
+3. `tunix/rl/grpo/grpo_learner.py`
+4. `my_example/run_dbc_self_inf_batch_loo.sh` (new)
+5. `my_example/run_dbc_self_inf_group_loo.sh` (new)
+6. `tests/rl/self_inf_loo_trainer_test.py` (new)
+7. `develop.md`
+
+### Implementation details
+
+- Batch score uses strict `N-1`: `dot(g_i, sum_{j != i}(g_j) / (N - 1))`.
+- Group score uses strict `G-1` over the other generations belonging to the same contiguous prompt group.
+- Standard DTV self/cross decomposition and strict LOO score are recorded separately to keep their normalizations unambiguous.
+- The normal mask keeps finite scores greater than or equal to zero. If fewer than `ceil(0.25 * population)` remain, a vectorized stable top-score mask supplies the minimum retained population.
+- Batch LOO applies the cap over the actor batch. Group LOO vmaps the cap independently over prompt groups; with four generations, every prompt retains at least one completion.
+- Existing `SelfInfTrainer` remains the default. `SelfInfLooTrainer` is selected only when a new launcher sets `TUNIX_DBC_SELF_INF_LOO=1` for its child process.
+- JSONL records contain train step, scope, group/generation indices, raw self/cross values, standard score components, strict LOO scores, threshold/final/cap masks, cap status, filtered counts, and optimizer/effective-update indicators.
+
+### Validation commands and results
+
+- `python3 -m py_compile tunix/rl/self_inf_loo_trainer.py tests/rl/self_inf_loo_trainer_test.py tunix/rl/rl_cluster.py tunix/rl/grpo/grpo_learner.py`: passed.
+- `bash -n my_example/run_dbc_self_inf_batch_loo.sh my_example/run_dbc_self_inf_group_loo.sh`: passed.
+- `git diff --check`: passed.
+- Verified no diff in `my_example/config.py`, `tunix/rl/self_inf_trainer.py`, `run_dbc_self_inf_batch.sh`, or `run_dbc_self_inf_group.sh`.
+- Compared launcher argument sets: each LOO launcher matches its corresponding existing launcher, with only the scoped LOO environment and decision-log path added.
+- Added formula/cap tests covering strict `N-1`, strict `G-1`, prompt-group isolation, highest-quartile fallback, nonnegative-mask preservation, and invalid group sizes.
+
+### Known risks / TODO
+
+- The local Codex environment does not contain JAX/Flax, so the new JAX unit tests could not be executed locally; run them in `.venv_jax081` on the TPU worker before the smoke test.
+- Run one-step batch-LOO and group-LOO TPU smoke tests and verify `SelfInfLooTrainer` startup logs, TensorBoard tags, JSONL decisions, checkpoint save, post-train evaluation, and model export before full experiments.
+- The structured log identifies samples by train step plus prompt-group/generation position; it intentionally avoids storing full prompt/completion token sequences to control log size.
