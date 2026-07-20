@@ -7234,5 +7234,31 @@ This file tracks engineering changes made in this repository.
 ### Known risks / TODO
 
 - Run seed tests and a one-step TPU seeded smoke test after pulling this commit to the server.
-- Use identical seed sets across methods. Start with seeds 0,1,2 for preliminary paired comparison; use five seeds for final paper claims if compute permits.
+- Use identical seed sets across methods. Treat the completed legacy run as paired seed 0 (`dataset=42`, `rollout=0`) and use seeds 5 and 21 (`dataset=47/63`, `rollout=5/21`) for the preliminary three-seed comparison; use five seeds for final paper claims if compute permits.
 - Never launch more than one seeded method concurrently on the current TPU host.
+
+---
+
+## 2026-07-20 - Fix direct execution of seeding test
+
+### Scope
+
+- Fixed the new seed unit test's import path when invoked directly as `python tests/my_example/seeding_test.py` on the TPU server.
+- Recorded the selected preliminary paired seed set: completed legacy seed 0 plus new experiment seeds 5 and 21.
+
+### Changed files
+
+1. `tests/my_example/seeding_test.py`
+2. `develop.md`
+
+### Validation commands and results
+
+- `python3 tests/my_example/seeding_test.py`: four tests passed.
+- `python3 -m unittest tests/my_example/seeding_test.py`: four tests passed.
+- `bash -n my_example/run_seeded_full.sh`: passed.
+- `git diff --check`: passed.
+
+### Known risks / TODO
+
+- The existing completed runs used dataset shuffle seed 42 and implicit rollout seed 0; they should not be described as a single global seed 42.
+- Run all compared methods with the same paired seed set. Do not compare a method on seed 5 with another method only on seed 21.
