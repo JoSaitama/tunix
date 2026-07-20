@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 from typing import Tuple
 
+import jax
 import optax
 from orbax import checkpoint as ocp
 from tunix.rl import rl_cluster as rl_cluster_lib
@@ -19,6 +20,7 @@ from .rewards import (
     match_format_approximately,
     match_format_exactly,
 )
+from .seeding import experiment_seed
 
 
 def build_optimizer(training: TrainingConfig, max_steps: int):
@@ -54,6 +56,12 @@ def build_cluster_config(
     eos_tokens: list[int],
     use_wandb: bool,
 ):
+    configured_seed = experiment_seed()
+    train_rollout_seed = (
+        jax.random.PRNGKey(configured_seed)
+        if configured_seed is not None
+        else None
+    )
     checkpointing_options = ocp.CheckpointManagerOptions(
         save_interval_steps=training.save_interval_steps,
         max_to_keep=training.max_to_keep,
@@ -81,6 +89,7 @@ def build_cluster_config(
         top_p=grpo.top_p,
         top_k=grpo.top_k,
         eos_tokens=eos_tokens,
+        seed=train_rollout_seed,
     )
 
     eval_total_steps = (

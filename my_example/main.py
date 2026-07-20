@@ -26,6 +26,7 @@ from .model import (
     save_merged_lora,
 )
 from .sharding import make_mesh
+from .seeding import seed_summary
 from .train import build_cluster_config, build_optimizer, build_trainer
 
 
@@ -154,6 +155,7 @@ def main() -> None:
         f"max_eval_examples={cfg.data.max_eval_examples}",
         f"eval_before_train={cfg.runtime.eval_before_train}",
         f"eval_after_train={cfg.runtime.eval_after_train}",
+        f"experiment_seed={seed_summary()}",
         sep=" | ",
     )
     if max_steps != requested_max_steps:

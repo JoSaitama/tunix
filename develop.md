@@ -6840,3 +6840,399 @@ This file tracks engineering changes made in this repository.
 - The local Codex environment does not contain JAX/Flax, so the new JAX unit tests could not be executed locally; run them in `.venv_jax081` on the TPU worker before the smoke test.
 - Run one-step batch-LOO and group-LOO TPU smoke tests and verify `SelfInfLooTrainer` startup logs, TensorBoard tags, JSONL decisions, checkpoint save, post-train evaluation, and model export before full experiments.
 - The structured log identifies samples by train step plus prompt-group/generation position; it intentionally avoids storing full prompt/completion token sequences to control log size.
+
+---
+
+## 2026-07-19 - Group self-influence result-check and next-run guidance
+
+### Scope
+
+- Prepared server-side checks for the completed `self_inf_group` GSM8K run.
+- Confirmed from the reproduction guide that the next original-method experiment is L2 outlier curation with threshold `3.0`.
+- No training code changes; this entry records operational guidance only.
+
+### Changed files
+
+1. `develop.md`
+
+### Validation
+
+- Re-read the experiment order in `GSM8K_GRPO_Reproduction_Guide.md`.
+- Rechecked `my_example/run_dbc_outlier_l2.sh` defaults and argument forwarding.
+
+### Validation results
+
+- The documented original-method order is baseline, batch self-influence, group self-influence, then L2 outlier curation.
+- The L2 launcher already fixes `--curation-threshold 3.0`, disables WandB, uses train micro-batch size 4, and accepts explicit metrics/checkpoint/output paths without changing the paper-comparison parameters.
+
+### Known risks / TODO
+
+- Accept the group run only after confirming exit code 0, the explicit `SelfInfTrainer (scope=group, num_generations=4)` line, complete pre/post evaluation, saved model/checkpoint outputs, and absence of traceback/error markers.
+- Compare group post accuracy and reward trajectory against the same baseline and batch runs before drawing conclusions.
+- Start L2 with fresh timestamped run/log/checkpoint directories so a completed checkpoint cannot silently skip training.
+
+---
+
+## 2026-07-19 - Accept completed group self-influence GSM8K run
+
+### Scope
+
+- Reviewed the complete server-side status, metrics, checkpoints, results, and model export for the group self-influence run.
+- No code changes; this entry records result acceptance and interpretation.
+
+### Changed files
+
+1. `develop.md`
+
+### Validation results
+
+- Run root: `runs/gsm8k_dtv_selfinf_group_full_20260718_121640`.
+- Log root: `logs/gsm8k_dtv_selfinf_group_full_20260718_121640`.
+- Exit code is 0; training reached all 691 steps, post-train evaluation completed, and no traceback/error marker was found.
+- Pre-train result: `623/1319 = 47.232752%`.
+- Post-train result: `682/1319 = 51.705838%`; gain is 59 correct answers and 4.473086 percentage points.
+- Group DTV is 44 answers and 3.335861 points above baseline post-train accuracy, but 29 answers and 2.198635 points below batch DTV.
+- Post-train format accuracy is `66.034875%`, below baseline (`79.681577%`) and batch DTV (`73.161486%`).
+- Curation metrics contain 691 points. Mean kept fraction is `0.984171`, mean skipped count is `0.253256` out of 16, and maximum skipped count is 5; group curation was active but mild.
+- Eval reward contains 22 points; final reward is `2.780032` and mean reward is `1.997159`.
+- Checkpoints 500 and 691 exist; merged `model.safetensors` is approximately 1.9 GB; exported result artifacts are present.
+
+### Known risks / TODO
+
+- The captured log does not contain the informational `SelfInfTrainer (scope=group, num_generations=4)` line. Group identity is supported by the previously recorded group launcher command and the launcher-generated `selfinf-group__...` result label, but the missing runtime line should be noted as an audit limitation.
+- Continue with the documented L2 outlier experiment using threshold 3.0 and fresh paths.
+
+---
+
+## 2026-07-19 - Explain missing group-scope log line
+
+### Scope
+
+- Diagnosed why the completed group run did not contain the expected `scope=group` line.
+- No code changes; this entry records the logging explanation only.
+
+### Changed files
+
+1. `develop.md`
+
+### Validation results
+
+- The grep expression was correct and would match the expected `SelfInfTrainer (scope=group, num_generations=4)` message if present.
+- The message is emitted with `absl.logging.info` inside `tunix/rl/rl_cluster.py`.
+- `my_example/main.py` does not raise Abseil verbosity to INFO; the captured run visibly includes warning-level Abseil output but not INFO-level trainer-selection output.
+- Therefore the line was suppressed before reaching `nohup.log`; grep did not discard it.
+
+### Known risks / TODO
+
+- For future audit-grade runs, explicitly enable Abseil INFO logging or print the resolved DBC method in the launcher/main configuration summary before training.
+
+---
+
+## 2026-07-19 - L2 outlier run-check commands
+
+### Scope
+
+- Prepared the post-run validation procedure for the completed GSM8K L2 outlier experiment.
+- No code changes; this entry records operational guidance only.
+
+### Changed files
+
+1. `develop.md`
+
+### Validation results
+
+- Confirmed `RobustTrainer` filters samples whose per-sample gradient L2 norm exceeds `mean + 3.0 * std`.
+- Confirmed the L2-specific TensorBoard mechanism tags are `actor/train/skipped_samples`, `actor/train/grad_norm_mean`, and `actor/train/grad_norm_std`.
+- Self-influence dot and kept-fraction tags are not expected for the L2 method.
+
+### Known risks / TODO
+
+- INFO-level `RobustTrainer` selection logs may be absent for the same Abseil verbosity reason observed in the group run; use launcher/result labels plus L2-specific metrics as supporting evidence.
+- Compare the completed L2 result against baseline, batch DTV, and group DTV using accuracy, correct count, format accuracy, reward trajectory, and actual filtering frequency.
+
+---
+
+## 2026-07-19 - Accept L2 run and prepare DTV LOO launches
+
+### Scope
+
+- Reviewed the completed L2 outlier run, diagnosed the four-method comparison script syntax error, and prepared sequential batch/group LOO launch guidance.
+- No code changes; this entry records result interpretation and operational commands only.
+
+### Changed files
+
+1. `develop.md`
+
+### Validation results
+
+- L2 exit code is 0; all 691 steps, post-train evaluation, checkpoints 500/691, result exports, and merged model completed without traceback.
+- L2 post-train result is `733/1319 = 55.572403%`, a gain of 110 correct answers and 8.339651 points over its identical pre-train result.
+- L2 filtered 257 samples over 691 x 16 opportunities (`2.324530%`) and activated on 257 steps; L2-specific grad-norm metrics are present and self-influence metrics are absent as expected.
+- The comparison failure came from an invalid nested f-string on Python 3.11. The attempted replacement was pasted at the Bash prompt instead of inside a Python heredoc.
+- Diffed each `_loo` launcher against its original counterpart: effective training arguments are identical; differences are limited to the LOO environment selector, structured decision-log path, and result label.
+
+### Known risks / TODO
+
+- Execute the JAX LOO unit test on the server before consuming a full TPU run.
+- Run batch LOO and group LOO sequentially, never concurrently on the single-task TPU host.
+- Use fresh timestamped checkpoint roots for both methods and verify the selection JSONL plus LOO TensorBoard metrics after the first optimizer step.
+
+---
+
+## 2026-07-19 - Verify batch DTV LOO launch
+
+### Scope
+
+- Reviewed the server preflight tests and initial batch-LOO process/log output.
+- No code changes; this entry records runtime verification only.
+
+### Changed files
+
+1. `develop.md`
+
+### Validation results
+
+- Server is up to date with `for_GRPO`.
+- All eight LOO helper tests passed under Python 3.11/JAX 0.8.1, including strict N-1/G-1 scores and independent group caps.
+- No pre-existing Python training task was present before launch.
+- The launched command uses `run_dbc_self_inf_batch_loo.sh`; run/log roots and labels contain `gsm8k_dtv_selfinf_batch_loo_full`.
+- Configuration matches the original full runs: 3072 examples, 691 steps, train micro-batch size 4, and full pre/post evaluation.
+- At the captured 22-second point the process was still loading/preparing for pre-train evaluation, so no optimizer step or selection JSONL was expected yet.
+
+### Known risks / TODO
+
+- After pre-train evaluation completes, require a nonempty `selfinf-batch_loo__...__selection.jsonl` and LOO TensorBoard tags before treating the algorithm selection as runtime-confirmed.
+- Do not launch group LOO while this process is alive.
+
+---
+
+## 2026-07-19 - Batch DTV LOO completion-check guidance
+
+### Scope
+
+- Prepared end-to-end validation commands for the completed batch-level DTV LOO GSM8K run.
+- No code changes; this entry records operational guidance only.
+
+### Changed files
+
+1. `develop.md`
+
+### Validation coverage
+
+- Process exit, full 691-step lifecycle, pre/post evaluation, errors, checkpoints, model export, and result artifacts.
+- LOO TensorBoard metric presence and summary statistics.
+- JSONL record count, batch scope, 16-sample shape, strict `raw_cross_sum / 15` score identity, standard self/cross decomposition, finite-score status, threshold versus cap selections, minimum four-sample retention, and optimizer/effective-update counts.
+- Five-method comparison against baseline, batch DTV, group DTV, and L2 outlier using a Python-3.11-compatible formatter.
+
+### Known risks / TODO
+
+- Accept the run only if the structured LOO checks pass with no malformed records and all 691 optimizer steps are represented.
+- Do not launch group LOO until batch LOO has exit code 0 and no surviving Python training process.
+
+---
+
+## 2026-07-19 - Batch LOO outcome interpretation and group LOO launch guidance
+
+### Scope
+
+- Recorded the completed Batch LOO GSM8K outcome and prepared structured-filter analysis plus Group LOO launch commands.
+- No code changes; this entry records result interpretation and operational guidance only.
+
+### Changed files
+
+1. `develop.md`
+
+### Validation results
+
+- Batch LOO post-train result is `646/1319 = 48.9765%`, only 8 answers and 0.6065 points above baseline.
+- Its pre-to-post gain is 1.7437 points, substantially below batch DTV (6.6717), group DTV (4.4731), and L2 outlier (8.3397).
+- Batch LOO format accuracy is `63.9879%`, the lowest among the five completed methods.
+- Current ranking is L2 outlier, batch DTV, group DTV, Batch LOO, baseline.
+
+### Known risks / TODO
+
+- Diagnose Batch LOO using the structured selection records before attributing the weak result to filtering aggressiveness: quantify cap frequency, retained fractions, ordinary-DTV versus LOO decision disagreement, self-term rescue rate, score distribution, and training-stage drift.
+- Start Group LOO only after confirming Batch LOO exit code 0 and no active TPU Python process.
+- Compare Group LOO against Group DTV as the primary matched comparison, while also retaining the global five/six-method ranking.
+
+---
+
+## 2026-07-19 - Interpret Batch LOO filtering summary
+
+### Scope
+
+- Analyzed all 691 structured Batch LOO selection records to explain the weak final GSM8K result.
+- No code changes; this entry records experimental interpretation only.
+
+### Changed files
+
+1. `develop.md`
+
+### Validation results
+
+- Batch LOO filtered `4569/11056 = 41.325977%` of completion gradients and retained `58.674023%` after cap.
+- The 25% cap triggered on only 17/691 steps (`2.460203%`) and restored only 25 samples, so the cap is not the cause of the weak result.
+- No step had all-negative scores, no nonfinite scores occurred, and filtering showed almost no step correlation (`r=0.0377` post-cap), ruling out progressive filtering collapse.
+- Counterfactual ordinary-DTV scores would retain `84.270984%`, while strict LOO thresholding retained `58.447902%`.
+- `2855/11056 = 25.823082%` of samples were ordinary-DTV-positive but LOO-negative; there were zero reverse disagreements. The removed positive self term therefore accounts for the entire one-way decision gap.
+- `41.552098%` of cross terms were negative, showing substantial disagreement between a completion gradient and the other 15 cross-prompt completion gradients.
+- Standard self terms dominate the score scale: median self term is `0.279459`, versus median cross term `0.011871`; means and standard deviations are heavily distorted by rare very large gradient outliers.
+- Filtering remains broadly stable across all ten training bins at roughly 37%-45%, so the behavior is structural rather than confined to early or late training.
+
+### Interpretation / TODO
+
+- The strongest supported explanation is cross-prompt gradient heterogeneity: strict batch LOO discards many useful prompt-specific updates once their positive self contribution is removed.
+- The cap design worked as intended and did not materially alter the run; changing the 25% floor would not explain or likely repair this result.
+- Group LOO is the correct next diagnostic because it replaces the 15 cross-prompt peers with the other three completions from the same prompt.
+- When Group LOO completes, compare its filtering/disagreement summary directly with Batch LOO and its accuracy directly with Group DTV.
+
+---
+
+## 2026-07-19 - Clarify GRPO prompt groups versus optimizer batch
+
+### Scope
+
+- Clarified the distinction between a GRPO reward/advantage group and the actor optimizer batch used by the current experiment.
+- No code changes; this entry records conceptual interpretation only.
+
+### Changed files
+
+1. `develop.md`
+
+### Validation results
+
+- The current configuration processes four prompts per training micro-batch and generates four completions per prompt, yielding 16 per-completion gradients in one actor update.
+- GRPO reward comparison and group-relative advantage computation occur independently within each prompt's four completions.
+- Standard GRPO does not simply retain the single best answer; all sampled completions can contribute, with positive or negative group-relative advantages.
+- Group-level DTV compares a completion gradient with the four-gradient mean of its own prompt group; batch-level DTV compares it with the mean of all 16 gradients across four prompt groups.
+
+### Known risks / TODO
+
+- Keep the terms `prompt group`, `completion/trajectory`, and `optimizer batch` distinct in experiment documentation and paper descriptions.
+
+---
+
+## 2026-07-19 - Interpret actor/reference backbone-sharing warning
+
+### Scope
+
+- Diagnosed the Abseil warning about colocated actor/reference models not sharing a backbone.
+- No code changes; this entry records runtime interpretation only.
+
+### Changed files
+
+1. `develop.md`
+
+### Validation results
+
+- Actor, reference, and rollout roles are intentionally mapped to the same TPU mesh with CPU offload disabled.
+- The warning is emitted when Tunix expects a LoRA actor and colocated reference to share a backbone but runtime identity checks find separate backbone objects.
+- The consequence stated by the code is an unnecessary model copy and increased HBM usage; it does not change reward, advantage, DTV/LOO scores, or optimizer mathematics.
+
+### Known risks / TODO
+
+- Treat the warning as harmless if training proceeds without `RESOURCE_EXHAUSTED`, OOM, or process termination.
+- Do not alter model-sharing behavior mid-comparison because all methods should retain the same memory/runtime configuration.
+- Consider backbone-sharing optimization only as a separate engineering change after the reproduction experiments are complete.
+
+---
+
+## 2026-07-20 - Group DTV LOO completion-check guidance
+
+### Scope
+
+- Prepared end-to-end validation and six-method comparison commands for the completed Group DTV LOO GSM8K run.
+- No code changes; this entry records operational guidance only.
+
+### Changed files
+
+1. `develop.md`
+
+### Validation coverage
+
+- Exit status, 691-step lifecycle, pre/post evaluation, runtime errors, checkpoints, merged model, and result exports.
+- Group LOO structured records: batch shape 16, four contiguous prompt groups, strict `G-1=3` score identity, independent per-group cap, at least one retained completion per prompt, nonfinite scores, and optimizer/effective-update counts.
+- TensorBoard LOO metrics and final six-method accuracy/format ranking.
+
+### Known risks / TODO
+
+- Compare Group LOO primarily against Group DTV to isolate self-term removal within the same prompt-group scope.
+- Compare Group LOO filtering rate and ordinary-DTV/LOO disagreement against Batch LOO to evaluate the cross-prompt heterogeneity hypothesis.
+
+---
+
+## 2026-07-20 - Six-method gap analysis and GRPO DTV research direction
+
+### Scope
+
+- Analyzed the six completed GSM8K outcomes and developed a prioritized direction for improving DTV-style GRPO curation.
+- Reviewed primary GRPO, Dr. GRPO, DAPO, U-statistic/pruning-bias, and gradient-projection literature.
+- No code changes; this entry records research analysis only.
+
+### Changed files
+
+1. `develop.md`
+
+### Validation results
+
+- L2 outlier leads batch DTV by 22 answers / 1.6679 points, group DTV by 51 / 3.8666 points, Group LOO by 68 / 5.1554 points, and Batch LOO by 87 / 6.5959 points.
+- Group LOO improves over Batch LOO by 19 answers / 1.4405 points, supporting cross-prompt gradient heterogeneity, but remains 17 answers / 1.2889 points below Group DTV, showing that self-term removal/hard trajectory deletion is also harmful within prompt groups.
+- Batch LOO's 25% minimum-retention cap is not a useful tuning knob at its current value: it triggered on only 2.46% of steps and changed only 25/11056 decisions.
+- Aggregate test accuracy alone cannot establish significance; per-question paired predictions and multiple training seeds are required.
+
+### Recommended direction
+
+- First obtain the missing Group LOO filtering/disagreement summary and analyze the intersection between LOO-negative samples and L2 norm outliers.
+- For a minimal ablation, replace the weak 25% floor with explicit maximum-filter budgets (batch keep 12/16, 14/16, or 15/16; group keep 3/4) and tune only on held-out validation data.
+- The primary algorithmic direction should preserve GRPO group structure and avoid deleting complete trajectory gradients: aggregate completion gradients into prompt-group gradients, detect harmful direction at group level, then soft-weight or project only the conflicting component.
+- A high-potential DTV/L2 synthesis is to act only on gradients that are both strongly anti-aligned and unusually large, rather than treating every negative dot product as harmful.
+
+### Known risks / TODO
+
+- Do not claim guaranteed superiority over L2 or tune repeatedly on the GSM8K test set.
+- Hard pruning changes the GRPO gradient estimator and can introduce bias; any selective method needs an explicit bias discussion, correction, or conservative projection/weighting design.
+- Preserve all existing six methods and add every new proposal as an isolated branch with its own launcher and diagnostics.
+
+---
+
+## 2026-07-20 - Add reproducible multi-seed runs and configurable LOO keep floor
+
+### Scope
+
+- Added an environment-based experiment seed without changing the CLI argument structure or existing launcher behavior.
+- Added an environment override for LOO minimum retention, defaulting to the existing 25% behavior.
+- Added a unified single-task seeded launcher supporting the six existing methods and batch/group LOO keep-75 ablations.
+
+### Changed files
+
+1. `my_example/seeding.py` (new)
+2. `my_example/data.py`
+3. `my_example/train.py`
+4. `my_example/main.py`
+5. `tunix/rl/rl_cluster.py`
+6. `my_example/run_seeded_full.sh` (new)
+7. `tests/my_example/seeding_test.py` (new)
+8. `develop.md`
+
+### Implementation details
+
+- `TUNIX_EXPERIMENT_SEED` is optional. When absent, dataset shuffle remains 42 and rollout sampling retains its implicit PRNG key 0.
+- Explicit seed 0 uses dataset shuffle 42 and rollout PRNG key 0, matching the random values used by all completed legacy runs; those runs are recorded as the common paired seed 0.
+- Explicit seed `s` uses dataset shuffle `42+s` and rollout PRNG key `s`. The config summary prints the resolved seed mapping.
+- `TUNIX_DBC_SELF_INF_MIN_KEEP_FRACTION` defaults to 0.25 and is read only by the opt-in LOO trainer branch.
+- `run_seeded_full.sh METHOD SEED` creates fresh seed-labelled run/log/checkpoint/model paths, refuses to start alongside an active `my_example` Python task, and supports `batch_loo_keep75` / `group_loo_keep75` without modifying the original LOO launchers.
+
+### Validation commands and results
+
+- `python3 -m unittest tests/my_example/seeding_test.py`: four tests passed.
+- Python compilation passed for seeding, data, train, main, cluster, and test modules.
+- `bash -n my_example/run_seeded_full.sh`: passed.
+- `git diff --check`: passed.
+- Confirmed no diffs in any of the six existing method launchers.
+- Unified launcher usage/argument validation returns the expected usage text and exit code 2.
+
+### Known risks / TODO
+
+- Run seed tests and a one-step TPU seeded smoke test after pulling this commit to the server.
+- Use identical seed sets across methods. Start with seeds 0,1,2 for preliminary paired comparison; use five seeds for final paper claims if compute permits.
+- Never launch more than one seeded method concurrently on the current TPU host.

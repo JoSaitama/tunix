@@ -608,15 +608,29 @@ class RLCluster:
       except ValueError:
         actor_trainer_kwargs["num_generations"] = 0
       if use_self_inf_loo:
-        actor_trainer_kwargs["min_keep_fraction"] = 0.25
+        try:
+          min_keep_fraction = float(os.environ.get(
+              "TUNIX_DBC_SELF_INF_MIN_KEEP_FRACTION", "0.25"
+          ))
+        except ValueError as exc:
+          raise ValueError(
+              "TUNIX_DBC_SELF_INF_MIN_KEEP_FRACTION must be a float."
+          ) from exc
+        if not 0.0 < min_keep_fraction <= 1.0:
+          raise ValueError(
+              "TUNIX_DBC_SELF_INF_MIN_KEEP_FRACTION must be in (0, 1]; "
+              f"got {min_keep_fraction}."
+          )
+        actor_trainer_kwargs["min_keep_fraction"] = min_keep_fraction
         actor_trainer_kwargs["decisions_path"] = os.environ.get(
             "TUNIX_DBC_SELF_INF_DECISIONS_PATH"
         )
         logging.info(
             "Dynamic batch curation enabled: using SelfInfLooTrainer"
-            " (scope=%s, num_generations=%s, min_keep_fraction=0.25).",
+            " (scope=%s, num_generations=%s, min_keep_fraction=%s).",
             actor_trainer_kwargs["scope"],
             actor_trainer_kwargs["num_generations"],
+            actor_trainer_kwargs["min_keep_fraction"],
         )
       else:
         logging.info(

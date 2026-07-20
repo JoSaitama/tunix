@@ -11,6 +11,7 @@ import kagglehub
 import tensorflow_datasets as tfds
 
 from .prompts import TEMPLATE, SYSTEM_PROMPT, extract_hash_answer
+from .seeding import dataset_shuffle_seed
 
 
 def _load_from_tfds(data_dir: str, split: str):
@@ -79,7 +80,7 @@ def get_dataset(data_dir: str, split: str, source: str) -> grain.MapDataset:
 
     dataset = (
         grain.MapDataset.source(data)
-        .shuffle(seed=42)
+        .shuffle(seed=dataset_shuffle_seed())
         .map(
             lambda x: _format_example(
                 _as_text(x["question"]),
