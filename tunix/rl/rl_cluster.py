@@ -46,6 +46,7 @@ from tunix.rl import reshard
 from tunix.rl import robust_trainer
 from tunix.rl import self_inf_trainer
 from tunix.rl import self_inf_loo_trainer
+from tunix.rl import self_inf_loo_policy_trainer
 from tunix.rl import trainer as rl_trainer
 from tunix.rl import utils as rl_utils
 from tunix.rl.inference import inference_worker
@@ -593,11 +594,22 @@ class RLCluster:
       use_self_inf_loo = os.environ.get(
           "TUNIX_DBC_SELF_INF_LOO", ""
       ).strip().lower() in ("1", "true", "yes", "on")
-      actor_trainer_cls = (
-          self_inf_loo_trainer.SelfInfLooTrainer
-          if use_self_inf_loo
-          else self_inf_trainer.SelfInfTrainer
-      )
+      use_self_inf_loo_policy = os.environ.get(
+          "TUNIX_DBC_SELF_INF_LOO_POLICY", ""
+      ).strip().lower() in ("1", "true", "yes", "on")
+      if use_self_inf_loo_policy and not use_self_inf_loo:
+        raise ValueError(
+            "TUNIX_DBC_SELF_INF_LOO_POLICY requires "
+            "TUNIX_DBC_SELF_INF_LOO=1."
+        )
+      if use_self_inf_loo_policy:
+        actor_trainer_cls = (
+            self_inf_loo_policy_trainer.PolicySelfInfLooTrainer
+        )
+      elif use_self_inf_loo:
+        actor_trainer_cls = self_inf_loo_trainer.SelfInfLooTrainer
+      else:
+        actor_trainer_cls = self_inf_trainer.SelfInfTrainer
       actor_trainer_kwargs["scope"] = os.environ.get(
           "TUNIX_DBC_SELF_INF_SCOPE", "batch"
       ).strip().lower()
@@ -626,8 +638,9 @@ class RLCluster:
             "TUNIX_DBC_SELF_INF_DECISIONS_PATH"
         )
         logging.info(
-            "Dynamic batch curation enabled: using SelfInfLooTrainer"
+            "Dynamic batch curation enabled: using %s"
             " (scope=%s, num_generations=%s, min_keep_fraction=%s).",
+            actor_trainer_cls.__name__,
             actor_trainer_kwargs["scope"],
             actor_trainer_kwargs["num_generations"],
             actor_trainer_kwargs["min_keep_fraction"],

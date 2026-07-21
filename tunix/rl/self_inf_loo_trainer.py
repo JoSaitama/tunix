@@ -19,7 +19,7 @@ from __future__ import annotations
 import json
 import math
 import os
-from typing import Any, Literal, Tuple
+from typing import Any, Callable, Literal, Tuple
 
 from flax import nnx
 import jax
@@ -184,8 +184,18 @@ class SelfInfLooTrainer(rl_trainer.Trainer):
     self.num_generations = num_generations
     self.min_keep_fraction = min_keep_fraction
     self.decisions_path = decisions_path
+    self._score_loss_fn: Callable[..., Any] | None = None
+    self._score_loss_has_aux = False
+    self.score_objective = "total"
     if decisions_path:
       os.makedirs(os.path.dirname(os.path.abspath(decisions_path)), exist_ok=True)
+
+  def _with_score_loss_fn(
+      self, score_loss_fn: Callable[..., Any], *, has_aux: bool
+  ) -> None:
+    """Configures an optional score-only loss without changing update loss."""
+    self._score_loss_fn = score_loss_fn
+    self._score_loss_has_aux = has_aux
 
   def _train_step(
       self, model: nnx.Module, optimizer: nnx.Optimizer, inputs: Any
@@ -209,6 +219,21 @@ class SelfInfLooTrainer(rl_trainer.Trainer):
         model, inputs
     )
 
+    score_grads = per_sample_grads
+    if self._score_loss_fn is not None:
+      score_grad_fn = nnx.value_and_grad(
+          self._score_loss_fn,
+          argnums=nnx.DiffState(0, wrt),
+          has_aux=self._score_loss_has_aux,
+      )
+      vmapped_score_grad_fn = jax.vmap(
+          score_grad_fn, in_axes=(None, inputs_in_axes)
+      )
+      if self._score_loss_has_aux:
+        (_, _), score_grads = vmapped_score_grad_fn(model, inputs)
+      else:
+        _, score_grads = vmapped_score_grad_fn(model, inputs)
+
     leaves = jax.tree_util.tree_leaves(per_sample_grads)
     if not leaves:
       raise ValueError("No gradients found for self-influence LOO curation.")
@@ -216,7 +241,7 @@ class SelfInfLooTrainer(rl_trainer.Trainer):
 
     if self.scope == "group":
       group_size = int(self.num_generations or 0)
-      statistics = _group_loo_statistics(per_sample_grads, group_size)
+      statistics = _group_loo_statistics(score_grads, group_size)
       num_groups = batch_size // group_size
       grouped_scores = statistics["loo_score"].reshape(
           (num_groups, group_size)
@@ -242,7 +267,7 @@ class SelfInfLooTrainer(rl_trainer.Trainer):
       min_group_kept_fraction = jnp.min(group_kept_fraction)
       max_group_kept_fraction = jnp.max(group_kept_fraction)
     else:
-      statistics = _batch_loo_statistics(per_sample_grads)
+      statistics = _batch_loo_statistics(score_grads)
       mask, threshold_mask, retained_by_cap, cap_triggered = _capped_mask(
           statistics["loo_score"], self.min_keep_fraction
       )
@@ -342,6 +367,8 @@ class SelfInfLooTrainer(rl_trainer.Trainer):
             **decision_scalars,
             **decision_arrays,
         }
+        if self.score_objective != "total":
+          record["score_objective"] = self.score_objective
         with open(self.decisions_path, "a", encoding="utf-8") as output:
           output.write(json.dumps(record, separators=(",", ":")) + "\n")
     super()._post_process_train_step(aux)

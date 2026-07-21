@@ -175,6 +175,21 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
         loss_fn,
         has_aux=True,
     )
+    policy_score_loss_setter = getattr(
+        self.rl_cluster.actor_trainer,
+        "with_policy_score_loss_fn",
+        None,
+    )
+    if policy_score_loss_setter is not None:
+      policy_only_config = dataclasses.replace(self.algo_config, beta=0.0)
+      policy_score_loss_fn = lambda model, train_example: policy_loss_fn(
+          model,
+          train_example,
+          algo_config=policy_only_config,
+          pad_id=self.rl_cluster.rollout.pad_id(),
+          eos_id=self.rl_cluster.rollout.eos_id(),
+      )
+      policy_score_loss_setter(policy_score_loss_fn, has_aux=True)
     self.rl_cluster.actor_trainer.with_gen_model_input_fn(
         lambda x: {"train_example": x}
     )

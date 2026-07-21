@@ -7262,3 +7262,239 @@ This file tracks engineering changes made in this repository.
 
 - The existing completed runs used dataset shuffle seed 42 and implicit rollout seed 0; they should not be described as a single global seed 42.
 - Run all compared methods with the same paired seed set. Do not compare a method on seed 5 with another method only on seed 21.
+
+---
+
+## 2026-07-21 - Second TPU worker GRPO environment bootstrap guidance
+
+### Scope
+
+- Reconstructed the validated `.venv_jax081` installation procedure for a second, equivalent single-host four-device TPU worker.
+- Included the runtime dependencies discovered during the first worker bring-up: `importlib_resources`, GCS filesystem support, SentencePiece legacy API compatibility, TensorBoard, and Pillow.
+- No training code or launcher changes; this entry records operational guidance only（无代码改动）.
+
+### Changed files
+
+1. `develop.md`
+
+### Validation basis
+
+- Reviewed `ENV_SETUP.md`, `pyproject.toml`, `GSM8K_GRPO_Reproduction_Guide.md`, and the prior first-worker environment/debug records.
+- Target package stack: Python 3.11, `jax==0.8.1`, `jaxlib==0.8.1`, `libtpu==0.0.30`, `sentencepiece==0.2.0`, matching `gcsfs`/`fsspec`, `tensorboard==2.21.0`, and `Pillow==12.3.0`.
+- Required preflight checks cover editable Tunix imports, `pip check`, TPU backend with four local devices, GCS tokenizer access, gated Gemma access, and LOO unit tests.
+
+### Known risks / TODO
+
+- The second server must use a Hugging Face token belonging to an account that has accepted the Gemma gated-model terms; never commit `my_example/.env`.
+- Do not start two jobs on the same TPU worker. Use distinct seed-labelled run, log, checkpoint, and model directories.
+- If the second worker reports a different TPU topology, stop before training rather than forcing the existing `--mesh-counts 4,1` configuration.
+
+---
+
+## 2026-07-21 - Second worker Flax/JAX compatibility diagnosis
+
+### Scope
+
+- Diagnosed `ImportError: cannot import name 'Effect' from jax.extend.core` while importing Tunix on the new worker.
+- No training code or launcher changes; this entry records dependency repair guidance only（无代码改动）.
+
+### Changed files
+
+1. `develop.md`
+
+### Validation basis and result
+
+- The repository fixes TPU JAX at 0.8.1 but declares only `flax>=0.11.1`, so a fresh resolver can install a much newer Flax release.
+- Official Flax 0.12.7 metadata requires `jax>=0.10.0`, which is incompatible with this experiment's fixed JAX 0.8.1 environment.
+- Official Flax 0.11.1 metadata requires `jax>=0.6.0`; pinning `flax==0.11.1` is the minimal compatible repair while retaining JAX/JAXLIB 0.8.1 and libtpu 0.0.30.
+
+### Known risks / TODO
+
+- Install the Flax and JAX pins in one resolver command so pip cannot silently upgrade JAX.
+- Run `pip check`, Tunix/NNX imports, the bounded four-device TPU probe, and both seed/LOO tests before starting a full run.
+- If `pip check` reports another package requiring JAX newer than 0.8.1, resolve that package explicitly rather than upgrading JAX.
+
+---
+
+## 2026-07-21 - Correct Flax pin for Qwix LoRA on second worker
+
+### Scope
+
+- Diagnosed the Batch LOO Keep-75 startup failure after the provisional Flax 0.11.1 downgrade.
+- Corrected the environment target to the first worker's validated `flax==0.12.5` with JAX/JAXLIB 0.8.1.
+- No training code or launcher changes; this entry records dependency repair guidance only（无代码改动）.
+
+### Changed files
+
+1. `develop.md`
+
+### Validation basis and result
+
+- The run resolved method, seed, dataset seed, rollout seed, and 0.75 keep floor correctly, then failed before evaluation/training inside Qwix LoRA parameter creation.
+- Fatal error: Qwix calls `get_raw_value()` through the NNX variable API, but Flax 0.11.1 falls through to the wrapped JAX array and raises `AttributeError`.
+- The first worker record shows successful Tunix/Qwix training with Flax 0.12.5 and JAX 0.8.1.
+- Official Flax 0.12.5 metadata requires `jax>=0.8.1` and pins `optax==0.2.6`; unlike Flax 0.12.7, it does not require JAX 0.10.
+
+### Known risks / TODO
+
+- Pin `flax==0.12.5` and `jax[tpu]==0.8.1` together, then verify `jax`, `jaxlib`, `libtpu`, Flax, Optax, Qwix, and `pip check`.
+- Use fresh run/log/checkpoint paths for the retry; retain the failed run as provenance but do not reuse its directory.
+- Perform a one-step LOO smoke before committing to the full pre-evaluation/training run on the new worker.
+
+---
+
+## 2026-07-21 - GRPO DTV/LOO score-loss and Keep-75 analysis
+
+### Scope
+
+- Audited the current GRPO DTV, strict LOO, GRPO objective, advantage estimator, and L2 outlier implementations after the seed-0 Keep-75 results completed.
+- Compared the GRPO implementation with the separate DTV-PPO project's explicit `score_loss=policy|total` design.
+- No training code or launcher changes; this entry records algorithm analysis only（无代码改动）.
+
+### Changed files
+
+1. `develop.md`
+
+### Results and code findings
+
+- Batch LOO Keep-75 reached 632/1319 (47.9151%): 6 fewer than baseline, 79 fewer than original Batch DTV, and 101 fewer than L2.
+- Group LOO Keep-75 reached 680/1319 (51.5542%): 42 above baseline, 2 below original Group DTV, and 53 below L2. It improved 15 answers over default Group LOO but essentially converged to original Group DTV rather than surpassing it.
+- Both original DTV and LOO differentiate the actor trainer's registered `grpo_loss_fn` per completion. The score gradient is not separately configurable.
+- The registered function is named a policy loss, but its differentiable objective is clipped GRPO policy surrogate plus `beta * KL`; the experiment uses `beta=0.08`. Thus the score is based on the total actor objective, not a KL-free policy-surrogate-only gradient.
+- With `num_iterations=1`, the per-completion score is approximately driven by `-advantage * mean(log probability)` plus the KL gradient; clipping is usually not the principal first-iteration distinction.
+- L2 and DTV use the same total-objective per-completion gradients, but L2 removes only extreme norm outliers (about 2.7%-2.9% in the recorded counterfactual analysis), whereas LOO sign filtering targets about 30.6% group / 41.6% batch before caps.
+- Batch size at the trainer is 16 completions: four prompts times four generations. Batch Keep-75 can delete 4/16. Group Keep-75 can delete one of four within every prompt group, making 75% the highest nontrivial per-group hard-retention level; 100% becomes no filtering.
+- GRPO intentionally creates centered positive and negative advantages within each prompt group. Pairwise/LOO anti-alignment can therefore represent useful contrastive structure rather than harmful contamination, especially with only three leave-one-out peers.
+
+### Recommended research order
+
+- Highest-priority ablation: decouple the DTV scoring loss from the update loss, compute DTV/LOO scores using the KL-free clipped GRPO policy surrogate, but apply the selected mask to the unchanged full GRPO update. This most closely transfers the successful PPO policy-loss lesson while preserving the DTV idea.
+- Analyze policy-only versus KL-only gradient dot products and mask disagreement before another full run; verify whether KL cross terms dominate or flip selection decisions as training progresses.
+- Do not continue treating the minimum keep floor as the primary solution. Batch 15/16 is a possible conservative diagnostic, but Group LOO has no nontrivial level between 3/4 and 4/4 without filtering only selected groups/steps.
+- A later pure-direction alternative is to treat the full four-completion prompt gradient as the atomic GRPO unit and compare prompt-group gradients across the batch; this preserves within-prompt relative learning without introducing an L2 norm criterion.
+
+### Known risks / TODO
+
+- Seed-0 differences alone are not a paper-level significance result, but the large and mechanistically consistent LOO gaps justify changing the ablation direction before spending compute on all LOO seeds.
+- Current LOO JSONL records scores and masks but not rewards, advantages, completion lengths, correctness, or KL/policy gradient decomposition, so they cannot identify the semantic class of removed completions without additional instrumentation.
+- Any future score-loss-only branch must leave baseline, original DTV, L2, and existing LOO update objectives untouched and must use independent launchers/records.
+
+---
+
+## 2026-07-21 - GRPO versus PPO policy-score / total-update analysis
+
+### Scope
+
+- Compared the exact policy and total objectives in the current Tunix GRPO implementation with the separate DTV-PPO implementation.
+- Assessed whether a future Batch/Group strict-LOO policy-score branch would remain faithful to the DTV principle and preserve existing methods.
+- No code or launcher changes; this entry records design analysis only（无代码改动）.
+
+### Changed files
+
+1. `develop.md`
+
+### Findings
+
+- GRPO pure policy objective is a clipped likelihood-ratio surrogate weighted by prompt-group-relative advantages. Its full actor update adds `beta * KL(reference)` and has no learned value-function loss in this implementation.
+- The current GRPO DTV/LOO score and update both use the full objective (`policy + beta*KL`), because the trainer differentiates one registered loss and reuses those gradients for masking and optimization.
+- The DTV-PPO project's pure policy score uses the clipped PPO surrogate only. Its total objective adds entropy regularization and value regression; its code explicitly supports `score_loss=policy|total`.
+- PPO advantages come from return/value estimation and are not structurally centered inside each small action group. GRPO advantages are centered and standardized among four completions from the same prompt, making within-group opposing policy gradients intentional rather than necessarily harmful.
+- A policy-score/full-update GRPO branch remains within the DTV family: DTV attribution measures alignment with the task-improvement objective, while the unchanged full update retains the KL trust-region constraint. It should be described as an objective-decoupled or policy-attribution DTV variant, not as mathematically identical to the original total-gradient DTV.
+
+### Proposed isolated experiment contract (not implemented)
+
+- Add two opt-in methods only: strict Batch LOO policy-score and strict Group LOO policy-score.
+- Score gradients: KL-free clipped GRPO policy surrogate.
+- Selection: the existing strict `N-1` / `G-1` dot-product rule and the same configurable minimum-keep floor/cap behavior.
+- Update gradients: unchanged full GRPO objective (`policy + beta*KL`) averaged over selected completions.
+- Preserve all existing baseline, L2, original DTV, total-loss LOO, CLI behavior, launchers, and result formats.
+- Add independent launchers/names and log both score-gradient and update-gradient diagnostics so the experiment is auditable.
+
+### Known risks / TODO
+
+- Do not implement policy-only scoring by simply setting `beta=0` on the existing loss, because that would also silently change the optimizer update objective.
+- The new branch requires distinct score and update gradients (or an equivalent correct decomposition), so it may increase compute/memory versus the existing one-gradient-set trainer.
+- Policy-only scoring removes KL contamination but does not by itself solve intentional GRPO positive/negative-advantage conflict; Batch and Group variants must therefore both be evaluated and mask behavior analyzed before full multi-seed runs.
+
+---
+
+## 2026-07-21 - Static-shape masking confirmation for GRPO DTV
+
+### Scope
+
+- Compared current GRPO DTV/LOO masking with the DTV-PPO policy-mask update path for JAX/TPU shape stability.
+- No code or launcher changes; this entry records implementation analysis only（无代码改动）.
+
+### Changed files
+
+1. `develop.md`
+
+### Findings
+
+- Current GRPO original DTV, strict LOO, and L2 curation preserve the full completion batch and all per-sample gradient tensor shapes.
+- They compute every per-sample forward/backward gradient first, create a fixed-length Boolean mask, broadcast-multiply the gradient leaves by that mask, sum, and divide by the number kept. No Boolean indexing or variable-size tensor is passed to the optimizer.
+- For the standard full run, the trainer-side completion axis stays 16 (`4 prompts x 4 generations`); Group DTV only reshapes this statically to `[4, 4, ...]` for scoring and flattens it back.
+- This is the same TPU-friendly principle as the DTV-PPO `policy_mask` path. It is not identical to the older PPO `DTVBatchFilter.filter_batch` path, which physically Boolean-indexes the batch and can change the leading dimension.
+- GRPO masking currently removes all total-objective gradient contribution (policy and KL) for a dropped completion. It does not save per-sample forward/backward compute, because selection occurs after all gradients are materialized.
+
+### Future policy-score branch constraint (not implemented)
+
+- Preserve fixed shapes for both policy-score gradients and full-update gradients.
+- Compute a fixed `[16]` Batch mask or `[4,4]` Group mask from policy-only gradients, then broadcast that mask over unchanged full (`policy + KL`) gradient leaves before reduction.
+- Do not gather/compact selected samples and do not use data-dependent Python branching inside the jitted training step.
+
+---
+
+## 2026-07-21 - Add isolated Batch/Group Policy-LOO GRPO methods
+
+### Scope
+
+- Added opt-in strict Batch and Group Policy-LOO methods.
+- Policy-only (`beta=0` score view) GRPO gradients are used only for DTV/LOO attribution; the unchanged full GRPO gradients (`policy + configured beta*KL`) are masked and passed to the optimizer.
+- Reused the existing strict `N-1` / `G-1` score, per-group cap, static-shape mask, diagnostics, JSONL export, TensorBoard metric, and postprocessing implementation.
+- Preserved baseline, L2, original DTV, and total-loss LOO commands and behavior.
+
+### Changed files
+
+1. `tunix/rl/self_inf_loo_trainer.py`
+2. `tunix/rl/self_inf_loo_policy_trainer.py` (new)
+3. `tunix/rl/rl_cluster.py`
+4. `tunix/rl/grpo/grpo_learner.py`
+5. `my_example/run_dbc_self_inf_batch_loo_policy.sh` (new)
+6. `my_example/run_dbc_self_inf_group_loo_policy.sh` (new)
+7. `my_example/run_seeded_full.sh`
+8. `tests/rl/self_inf_loo_policy_trainer_test.py` (new)
+9. `develop.md`
+
+### Implementation details
+
+- `PolicySelfInfLooTrainer` is selected only when both `TUNIX_DBC_SELF_INF_LOO=1` and `TUNIX_DBC_SELF_INF_LOO_POLICY=1` are set by the new launchers.
+- `GRPOLearner` detects only the new trainer's policy-score setter and supplies a copy of the existing GRPO config with `beta=0.0`; the regular update loss closure retains the original configured beta.
+- Existing LOO uses no score-loss override, so `score_grads is per_sample_grads` and retains its one-gradient-set total-loss path.
+- New Policy-LOO computes fixed-shape policy score gradients and fixed-shape total update gradients. The mask is derived from policy gradients and broadcast over total gradient leaves before the existing masked mean.
+- Default minimum keep remains 0.25. The existing `TUNIX_DBC_SELF_INF_MIN_KEEP_FRACTION` override is reused; seeded aliases for 0.75 are available without changing the method implementation.
+- Policy JSONL records contain the same arrays/scalars as existing LOO plus `score_objective="policy"`. Existing total-loss LOO JSONL schema is unchanged.
+- New Policy-LOO launchers own their environment selection, labels, stdout logs, and JSONL paths; existing Batch/Group LOO launchers are unchanged.
+
+### New methods and launchers
+
+- `batch_loo_policy` -> `my_example/run_dbc_self_inf_batch_loo_policy.sh`
+- `group_loo_policy` -> `my_example/run_dbc_self_inf_group_loo_policy.sh`
+- Optional later aliases: `batch_loo_policy_keep75`, `group_loo_policy_keep75`
+
+### Validation commands and results
+
+- Python compilation passed for both LOO trainers, RL cluster routing, GRPO learner wiring, and the new policy trainer test.
+- `bash -n` passed for original LOO launchers, new policy launchers, and `run_seeded_full.sh`.
+- New launchers are executable.
+- `git diff --check`: passed.
+- Confirmed no diffs in `tunix/rl/robust_trainer.py` or any existing baseline/L2/original DTV/total-loss LOO launcher.
+- `tests/my_example/seeding_test.py`: four tests passed locally.
+- New policy trainer test contains four checks, including an actual tiny NNX train step proving that a policy-derived mask is applied to a distinct set of total update gradients.
+- Local JAX/absl tests could not run because the local interpreter lacks `absl`; run existing and new LOO tests in `.venv_jax081` on the TPU worker.
+
+### Known risks / TODO
+
+- Policy-LOO performs a second per-sample gradient pass, so compilation time, step time, and peak HBM can exceed existing total-loss LOO. Validate with a one-step smoke before a full run.
+- The score/update split removes KL from attribution but cannot eliminate intentional conflict between positive- and negative-advantage GRPO completions.
+- On the TPU worker, verify class selection (`PolicySelfInfLooTrainer`), default min keep 0.25, JSONL `score_objective=policy`, 16-sample static masks, successful optimizer/checkpoint/model export, and unchanged original LOO smoke behavior.
