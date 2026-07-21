@@ -221,8 +221,13 @@ class SelfInfLooTrainer(rl_trainer.Trainer):
 
     score_grads = per_sample_grads
     if self._score_loss_fn is not None:
+      def per_sample_score_loss_fn(model, inputs):
+        if isinstance(inputs, dict):
+          return self._score_loss_fn(model, **inputs)
+        return self._score_loss_fn(model, inputs)
+
       score_grad_fn = nnx.value_and_grad(
-          self._score_loss_fn,
+          per_sample_score_loss_fn,
           argnums=nnx.DiffState(0, wrt),
           has_aux=self._score_loss_has_aux,
       )

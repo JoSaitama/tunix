@@ -45,11 +45,11 @@ class PolicySelfInfLooTrainerTest(absltest.TestCase):
     )
     trainer.gen_model_input_fn = lambda inputs: inputs
     trainer.loss_fn = lambda model, policy, total: (
-        model.weight.value * total,
+        model.weight.get_value() * total,
         {"kl": jnp.asarray(0.0)},
     )
     trainer._score_loss_fn = lambda model, policy, total: (
-        model.weight.value * policy,
+        model.weight.get_value() * policy,
         {"kl": jnp.asarray(0.0)},
     )
     trainer._score_loss_has_aux = True
@@ -71,7 +71,9 @@ class PolicySelfInfLooTrainerTest(absltest.TestCase):
     )
 
     np.testing.assert_allclose(loss, 2.0 * 70.0 / 3.0)
-    np.testing.assert_allclose(optimizer.grads["weight"].value, 70.0 / 3.0)
+    np.testing.assert_allclose(
+        optimizer.grads["weight"].get_value(), 70.0 / 3.0
+    )
 
   def test_policy_score_loss_setter_is_separate_from_update_loss(self):
     trainer = object.__new__(

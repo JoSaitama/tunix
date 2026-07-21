@@ -7498,3 +7498,61 @@ This file tracks engineering changes made in this repository.
 - Policy-LOO performs a second per-sample gradient pass, so compilation time, step time, and peak HBM can exceed existing total-loss LOO. Validate with a one-step smoke before a full run.
 - The score/update split removes KL from attribution but cannot eliminate intentional conflict between positive- and negative-advantage GRPO completions.
 - On the TPU worker, verify class selection (`PolicySelfInfLooTrainer`), default min keep 0.25, JSONL `score_objective=policy`, 16-sample static masks, successful optimizer/checkpoint/model export, and unchanged original LOO smoke behavior.
+
+---
+
+## 2026-07-22 - Fix Policy-LOO score-loss input adaptation
+
+### Scope
+
+- Diagnosed the new Policy-LOO TPU unit-test failure before launching a smoke/full experiment.
+- Fixed score-only loss invocation so dictionary model inputs are unpacked identically to the existing total/update loss path.
+- Removed deprecated NNX `.value` access from the tiny policy/update separation test.
+- No change to baseline, L2, original DTV, total-loss LOO, CLI structure, strict LOO math, cap behavior, or total update objective.
+
+### Changed files
+
+1. `tunix/rl/self_inf_loo_trainer.py`
+2. `tests/rl/self_inf_loo_policy_trainer_test.py`
+3. `develop.md`
+
+### Root cause
+
+- The existing total loss is called through `per_sample_loss_fn`, which expands dictionary inputs as keyword arguments.
+- The initial policy-score hook passed the entire dictionary positionally into the configured score loss. The synthetic test therefore reported missing `total`; a real GRPO example would likewise receive a dictionary instead of the expected `train_example`.
+- The failure occurred before optimizer update and invalidates no experiment result because no Policy-LOO smoke/full run had started.
+
+### Validation
+
+- Server before fix: seed tests 4/4 passed, existing strict LOO tests 8/8 passed, Policy-LOO tests 3/4 passed; the fourth failed at score-loss argument binding.
+- Local Python compilation, shell syntax, protected-file diff audit, and `git diff --check` are required after the patch.
+- Rerun all four Policy-LOO tests on the TPU worker; only after 4/4 pass should the one-step Batch Policy-LOO smoke begin.
+
+### Known risks / TODO
+
+- The TPU smoke remains necessary to validate dual per-sample gradient compilation, HBM, class routing, JSONL records, checkpointing, and model export.
+## 2026-07-21 - Summarize current GSM8K GRPO experiment
+
+### Scope
+
+- Read `GSM8K_GRPO_Reproduction_Guide.md` and inspected the current GSM8K launchers, configuration, dataset loader, and reward definitions.
+- Summarized the experiment design using the requested paper-style structure.
+- No experiment code or launcher changes（无代码改动）.
+
+### Changed files
+
+1. `develop.md`
+
+### Validation commands and results
+
+- Confirmed the reproduction guide defines four core runs: GRPO baseline, Batch Self-Influence, Group Self-Influence, and L2 outlier curation.
+- Confirmed current defaults in `run_grpo_gemma.sh`: Gemma 3 1B IT, GSM8K via TFDS, LoRA GRPO, 4 prompts per training micro-batch, 4 generations per prompt, 3,072 training examples, one epoch, learning rate `1e-6`, and TPU mesh `4,1`.
+- Confirmed `TUNIX_REWARD_MODE=accuracy` selects the accuracy-focused reward combination.
+- Confirmed additional total-loss LOO and policy-score LOO launchers exist as extension experiments beyond the four core guide runs.
+
+### Known risks / TODO
+
+- The guide identifies commit `a448e1f72cd7eafd6e490d66ec1066b10c5a5906` as the reference; exact reproduction should verify the active branch and commit on the TPU worker.
+- Full runtime results were not produced in this documentation-only task; TPU environment, dataset/model access, checkpoint restore, and end-to-end metrics still require execution checks.
+
+---
