@@ -187,6 +187,7 @@ class SelfInfLooTrainer(rl_trainer.Trainer):
     self._score_loss_fn: Callable[..., Any] | None = None
     self._score_loss_has_aux = False
     self.score_objective = "total"
+    self.mask_application = "full"
     if decisions_path:
       os.makedirs(os.path.dirname(os.path.abspath(decisions_path)), exist_ok=True)
 
@@ -196,6 +197,36 @@ class SelfInfLooTrainer(rl_trainer.Trainer):
     """Configures an optional score-only loss without changing update loss."""
     self._score_loss_fn = score_loss_fn
     self._score_loss_has_aux = has_aux
+
+  def _aggregate_update_gradients(
+      self,
+      per_sample_grads,
+      score_grads,
+      mask: jax.Array,
+      masked_mean: Callable[..., Any],
+  ):
+    """Aggregates update gradients; subclasses may mask components only."""
+    del score_grads
+    return masked_mean(per_sample_grads, mask)
+
+  def _aggregate_update_loss(
+      self,
+      per_sample_loss: jax.Array,
+      per_sample_score_loss: jax.Array | None,
+      mask: jax.Array,
+  ) -> jax.Array:
+    """Aggregates the displayed loss consistently with full masking."""
+    del per_sample_score_loss
+    return jnp.sum(per_sample_loss * mask) / jnp.clip(jnp.sum(mask), 1.0)
+
+  def _aggregate_update_aux(
+      self,
+      per_sample_aux,
+      mask: jax.Array,
+      masked_mean: Callable[..., Any],
+  ):
+    """Aggregates auxiliary metrics consistently with full masking."""
+    return masked_mean(per_sample_aux, mask)
 
   def _train_step(
       self, model: nnx.Module, optimizer: nnx.Optimizer, inputs: Any
@@ -220,6 +251,7 @@ class SelfInfLooTrainer(rl_trainer.Trainer):
     )
 
     score_grads = per_sample_grads
+    per_sample_score_loss = None
     if self._score_loss_fn is not None:
       def per_sample_score_loss_fn(model, inputs):
         if isinstance(inputs, dict):
@@ -235,9 +267,13 @@ class SelfInfLooTrainer(rl_trainer.Trainer):
           score_grad_fn, in_axes=(None, inputs_in_axes)
       )
       if self._score_loss_has_aux:
-        (_, _), score_grads = vmapped_score_grad_fn(model, inputs)
+        (per_sample_score_loss, _), score_grads = vmapped_score_grad_fn(
+            model, inputs
+        )
       else:
-        _, score_grads = vmapped_score_grad_fn(model, inputs)
+        per_sample_score_loss, score_grads = vmapped_score_grad_fn(
+            model, inputs
+        )
 
     leaves = jax.tree_util.tree_leaves(per_sample_grads)
     if not leaves:
@@ -303,12 +339,18 @@ class SelfInfLooTrainer(rl_trainer.Trainer):
 
       return jax.tree_util.tree_map(leaf_mean, pytree)
 
-    final_grads = masked_mean(per_sample_grads, mask)
-    final_loss = jnp.sum(per_sample_loss * mask) / jnp.clip(jnp.sum(mask), 1.0)
+    final_grads = self._aggregate_update_gradients(
+        per_sample_grads, score_grads, mask, masked_mean
+    )
+    final_loss = self._aggregate_update_loss(
+        per_sample_loss, per_sample_score_loss, mask
+    )
     optimizer.update(model, final_grads)
 
     if self._has_aux:
-      final_aux = masked_mean(per_sample_aux, mask)
+      final_aux = self._aggregate_update_aux(
+          per_sample_aux, mask, masked_mean
+      )
       if isinstance(final_aux, dict):
         final_aux.update({
             "skipped_samples": num_skipped,
@@ -374,6 +416,8 @@ class SelfInfLooTrainer(rl_trainer.Trainer):
         }
         if self.score_objective != "total":
           record["score_objective"] = self.score_objective
+        if self.mask_application != "full":
+          record["mask_application"] = self.mask_application
         with open(self.decisions_path, "a", encoding="utf-8") as output:
           output.write(json.dumps(record, separators=(",", ":")) + "\n")
     super()._post_process_train_step(aux)

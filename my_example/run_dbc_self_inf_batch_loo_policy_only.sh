@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+exec "${ROOT_DIR}/my_example/run_dbc_self_inf_loo_policy_only.sh" batch "$@"

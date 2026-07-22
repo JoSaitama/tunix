@@ -47,6 +47,7 @@ from tunix.rl import robust_trainer
 from tunix.rl import self_inf_trainer
 from tunix.rl import self_inf_loo_trainer
 from tunix.rl import self_inf_loo_policy_trainer
+from tunix.rl import self_inf_loo_policy_only_trainer
 from tunix.rl import trainer as rl_trainer
 from tunix.rl import utils as rl_utils
 from tunix.rl.inference import inference_worker
@@ -597,12 +598,24 @@ class RLCluster:
       use_self_inf_loo_policy = os.environ.get(
           "TUNIX_DBC_SELF_INF_LOO_POLICY", ""
       ).strip().lower() in ("1", "true", "yes", "on")
+      use_self_inf_loo_policy_only = os.environ.get(
+          "TUNIX_DBC_SELF_INF_LOO_POLICY_ONLY", ""
+      ).strip().lower() in ("1", "true", "yes", "on")
       if use_self_inf_loo_policy and not use_self_inf_loo:
         raise ValueError(
             "TUNIX_DBC_SELF_INF_LOO_POLICY requires "
             "TUNIX_DBC_SELF_INF_LOO=1."
         )
-      if use_self_inf_loo_policy:
+      if use_self_inf_loo_policy_only and not use_self_inf_loo_policy:
+        raise ValueError(
+            "TUNIX_DBC_SELF_INF_LOO_POLICY_ONLY requires "
+            "TUNIX_DBC_SELF_INF_LOO_POLICY=1."
+        )
+      if use_self_inf_loo_policy_only:
+        actor_trainer_cls = (
+            self_inf_loo_policy_only_trainer.PolicyOnlySelfInfLooTrainer
+        )
+      elif use_self_inf_loo_policy:
         actor_trainer_cls = (
             self_inf_loo_policy_trainer.PolicySelfInfLooTrainer
         )

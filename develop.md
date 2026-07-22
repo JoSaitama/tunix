@@ -7531,6 +7531,455 @@ This file tracks engineering changes made in this repository.
 ### Known risks / TODO
 
 - The TPU smoke remains necessary to validate dual per-sample gradient compilation, HBM, class routing, JSONL records, checkpointing, and model export.
+
+---
+
+## 2026-07-22 - Batch Policy-LOO one-step smoke interpretation
+
+### Scope
+
+- Reviewed the completed Batch Policy-LOO seed-0 smoke output after the score-loss input fix.
+- No code or launcher changes; this entry records validation interpretation only（无代码改动）.
+
+### Changed files
+
+1. `develop.md`
+
+### Validation results
+
+- The unified launcher selected `batch_loo_policy`, seed 0, dataset seed 42, rollout seed 0, and the new independent policy launcher.
+- Smoke overrides intentionally resolved to `max_train_examples=8`, one train split batch, `max_steps=1`, and both pre/post evaluation disabled.
+- One optimizer step completed in 170.72 seconds, training completed, the merged model exported successfully, and the wrapper exited with code 0.
+- Run, log, checkpoint/model, stdout label, and result paths use a fresh `dtv_selfinf_batch_loo_policy` timestamp; there is no evidence of an old Batch LOO checkpoint or result being restored.
+- The missing stdout eval summary is expected because `--skip-eval-before --skip-eval-after` was used. Any one-point TensorBoard eval reward generated internally is not a post-train GSM8K accuracy result and must not be used for method comparison.
+
+### Known risks / TODO
+
+- Inspect the smoke selection JSONL before the full run: require `scope=batch`, `score_objective=policy`, `min_keep_fraction=0.25`, 16 scores/mask entries, finite scores, and an applied/effective optimizer update.
+- The first dual-gradient step includes JIT compilation and is slower than existing one-gradient methods; measure steady-state full-run steps before deciding whether implementation optimization is necessary.
+- The smoke model is a disposable one-step artifact, not an experimental result. Use the no-override seeded launcher for the full 691-step run with pre/post evaluation.
+
+---
+
+## 2026-07-22 - L2 outlier versus strict DTV-LOO mechanism audit
+
+### Scope
+
+- Audited the mathematical and code-level differences between L2 outlier curation and strict Batch/Group DTV-LOO after the professor meeting.
+- Distinguished counterfactual mask overlap on identical LOO-run gradients from retrospective comparison with the separately trained L2 run.
+- Developed a prioritized future direction without modifying code or launchers（无代码改动）.
+
+### Changed files
+
+1. `develop.md`
+
+### Mathematical findings
+
+- L2 filters by magnitude only: `||g_i|| > mean(||g||) + 3*std(||g||)`. It removes both aligned and anti-aligned extreme gradients and ignores direction.
+- Strict LOO filters by sign only: `g_i^T mean(g_-i) < 0`. Removing the self term means the score contains no direct norm-outlier test; norm scales the dot-product magnitude but does not determine its sign.
+- Original DTV decomposes as `(self + cross)/N`; it filters only when `cross < -self`. Strict LOO filters whenever `cross < 0`. Thus LOO catches reverse extremes that self-protection would rescue, but also catches every mild negative conflict.
+- A principled DTV continuum is `cross < -alpha*self`, `alpha in [0,1]`: alpha 0 is strict LOO, alpha 1 matches the original DTV negative-score condition, and intermediate alpha values target strong anti-alignment without adopting an L2 outlier rule.
+
+### Code-level protection audit
+
+- Both implementations compute fixed-shape per-completion gradients, construct a fixed mask, multiply and average selected total gradients, and always call `optimizer.update`; both share the same downstream Optax clipping/AdamW configuration.
+- L2 has no explicit minimum-keep cap, top-k rescue, finite-score guard, per-group protection, or skip-update branch. Its practical protection is the conservative three-standard-deviation cutoff; for finite values at least one observation must be at or below the mean/cutoff.
+- LOO explicitly excludes nonfinite scores, defaults to a 25% minimum keep, uses deterministic top-k rescue when the threshold retains too few, and applies the cap independently per prompt for Group LOO.
+- Both renormalize by the number retained, rather than dividing zero-masked gradients by the original batch size. Consequently aggressive LOO selection changes both direction and the relative influence of survivors.
+
+### Existing identical-gradient counterfactual evidence
+
+- Batch LOO: 4594/11056 LOO-negative versus 316/11056 counterfactual L2 outliers, with only 134 samples in both. The negative-set precision for L2 is 2.92%, L2 recall is 42.41%, and Jaccard overlap is about 2.81%.
+- Group LOO: 3385/11056 LOO-negative versus 303/11056 counterfactual L2 outliers, with 151 in both. Precision is 4.46%, L2 recall is 49.83%, and Jaccard overlap is about 4.27%.
+- These low overlaps establish that strict LOO and L2 do not select approximately the same samples even when evaluated on identical gradients.
+- They do not identify the exact samples removed by the independently trained L2 trajectory after step 1: the model, rollout, reward, and gradient streams diverge after different first updates, and the completed L2 run logged only aggregate norm/skipped statistics, not per-sample identities.
+
+### Prioritized research direction
+
+1. Finish the isolated policy-score LOO seed-0 experiment and measure whether removing KL from attribution changes mask rate and accuracy.
+2. Offline-sweep `alpha` in `cross < -alpha*self` using existing JSONL `raw_cross_sum` and `raw_self`, reporting filter rate, cap activation, overlap with counterfactual L2, score margins, and training-stage stability. Choose on train/validation behavior, not GSM8K test accuracy.
+3. If policy-only LOO remains broad, test an isolated strong-conflict Policy-LOO branch using the alpha margin while preserving the full policy+KL update and all existing methods.
+4. Add shadow diagnostics that compute L2 and DTV decisions on the same live gradients without changing the chosen update; record prompt/sample identity, reward, advantage sign/magnitude, correctness, format, completion length, KL, norm, self/cross terms, and both masks.
+5. Evaluate three paired seeds first and expand the key baseline/L2/best-DTV comparison to five seeds for paper claims.
+
+### Known risks / TODO
+
+- Matching L2's filter rate alone does not make the selected samples equivalent; report overlap and semantic/outcome categories.
+- Hard completion deletion can disturb GRPO's intentional within-prompt positive/negative-advantage contrast. Group-level results must separately report whether a removed completion had positive, negative, or zero advantage.
+- Do not claim exact actual-run L2/LOO sample overlap from current historical logs. Only the counterfactual L2 mask reconstructed on LOO gradients is exact for identical samples.
+
+---
+
+## 2026-07-22 - Correct DTV objective framing and inspect Batch LOO/L2 sample CSV
+
+### Scope
+
+- Corrected the interpretation of DTV as step-local gradient-direction curation: samples whose gradients oppose the intended aggregate update are masked before optimization to reduce drag on that update.
+- Verified the exact minimum-retention implementation and analyzed the supplied 11,056-row Batch LOO versus counterfactual-L2 sample CSV.
+- No training code, method, launcher, or analysis artifact was changed（无代码改动）.
+
+### Changed files
+
+1. `develop.md`
+
+### Verification commands and results
+
+- Inspected `_stable_top_k_mask`, `_capped_mask`, Batch/Group routing, masked gradient aggregation, and optimizer update in `tunix/rl/self_inf_loo_trainer.py`.
+- Confirmed scores are sorted descending (`argsort(-safe_scores)`); when the nonnegative set is below the minimum, the final mask keeps the highest finite scores. Negative samples are therefore rescued from closest-to-zero downward, never from the most negative upward.
+- Parsed the supplied CSV: 691 steps and 11,056 samples; 316 counterfactual L2 drops, 4,594 LOO-negative samples, and 4,569 final LOO drops.
+- The 25% Batch cap rescued only 25 samples across 17 steps. Rescued scores ranged from about -0.438 to -0.0000394, with median about -0.00860.
+- Exact categories were 134 both-drop, 182 L2-only, 4,435 LOO-only, and 6,305 kept-by-both.
+- L2-only samples had median norm 23.82 and median positive LOO score 1.34; both-drop samples had median norm 19.47 and median LOO score -1.08; LOO-only samples had median norm 2.08 and median score -0.111; kept-by-both samples had median norm 1.94 and median score 0.135.
+
+### Interpretation
+
+- L2 magnitude filtering and DTV directional filtering solve different step-local problems. L2 removes extreme leverage regardless of whether it assists or opposes the aggregate direction; strict LOO removes directional opposition regardless of magnitude.
+- The supplied data show L2 removes 182 extreme but directionally positive samples and misses 4,435 directionally negative non-outliers. Thus overlap alone is not a quality target; the important question is which rule better predicts the subsequent useful optimizer update.
+- Because the 25% cap almost never activates in Batch LOO, it cannot explain the weak default result and changing the cap primarily changes behavior on steps with fewer than the requested retained count.
+
+### Known risks / TODO
+
+- Gradient dot products are measured in raw gradient space, whereas AdamW applies moment-based coordinate-wise preconditioning and global clipping. Raw alignment is a proxy for, not exactly equal to, contribution along the realized parameter update.
+- The supplied CSV contains gradient and mask fields but not prompt/completion text, reward, advantage, KL, or correctness, so it supports exact numerical overlap analysis but not semantic sample-quality attribution.
+- Evaluate total-loss versus policy-loss scoring according to which gradient best approximates the intended GRPO update direction; do not reframe DTV as an outlier detector.
+
+---
+
+## 2026-07-22 - Policy-component masking and GRPO trajectory-unit analysis
+
+### Scope
+
+- Analyzed whether PPO-style policy-score plus policy-component-only masking preserves the DTV idea and whether GSM8K GRPO needs rollout-to-trajectory segmentation.
+- Inspected the active GRPO loss construction, completion masks, policy-score configuration, and current Policy-LOO gradient application.
+- No training code, method, or launcher was changed（无代码改动）.
+
+### Changed files
+
+1. `develop.md`
+
+### Verification results
+
+- `grpo_loss_fn` builds a per-token clipped policy surrogate and, when beta is nonzero, adds `beta * KL`; the configured default beta is 0.08. There is no critic or value loss in this GRPO actor objective.
+- The policy-score branch constructs the same GRPO loss with beta set to zero, so score gradients are policy-only.
+- Current Policy-LOO uses policy-only gradients to compute the selection score but applies the resulting sample mask to complete per-sample total gradients. It is policy-score plus full-sample mask, not policy-component-only masking.
+- Each GSM8K GRPO sample is one generated completion from a prompt until EOS or the generation limit. Its token losses are aggregated using the completion mask, and DTV masking removes the entire completion gradient while preserving static tensor shapes.
+- A train micro-batch contains multiple prompt groups and multiple complete generations, but not a continuing environment rollout containing several independently terminated episodes. No additional stop-based trajectory splitting is required for the current GSM8K experiment.
+
+### Interpretation
+
+- Policy-score plus policy-component-only masking remains a direction-aware DTV variant if the target direction is explicitly defined as policy improvement: harmful policy contributions are removed while value/regularization components retain their own training signal. It is component-selective DTV rather than full-gradient DTV and must be named and reported separately.
+- This distinction is important in PPO because the value objective is essential and semantically different from the policy objective. In current GRPO there is no value loss; the only non-policy component to preserve would be KL regularization, so the motivation is weaker but still testable.
+- For GRPO policy-only masking, the intended aggregation must be specified carefully: average selected policy gradients over selected samples while averaging KL gradients over all samples, rather than accidentally changing either component's scale through a shared denominator.
+
+### Known risks / TODO
+
+- A filtered completion can still move actor parameters through its retained KL gradient under policy-component-only masking; claims must therefore concern harmful policy contribution, not complete sample removal.
+- Multi-turn, tool-using, or environment-interacting GRPO would require revisiting trajectory boundaries and credit assignment, but that concern does not apply to the present single-completion GSM8K setup.
+- If implemented later, policy-component-only masking must be an isolated new method; current Policy-LOO and all existing full-mask methods must remain unchanged.
+
+---
+
+## 2026-07-22 - Batch Policy-LOO seed-0 full result and Group run decision
+
+### Scope
+
+- Reviewed the completed Batch Policy-LOO seed-0 full-run result and verified the effective minimum-retention setting selected by the seeded launcher.
+- Compared the result with the existing seed-matched baseline, total-loss Batch LOO, original Batch DTV, Group LOO, and L2 results.
+- No training code, method, or launcher was changed（无代码改动）.
+
+### Changed files
+
+1. `develop.md`
+
+### Verification results
+
+- Command `run_seeded_full.sh batch_loo_policy 0` selects the independent Batch Policy-LOO launcher and does not match the `_keep75` suffix branch.
+- The seeded wrapper explicitly unsets `TUNIX_DBC_SELF_INF_MIN_KEEP_FRACTION` for this method; `rl_cluster.py` therefore supplies the method default of 0.25.
+- Post-train Batch Policy-LOO seed-0 result: 708/1319 exact, 53.6770% accuracy, 56.7854% partial accuracy, and 71.4936% format accuracy.
+- Relative to total-loss Batch LOO, Policy-LOO gains 62 correct answers and 4.7005 percentage points exact accuracy.
+- Relative to baseline, it gains 70 correct answers and 5.3071 points; it is 3 answers and 0.2274 points below original Batch DTV, and 25 answers and 1.8954 points below L2.
+
+### Interpretation / next action
+
+- The large controlled gain from changing score objective while retaining full masking and the same 25% cap is evidence that total-loss attribution was a major source of poor Batch LOO selection.
+- Run Group Policy-LOO seed 0 next with the same seeded wrapper and default 25% group-local cap. This is the necessary paired scope comparison before trying Keep75 or policy-component-only masking.
+
+### Known risks / TODO
+
+- One seed does not establish superiority or equivalence; inspect the selection JSONL and complete the paired Group Policy-LOO result before seed expansion.
+- Confirm the pre-train evaluation, config summary, exit code, and model export in the full log before including the result in aggregate tables.
+
+---
+
+## 2026-07-22 - Group Policy-LOO performance hypothesis
+
+### Scope
+
+- Assessed whether Group Policy-LOO could plausibly match L2 given the observed scope reversal between original DTV and strict total-loss LOO, plus the Batch Policy-LOO gain.
+- No code, method, launcher, or result artifact was changed（无代码改动）.
+
+### Changed files
+
+1. `develop.md`
+
+### Quantitative hypothesis
+
+- Total-loss Group LOO exceeds total-loss Batch LOO by 1.4405 percentage points.
+- Applying that observed scope gap to Batch Policy-LOO gives a rough Group Policy-LOO estimate of 55.1175%, only 0.4549 points (approximately 6/1319 questions) below the seed-0 L2 result of 55.5724%.
+- The same estimate follows by adding the Batch policy-score gain of 4.7005 points to total-loss Group LOO.
+
+### Interpretation
+
+- Matching or exceeding L2 at seed 0 is plausible, because Group LOO compares completions within the same prompt and therefore aligns naturally with GRPO's group-relative advantages, while policy scoring removes KL-induced attribution from the selection rule.
+- The estimate is not additive evidence: changing score objective changes masks and optimization trajectories, and the Group reference uses only three peers, making its score noisier and its 25% cap discrete at one completion per prompt.
+
+### Known risks / TODO
+
+- Wait for the actual Group Policy-LOO seed-0 result before deciding on Keep75, policy-component masking, or seed expansion.
+- Treat a single-seed tie as candidate evidence only; use paired seeds for the final L2 comparison.
+
+---
+
+## 2026-07-22 - Group Policy-LOO seed-0 result and method-matrix decision
+
+### Scope
+
+- Recorded the completed Group Policy-LOO seed-0 result and compared all current GSM8K seed-0 methods, including default and Keep75 total-loss LOO variants.
+- Evaluated the observed score-objective, scope, and retention-cap trends to prioritize the next experiments.
+- No code, method, launcher, or result artifact was changed（无代码改动）.
+
+### Changed files
+
+1. `develop.md`
+
+### Results
+
+- Group Policy-LOO: 694/1319, 52.6156% exact, 54.7384% partial, 73.8438% format.
+- It improves total-loss Group LOO by 29 correct answers and 2.1986 percentage points, exceeds original Group DTV by 12 answers and 0.9098 points, but trails Batch Policy-LOO by 14 answers and 1.0614 points.
+- Batch Policy-LOO remains the best DTV-family LOO variant at 708/1319 (53.6770%), only 3 answers below original Batch DTV but 25 below L2.
+- Group total-loss Keep75 improves default Group LOO by 15 answers and 1.1372 points, whereas Batch total-loss Keep75 reduces default Batch LOO by 14 answers and 1.0614 points.
+
+### Interpretation / next action
+
+- Policy scoring is strongly beneficial in both scopes, but its gain is larger for Batch (+4.7005 points) than Group (+2.1986 points). It restores Batch-over-Group ordering rather than creating a Group breakthrough.
+- Keep75 is scope-dependent and is not a general cure for strict LOO. Group Policy-LOO Keep75 is worth one seed-0 run only to complete the interaction cell; Batch Policy-LOO Keep75 has low priority because the analogous total-loss Batch experiment degraded.
+- Before adding another algorithm, compare policy versus total selection logs: filtering rate, cap activation, mask overlap, score-sign flips, and group advantage composition.
+- For robust claims, prioritize paired seed 5/21 runs for L2 and the strongest DTV-family candidates rather than optimizing exclusively against seed 0.
+
+### Known risks / TODO
+
+- Policy and total variants follow different optimization trajectories, so historical masks are comparable diagnostically but not as identical post-step sample populations.
+- A Group Policy-LOO Keep75 gain would complete an ablation but is unlikely by itself to close the full L2 gap based on current scope/cap trends.
+
+---
+
+## 2026-07-22 - Decide on PPO-aligned Policy-Only masking
+
+### Scope
+
+- Evaluated whether to inspect existing Policy-LOO logs or immediately add a PPO-aligned `dtv_loo_policy_only` method for Batch and Group scopes.
+- Defined the intended component-selective update and an evidence-preserving implementation direction without changing training code.
+- No code, method, launcher, or test was changed（无代码改动）.
+
+### Changed files
+
+1. `develop.md`
+
+### Decision
+
+- Perform a short existing-log audit first, then add the isolated Policy-Only variants. The audit can verify policy-score filtering/cap behavior but cannot counterfactually estimate the effect of retaining KL gradients, so it is not a substitute for the new experiment.
+- The proposed method uses policy-only per-sample gradients for DTV-LOO scores, masks and averages only selected policy gradients, retains the KL-gradient mean over all samples, and applies their sum in the optimizer update.
+- This matches the component-selective principle used in the PPO experiments while adapting PPO's retained value component to GRPO's retained KL regularization component.
+
+### Implementation constraints for a later code-change turn
+
+- Add independent Batch/Group method identities and launchers ending in `_loo_policy_only`; keep the default 25% minimum retention and all seeded hyperparameters unchanged.
+- Preserve every existing baseline, L2, original DTV, total-loss LOO, and policy-score full-mask path exactly.
+- Reuse the already computed total and policy per-sample gradients: the weighted KL component can be obtained as `total_gradient - policy_gradient`, avoiding a third per-sample gradient pass.
+- Aggregate selected policy gradients over selected samples and the KL component over all samples with separate denominators; do not allow filtering rate to rescale the effective KL coefficient.
+- Retain the existing selection records and add an explicit mask-application identity plus policy/KL update-norm diagnostics.
+
+### Known risks / TODO
+
+- Because Policy-Full and Policy-Only runs diverge after their first update, later mask differences reflect both update semantics and trajectory changes.
+- A filtered sample still affects actor parameters through KL under Policy-Only masking, so the paper must claim removal of harmful policy contribution rather than complete sample removal.
+
+---
+
+## 2026-07-22 - Audit Policy-LOO selection strength before Policy-Only masking
+
+### Scope
+
+- Analyzed the completed Batch and Group Policy-LOO seed-0 selection audits to assess whether Policy-Only masking could plausibly close the L2 gap.
+- No code, method, launcher, or result artifact was changed（无代码改动）.
+
+### Changed files
+
+1. `develop.md`
+
+### Audit findings
+
+- Batch Policy-LOO filters 2,346/11,056 samples (21.2192%), with no cap activation or rescued sample; mean retained fraction is 78.7808%.
+- Group Policy-LOO has 2,370 negative samples but rescues 136 through group-local caps, finally filtering 2,234/11,056 (20.2062%) and retaining 79.7938%.
+- Policy scoring substantially reduces selection aggressiveness relative to total-loss LOO: Batch drops from about 41.33% to 21.22%, and Group drops from about 28.45% to 20.21%.
+- Batch permits 88/2,764 prompt groups to retain zero completions because its cap is batch-global. Group retains at least one completion per prompt; 377 groups retain one, 319 retain two, 465 retain three, and 1,603 retain all four.
+- Despite filtering fewer samples and protecting every prompt group, Group Policy-LOO trails Batch Policy-LOO by 1.0614 points. Filter rate and group survival alone therefore do not explain performance ordering.
+- Policy-score quartiles and median at exactly zero indicate substantial zero-score mass, plausibly from zero policy gradients when group-relative advantages collapse/tie; exact zero counts and reward/advantage linkage require additional diagnostics.
+
+### Policy-Only assessment
+
+- Policy-Only will not reduce the number of policy gradients removed: it preserves the same Policy-LOO mask and restores only the all-sample weighted KL-gradient contribution.
+- It can close the L2 gap only if a material part of the remaining deficit is caused by removing KL regularization for the filtered approximately 20% of completions. It cannot fix loss caused by incorrectly masking useful policy gradients.
+- The PPO analogy supports the experiment, but the expected effect may be smaller in GRPO because PPO preserves an essential value-learning objective, whereas current GRPO preserves only beta=0.08 KL regularization.
+- The experiment remains well motivated as a cross-algorithm consistency ablation, but it should not be presented as likely to recover the entire 1.8954-point Batch Policy-LOO-to-L2 gap before evidence.
+
+### Known risks / TODO
+
+- Measure exact-zero policy-score frequency and, if available, relate it to tied rewards/zero advantages before interpreting score distributions.
+- Add policy/KL component gradient-norm and cosine diagnostics to a future Policy-Only method so any gain or loss can be attributed to restored regularization rather than filter-count changes.
+
+---
+
+## 2026-07-22 - Policy-score zero mass and L2 scale comparison
+
+### Scope
+
+- Analyzed exact zero-score counts for Batch and Group Policy-LOO and reframed their comparison with L2 around update contribution rather than mask imitation.
+- No code, method, launcher, or result artifact was changed（无代码改动）.
+
+### Changed files
+
+1. `develop.md`
+
+### Findings
+
+- Batch Policy-LOO has 2,346 negative (21.22%), 4,535 zero (41.02%), and 4,175 positive (37.76%) scores; 35.98% of nonzero policy gradients are negative.
+- Group Policy-LOO has 2,370 negative (21.44%), 4,558 zero (41.23%), and 4,128 positive (37.34%) scores; 36.47% of nonzero policy gradients are negative before group-cap rescue.
+- About 41% exact-zero mass is consistent with frequent tied group rewards/zero GRPO advantages. These samples are retained but contribute no policy gradient; under full masking they can still contribute KL because their score is nonnegative.
+- Relative to the approximately 2.8% counterfactual L2 outlier rate observed on total-loss LOO gradients, Policy-LOO removes roughly seven times as many total samples and more than one third of samples with active policy signal.
+- The current Policy selection records contain policy-gradient self/cross terms, whereas the actual L2 method thresholds total-loss gradient norms. Exact actual-L2 versus Policy-LOO sample overlap cannot be recovered from these historical runs; only a policy-gradient counterfactual L2 mask can be reconstructed.
+
+### Interpretation
+
+- L2 sparsely controls extreme gradient leverage regardless of alignment; Policy-LOO removes directional opposition among active policy gradients regardless of norm. Their mask rates and overlap are not objectives that DTV should match.
+- Batch Policy-LOO reaching within 1.8954 points of L2 despite removing a much larger, direction-defined set supports the usefulness of policy-alignment curation, but also leaves open whether useful minority policy directions are being discarded.
+- Policy-Only masking preserves the same policy selection and therefore cannot reduce directional filtering; it tests whether restoring all-sample KL regularization improves the outcome enough to match or exceed L2.
+
+### Known risks / TODO
+
+- Exact-zero score alone does not prove the cause is tied reward; record reward and advantage alongside future selection decisions to verify.
+- Use a same-gradient shadow diagnostic for exact L2/DTV sample comparisons in future runs; do not infer actual historical overlap from separately trained trajectories.
+
+---
+
+## 2026-07-22 - Interpret Policy-LOO/L2 overlap and clarify KL versus group baseline
+
+### Scope
+
+- Analyzed counterfactual policy-gradient L2 overlap for Batch/Group Policy-LOO.
+- Clarified the distinction between GRPO group-relative reward/advantage evaluation and KL regularization when defining a Policy-Only mask.
+- No code, method, launcher, or result artifact was changed（无代码改动）.
+
+### Changed files
+
+1. `develop.md`
+
+### Overlap findings
+
+- Batch: 253 policy-gradient L2 outliers (2.29%) versus 2,346 Policy-LOO drops (21.22%), with 98 in both; precision 4.18%, L2 recall 38.74%, and Jaccard 3.92%.
+- Group: 243 policy-gradient L2 outliers (2.20%) versus 2,234 final Policy-LOO drops (20.21%), with 83 in both; precision 3.72%, L2 recall 34.16%, and Jaccard 3.47%.
+- Policy-LOO is therefore not an L2 proxy: more than 95% of its filtered samples are not policy-norm outliers, and most policy-norm outliers are retained because they are not directionally negative.
+
+### Objective clarification
+
+- All generated completions already participate in reward computation and group-relative advantage normalization before DTV selection. A later full-gradient mask does not retroactively remove a filtered completion from the prompt group's reward mean/standard deviation or from peers' advantages.
+- KL does not evaluate which completion is good relative to its prompt group. It measures deviation between the current policy and reference policy for each completion and supplies a regularization gradient.
+- The precise Policy-Only objective is therefore: compute group-relative advantages from all completions; compute DTV-LOO scores from policy gradients; mask harmful policy-gradient contributions; retain the KL regularization gradients from all completions.
+
+### Paper framing
+
+- Describe the proposed method as `policy-gradient selective masking with unmasked KL regularization`, not as retaining filtered samples in the group baseline (which already occurs in existing Full Mask methods).
+- Student analogy: every student's score remains in class mean/standard-deviation evaluation; advice that conflicts with the chosen teaching direction is excluded from the policy change; nevertheless every answer still contributes a constraint that teaching should not drift too far from the reference curriculum.
+
+### Known risks / TODO
+
+- If the intended requirement is only to retain filtered completions in GRPO advantage normalization, no new Policy-Only method is required because current methods already satisfy it.
+- A new method is justified only to test unmasked all-sample KL regularization, and its result should be interpreted as a component-masking ablation rather than a change to group-relative credit assignment.
+
+---
+
+## 2026-07-22 - Add Batch/Group DTV-LOO Policy-Only methods
+
+### Scope
+
+- Added isolated Batch and Group `dtv_loo_policy_only` methods while preserving every existing baseline, L2, original DTV, total-loss LOO, and policy-score full-mask method and launcher behavior.
+- Policy-only methods compute strict LOO selection from policy gradients, mask selected policy-gradient contributions, and retain the beta-weighted KL-gradient mean over all samples.
+
+### Changed files
+
+1. `tunix/rl/self_inf_loo_trainer.py`
+2. `tunix/rl/self_inf_loo_policy_only_trainer.py` (new)
+3. `tunix/rl/rl_cluster.py`
+4. `my_example/run_dbc_self_inf_loo_policy_only.sh` (new)
+5. `my_example/run_dbc_self_inf_batch_loo_policy_only.sh` (new)
+6. `my_example/run_dbc_self_inf_group_loo_policy_only.sh` (new)
+7. `my_example/run_seeded_full.sh`
+8. `tests/rl/self_inf_loo_policy_only_trainer_test.py` (new)
+9. `develop.md`
+
+### Implementation details
+
+- Added backward-compatible aggregation hooks to `SelfInfLooTrainer`; their defaults reproduce the existing full-mask gradient, loss, and auxiliary aggregation paths.
+- Reused the existing total and policy per-sample gradient passes. The already beta-weighted KL component is `total_gradient - policy_gradient`, avoiding a third backward pass.
+- Final Policy-Only update is `mean(selected policy gradients) + mean(all weighted KL gradients)`, with independent denominators so filtering does not rescale effective beta.
+- Selection JSONL retains every existing score/self/cross/mask/cap record and adds `mask_application=policy_only`; `score_objective=policy` remains unchanged.
+- Added the gated environment selector `TUNIX_DBC_SELF_INF_LOO_POLICY_ONLY`; it requires both existing LOO and policy-score selectors, so no existing environment combination routes to the new trainer.
+- Added seeded method names `batch_loo_policy_only` and `group_loo_policy_only`, both using the existing default 25% minimum retention and the same full-run parameters as their Policy-Full counterparts.
+
+### Validation commands and results
+
+- `bash -n` passed for the generic Policy-Only launcher, Batch/Group wrappers, and `run_seeded_full.sh`.
+- `python3 -m py_compile` passed for all modified/new Python modules and the new test.
+- `git diff --check` passed.
+- The three JAX/Flax unit-test commands were attempted locally but could not start because the local desktop Python environments do not contain `absl` (and the repository has no local TPU/JAX virtualenv). This is an environment limitation, not a test assertion failure.
+
+### Known risks / TODO
+
+- Run existing total-LOO and Policy-Full unit tests plus the new Policy-Only test in `.venv_jax081` on the server.
+- Run a one-step TPU smoke for Batch Policy-Only and inspect trainer selection, `mask_application`, finite scores, effective update, checkpointing, and export before the full seed-0 run.
+- Historical methods are protected by default aggregation hooks and gated routing, but the server regression tests remain required before experimental use.
+
+---
+
+## 2026-07-22 - Assess policy-score plus policy-only masking for GRPO
+
+### Scope
+
+- Analyzed the distinction between the loss component used to compute DTV scores and the loss components affected by the resulting mask.
+- Compared the prior PPO policy-mask rationale with the loss decomposition in the current GRPO implementation.
+- No training code, method, launcher, or configuration was changed（无代码改动）.
+
+### Changed files
+
+1. `develop.md`
+
+### Verification commands and results
+
+- Inspected `tunix/rl/grpo/grpo_learner.py`: the actor loss is the clipped GRPO policy surrogate plus optional `beta * KL`; setting `beta=0` creates the current policy-only score loss.
+- Confirmed GRPO has no critic/value loss in this experiment. The repository explicitly describes the critic role as PPO-style only, not GRPO.
+- Inspected `tunix/rl/self_inf_loo_policy_trainer.py` and `tunix/rl/self_inf_loo_trainer.py`: the current Policy-LOO variant computes the mask from KL-free policy gradients but applies that mask to the full per-sample actor gradient, including policy and KL contributions.
+- Inspected Tunix PPO: actor policy and critic value losses use separate trainers. Conceptually, policy-only masking preserves critic/value learning; in GRPO the closest analogous preserved component would be KL regularization, not a value loss.
+
+### Interpretation
+
+- Policy-score plus policy-only masking does not discard DTV's core directional criterion; it is a component-selective DTV variant whose declared target is acceleration of the policy-improvement component rather than the entire composite objective.
+- For PPO, preserving value learning has a strong independent rationale because critic targets remain informative even when an action-policy gradient conflicts. For GRPO there is no value branch, so policy-only masking means retaining only the filtered completion's KL gradient.
+- KL is a reference-policy constraint, not the GRPO analogue of value learning. Therefore policy-only masking is technically applicable but should be tested as a separate ablation rather than assumed to transfer from PPO.
+
+### Known risks / TODO
+
+- Retaining KL for a policy-filtered completion means the sample still changes actor parameters; this no longer removes its full contribution to the realized total update.
+- Compare at least policy-score/full-mask and policy-score/policy-mask under identical seeds. Log policy, KL, and total gradient contributions separately so the interpretation remains identifiable.
 ## 2026-07-21 - Summarize current GSM8K GRPO experiment
 
 ### Scope
