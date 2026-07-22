@@ -7556,3 +7556,27 @@ This file tracks engineering changes made in this repository.
 - Full runtime results were not produced in this documentation-only task; TPU environment, dataset/model access, checkpoint restore, and end-to-end metrics still require execution checks.
 
 ---
+## 2026-07-22 - Explain GSM8K GRPO table metrics
+
+### Scope
+
+- Inspected `my_example/eval.py`, `my_example/main.py`, and the supplied GRPO result table to document the exact meanings of Pre Acc, Post Acc, Delta, Correct, Partial, and Format.
+- No experiment code or launcher changes（无代码改动）.
+
+### Changed files
+
+1. `develop.md`
+
+### Validation commands and results
+
+- Confirmed exact-match accuracy is computed after extracting the number following the solution marker and comparing it numerically with the GSM8K answer.
+- Confirmed Partial counts answers whose extracted number is between 90% and 110% of the reference value; it includes exact answers and is not a disjoint error category.
+- Confirmed Format counts responses matching the required reasoning/solution-tag regular expression, independently of numerical correctness.
+- Confirmed the table's `638/1319` equals `48.3700%`, so Correct is the numerator/denominator form of Post Acc; Delta is Post Acc minus Pre Acc in percentage points.
+
+### Known risks / TODO
+
+- For `num_passes > 1`, each question is counted as successful when at least one generated response satisfies a metric; the displayed runs normally use one evaluation pass.
+- Partial uses a ratio check rather than absolute or symmetric relative error, so interpretation around zero or negative reference answers requires care, although GSM8K answers are ordinarily non-negative.
+
+---
