@@ -7951,6 +7951,115 @@ This file tracks engineering changes made in this repository.
 
 ---
 
+## 2026-07-23 - Reduce Policy-Only TPU compilation peak memory
+
+### Scope
+
+- Fixed a Group Policy-Only first-step TPU compile/load failure: XLA attempted to reserve 29.79 GiB with only 28.70 GiB reservable.
+- Changed only the new Policy-Only aggregation implementation; all existing methods and routing remain unchanged.
+
+### Changed files
+
+1. `tunix/rl/self_inf_loo_policy_only_trainer.py`
+2. `develop.md`
+
+### Root cause and fix
+
+- The first implementation explicitly constructed the full per-sample weighted-KL gradient pytree as `total_per_sample_grads - policy_per_sample_grads`. That introduced another model-sized, batch-leading intermediate at the memory-critical compiled step.
+- Replaced it with the algebraically identical aggregate expression `selected_policy_mean + all_total_mean - all_policy_mean`. This computes the all-sample weighted-KL contribution without materializing a third per-sample gradient pytree.
+- Applied the same algebraic rewrite to the reported loss: `selected_policy_loss + mean(total_loss) - mean(policy_loss)`.
+- The update remains exactly `mean(selected policy gradients) + mean(all beta-weighted KL gradients)` with independent selected/all-sample denominators.
+
+### Validation commands and results
+
+- Local syntax/compile checks and the Policy-Only unit test must be rerun after this rewrite.
+- TPU one-step Group smoke is required to confirm the peak drops below the 28.70 GiB device limit.
+
+### Known risks / TODO
+
+- XLA may still choose a device-specific buffer schedule with a high peak. If the optimized expression remains above capacity, inspect other TPU processes and compiler memory analysis before changing experimental batch parameters.
+
+---
+
+## 2026-07-22 - Diagnose TPU log permission failure on second server
+
+### Scope
+
+- Diagnosed a `/tmp/tpu_logs` permission failure before the Group Policy-Only smoke/run on the second TPU server.
+- No repository code, method, launcher, or test was changed（无代码改动）.
+
+### Changed files
+
+1. `develop.md`
+
+### Findings / recommended repair
+
+- `chmod -r 777` is syntactically wrong for recursive chmod (`-R` is recursive), but recursively making log files mode 777 is unnecessary and unsafe.
+- Recommended inspecting ownership, setting the shared temporary log directory itself to mode 1777, and changing ownership/permissions only for the stale current-user TPU log that blocks opening.
+- Verify no existing Python/TPU task is active before retrying Group Policy-Only.
+
+### Known risks / TODO
+
+- If the directory is managed by a TPU service and permissions are recreated on reboot/process start, identify the service user/umask rather than repeatedly applying broad permissions.
+- Run unit tests and a one-step Group Policy-Only smoke after the permission repair before launching the full experiment.
+
+---
+
+## 2026-07-22 - Transfer ownership of stale TPU logs on second server
+
+### Scope
+
+- Interpreted the follow-up `/tmp/tpu_logs` state: directory mode 1777 is correct, the originally reported timestamped log no longer exists, and remaining logs/directories belong to a previous server user.
+- No repository code, method, launcher, or test was changed（无代码改动）.
+
+### Changed files
+
+1. `develop.md`
+
+### Recommended operation
+
+- Before ownership transfer, check that the previous user has no active Python/TPU process.
+- If the host has been transferred exclusively to the current user, recursively change ownership of `/tmp/tpu_logs` to the current user, normalize files to user-readable/writable mode, and restore the top-level temporary directory to mode 1777.
+- Do not delete the old logs; ownership transfer is sufficient and preserves diagnostic history.
+
+### Known risks / TODO
+
+- Recursively taking ownership affects another user's historical files. Perform it only after confirming the machine/log directory is no longer actively shared.
+- Retry JAX TPU initialization after ownership transfer; new timestamped log names should be discovered dynamically rather than copied from an earlier error.
+
+---
+
+## 2026-07-23 - Reduce Group Policy-Only compile-time HBM peak
+
+### Scope
+
+- Diagnosed Group Policy-Only XLA compilation failure requiring 29.79 GiB with only 28.70 GiB reservable, while Batch Policy-Only completed on the same method family.
+- Optimized only the new Policy-Only aggregation; no baseline, L2, original DTV, total-loss LOO, or Policy-Full path was changed.
+
+### Changed files
+
+1. `tunix/rl/self_inf_loo_policy_only_trainer.py`
+2. `tests/rl/self_inf_loo_policy_only_trainer_test.py`
+3. `develop.md`
+
+### Root cause and implementation
+
+- The original Policy-Only aggregation explicitly materialized a third full per-sample gradient tree, `weighted_kl_grads = total_grads - policy_grads`, while Group LOO also kept group statistics/cap intermediates live. The Group XLA buffer schedule exceeded available HBM by about 1.09 GiB; Batch had a more favorable fused/liveness schedule and fit.
+- Replaced the materializing form `selected_mean(policy) + mean(total - policy)` with the algebraically equivalent reduction-first form `mean(total) + selected_mean(policy) - mean(policy)`.
+- Applied the same algebraic rewrite to the displayed loss. The selection scores, masks, cap, default parameters, retained all-sample KL semantics, and optimizer update mathematics are unchanged apart from ordinary floating-point reduction ordering.
+
+### Validation
+
+- Static Python compilation, shell syntax, and diff checks are required locally; TPU Group smoke remains the decisive memory validation.
+- Existing numerical unit expectation remains 27.0 update gradient and 54.0 displayed loss for the synthetic policy/KL case.
+
+### Known risks / TODO
+
+- XLA buffer assignment is compiler/version/device dependent, so the algebraic rewrite is expected to remove the extra full tree but cannot guarantee the Group graph fits until rerun on the 28.70 GiB TPU worker.
+- If Group still misses HBM, collect compiler memory diagnostics before changing micro-batch size because reducing it would change the experiment's Batch/Group comparison parameters.
+
+---
+
 ## 2026-07-22 - Assess policy-score plus policy-only masking for GRPO
 
 ### Scope
@@ -8027,5 +8136,146 @@ This file tracks engineering changes made in this repository.
 
 - For `num_passes > 1`, each question is counted as successful when at least one generated response satisfies a metric; the displayed runs normally use one evaluation pass.
 - Partial uses a ratio check rather than absolute or symmetric relative error, so interpretation around zero or negative reference answers requires care, although GSM8K answers are ordinarily non-negative.
+
+---
+## 2026-07-22 - Document Mac-to-TPU VS Code SSH setup
+
+### Scope
+
+- Prepared a command-by-command workflow to discover a new Google Cloud TPU VM, authenticate a Mac with `gcloud`, initialize SSH access, and configure VS Code Remote-SSH.
+- Included separate discovery guidance for Cloud TPU API nodes and newer Compute Engine-managed TPU VMs, plus public-IP and private-IP caveats.
+- No experiment code or launcher changes（无代码改动）.
+
+### Changed files
+
+1. `develop.md`
+
+### Validation commands and results
+
+- Cross-checked the current official `gcloud compute tpus tpu-vm list`, `describe`, and `ssh` command interfaces.
+- Confirmed Cloud TPU VM SSH supports worker selection and `--dry-run`, which can expose the effective SSH username, host, key, and options needed by VS Code Remote-SSH.
+- No connection command was executed because the project ID, zone, TPU name, account, and network reachability belong to the new external server and were not supplied in this task.
+
+### Known risks / TODO
+
+- Direct VS Code Remote-SSH requires a reachable SSH endpoint; a TPU without an external IP needs an organization-approved bastion/VPN/private-network route or, for Compute Engine-managed instances, an IAP-compatible setup.
+- An ephemeral external IP can change after resource recreation; update the matching `HostName` in `~/.ssh/config` if that occurs.
+- OS Login, IAM roles, organization policies, and custom firewall rules can prevent SSH even when the local configuration is correct.
+
+---
+## 2026-07-22 - Diagnose missing TPU zone in gcloud list
+
+### Scope
+
+- Diagnosed the Mac `gcloud compute tpus tpu-vm list` failure after selecting project `tunix-testing`.
+- Provided read-only Cloud Asset Inventory and Compute Engine discovery commands to locate the TPU name and zone before retrying the zone-scoped TPU command.
+- No experiment code or launcher changes（无代码改动）.
+
+### Changed files
+
+1. `develop.md`
+
+### Validation commands and results
+
+- Confirmed from the command output that `core/project=tunix-testing` is set successfully and the failure is specifically an unset TPU location/zone.
+- Confirmed the Cloud TPU list operation is zone-scoped and officially requires `--zone` when `compute/zone` has not been configured.
+- No external server command was executed from this workspace; the user must run the discovery commands on the authenticated Mac terminal.
+
+### Known risks / TODO
+
+- Cloud Asset Inventory search requires `cloudasset.assets.searchAllResources`; if unavailable, use the Google Cloud TPU console or ask the project administrator for the TPU zone.
+- The resource might be a Compute Engine-managed TPU rather than a legacy Cloud TPU API node, so both inventories must be checked.
+
+---
+## 2026-07-22 - Refine existing SSH-config workflow for new TPU
+
+### Scope
+
+- Refined the Mac-to-TPU connection instructions for a Mac that already connects to two servers through `~/.ssh/config` and does not need Homebrew installation.
+- Documented how to reuse an existing host stanza, map TPU inventory fields to connection fields, obtain the missing SSH endpoint, validate with terminal SSH, and select the alias in VS Code Remote-SSH.
+- No experiment code or launcher changes（无代码改动）.
+
+### Changed files
+
+1. `develop.md`
+
+### Validation commands and results
+
+- Confirmed `DISPLAY_NAME` can be used as the TPU resource name and `LOCATION` as its zone, but `STATE` and `ASSET_TYPE` do not provide the SSH endpoint.
+- Confirmed a working SSH stanza still needs a local alias plus the effective host/IP, user, and authentication route/key; these can be copied from an existing stanza only when the new TPU uses the same account and access path.
+- No remote connection was attempted because the new TPU values and current SSH stanza were not supplied.
+
+### Known risks / TODO
+
+- Do not replace the whole SSH config; append a new uniquely named `Host` stanza and preserve both existing server entries.
+- The new TPU might use a different username, key, project, worker, external IP, bastion, or proxy command even when it belongs to the same organization.
+- Verify `STATE=READY` and obtain the effective endpoint before testing VS Code.
+
+---
+## 2026-07-22 - Clarify reuse of existing Google TPU SSH config
+
+### Scope
+
+- Explained how to add a third TPU entry to an existing Mac `~/.ssh/config` while reusing the established `google_compute_engine` identity.
+- Distinguished resource-inventory columns (`DISPLAY_NAME`, `LOCATION`, `STATE`, `ASSET_TYPE`) from the actual queued-resource/node/worker SSH target.
+- Documented the purpose and necessity of the additional SSH options present in one older generated host block.
+- No experiment code or launcher changes（无代码改动）.
+
+### Changed files
+
+1. `develop.md`
+
+### Validation commands and results
+
+- Confirmed current queued-resource SSH supports `--dry-run`, node/worker selection, the default `~/.ssh/google_compute_engine` key, and optional IAP tunneling.
+- Confirmed that reusing one Google Compute Engine SSH identity across multiple authorized TPU hosts is expected; each host still needs its own alias and resolved hostname/IP.
+- No local SSH configuration was changed because `~/.ssh/config` is outside the repository and the exact new resource values were not supplied.
+
+### Known risks / TODO
+
+- `StrictHostKeyChecking no` together with an empty or `/dev/null` known-hosts file disables meaningful server identity verification; retain it only when it is an intentional cluster policy or exact `gcloud --dry-run` output.
+- Queued resources may contain multiple nodes/workers, so VS Code must target one concrete node/worker, normally node 0 and worker 0 for a single-host experiment.
+
+---
+## 2026-07-22 - Explain editing macOS SSH config
+
+### Scope
+
+- Provided safe commands to create, back up, edit, permission-check, and validate `~/.ssh/config` on macOS.
+- No experiment code, launcher, or local SSH configuration changes（无代码改动）.
+
+### Changed files
+
+1. `develop.md`
+
+### Validation commands and results
+
+- No commands were executed against the user's home SSH configuration.
+- Documented `ssh -G` as a non-connecting syntax/effective-configuration check before attempting login.
+
+### Known risks / TODO
+
+- Preserve existing Host blocks and use the exact hostname, user, identity file, and optional host-key alias returned for the new TPU.
+
+---
+## 2026-07-22 - Explain editing an existing Mac SSH config
+
+### Scope
+
+- Provided safe commands to back up, open, edit, validate, and test an existing `~/.ssh/config` when adding a new TPU host.
+- No SSH configuration, experiment code, or launcher changes were made（无代码改动）.
+
+### Changed files
+
+1. `develop.md`
+
+### Validation commands and results
+
+- Documented `code ~/.ssh/config` as the VS Code editing path and `nano ~/.ssh/config` as a terminal fallback.
+- Documented `ssh -G` for configuration expansion and ordinary `ssh` for connection verification.
+
+### Known risks / TODO
+
+- The new host's exact hostname/IP and optional host-key alias must come from its own `gcloud ... ssh --dry-run` output, not from another server's block.
 
 ---

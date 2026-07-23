@@ -39,18 +39,17 @@ class PolicyOnlySelfInfLooTrainer(
       mask: jax.Array,
       masked_mean: Callable[..., Any],
   ):
-    weighted_kl_grads = jax.tree_util.tree_map(
-        lambda total, policy: total - policy,
-        per_sample_grads,
-        score_grads,
-    )
     selected_policy_grads = masked_mean(score_grads, mask)
     all_samples = jnp.ones_like(mask)
-    all_kl_grads = masked_mean(weighted_kl_grads, all_samples)
+    all_total_grads = masked_mean(per_sample_grads, all_samples)
+    all_policy_grads = masked_mean(score_grads, all_samples)
     return jax.tree_util.tree_map(
-        lambda policy, kl: policy + kl,
+        lambda selected_policy, total, policy: (
+            selected_policy + total - policy
+        ),
         selected_policy_grads,
-        all_kl_grads,
+        all_total_grads,
+        all_policy_grads,
     )
 
   def _aggregate_update_loss(
@@ -66,8 +65,11 @@ class PolicyOnlySelfInfLooTrainer(
     selected_policy_loss = jnp.sum(per_sample_score_loss * mask) / jnp.clip(
         jnp.sum(mask), 1.0
     )
-    weighted_kl_loss = per_sample_loss - per_sample_score_loss
-    return selected_policy_loss + jnp.mean(weighted_kl_loss)
+    return (
+        selected_policy_loss
+        + jnp.mean(per_sample_loss)
+        - jnp.mean(per_sample_score_loss)
+    )
 
   def _aggregate_update_aux(
       self,

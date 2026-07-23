@@ -70,7 +70,9 @@ class PolicyOnlySelfInfLooTrainerTest(absltest.TestCase):
     )
 
     # Policy sample 2 is removed: selected policy mean is 1.0. The already
-    # beta-weighted KL component uses all samples: mean is 26.0.
+    # beta-weighted KL component uses all samples: mean is 26.0. The trainer
+    # obtains it as mean(total) - mean(policy), avoiding a third full
+    # per-sample gradient tree.
     np.testing.assert_allclose(
         optimizer.grads["weight"].get_value(), 27.0
     )
