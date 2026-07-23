@@ -8279,6 +8279,109 @@ This file tracks engineering changes made in this repository.
 
 ---
 
+## 2026-07-23 - Interpret Batch DTV-Policy seed-0 result
+
+### Scope
+
+- Analyzed the completed Batch `dtv_policy` seed-0 GSM8K result.
+- Compared it with L2, original DTV, and Policy-LOO results and assessed the
+  proposed six-method, five-seed GRPO experiment design.
+- No training code, launcher, configuration, or method was changed（无代码改动）.
+
+### Result
+
+- Batch `dtv_policy` reached 733/1319 exact answers (55.5724%), exactly tying
+  the seed-0 L2 exact-accuracy result.
+- Relative to L2, Batch `dtv_policy` had 0.3033 percentage points lower partial
+  accuracy but 7.7331 points higher format accuracy, indicating meaningfully
+  different learned behavior despite equal exact accuracy.
+
+### Interpretation
+
+- GRPO group-relative advantages already encode competition among completions
+  from the same prompt. Strict LOO removes the positive self contribution and
+  treats every negative cross interaction as harmful, including weak conflicts
+  that can represent useful minority/difficult-answer signal.
+- Ordinary Policy-DTV requires the negative cross term to exceed the positive
+  policy self term before filtering. In GRPO this self term acts as an adaptive
+  confidence/margin rather than merely undesirable self-protection.
+- Policy-LOO consequently filters much more aggressively than Policy-DTV and
+  can reduce completion diversity, effective data coverage, and format/partial
+  learning, especially with four-generation prompt groups.
+
+### Experiment-design recommendation
+
+- The six methods Baseline, L2, Batch/Group DTV-Policy, and Batch/Group
+  Policy-LOO Full form a coherent main comparison, provided all use matched
+  seeds and identical hyperparameters.
+- Report mean, standard deviation, per-seed paired differences, exact correct
+  counts, partial accuracy, format accuracy, and filtering intensity.
+- Five matched seeds are preferable for the main table; avoid claiming a tie
+  or superiority from seed 0 alone.
+
+### Known risks / TODO
+
+- Verify the Batch `dtv_policy` filtering rate and score distribution from its
+  TensorBoard log before finalizing the mechanistic explanation.
+- Group `dtv_policy` seed 0 remains necessary before committing all Group runs.
+- Policy-LOO keep75 is a useful diagnostic ablation but should not replace the
+  default Policy-LOO method in the main six-method table unless chosen before
+  examining all seed outcomes.
+
+---
+
+## 2026-07-23 - Finalize six-method GRPO main experiment matrix
+
+### Scope
+
+- Analyzed the completed Group `dtv_policy` seed-0 result and finalized the
+  proposed six-method matched-seed GRPO main experiment.
+- Prepared a staged seed-5/seed-21 execution plan for Batch and Group
+  `dtv_policy` across two single-task TPU servers.
+- No training code, launcher, configuration, or method was changed（无代码改动）.
+
+### Seed-0 result
+
+- Group `dtv_policy` reached 731/1319 exact answers (55.4208%), two answers and
+  0.1516 percentage points below L2.
+- It reached 58.3776% partial accuracy, equal to the recorded L2 partial
+  accuracy to displayed precision, and 80.2881% format accuracy, 10.8415
+  points above L2.
+- Batch `dtv_policy` remained at 733/1319 (55.5724%), exactly tying L2 exact
+  accuracy while exceeding its format accuracy by 7.7331 points.
+
+### Final main methods
+
+1. Baseline GRPO
+2. L2 outlier
+3. Batch DTV-Policy
+4. Group DTV-Policy
+5. Batch DTV-LOO-Policy Full
+6. Group DTV-LOO-Policy Full
+
+### Execution plan
+
+- Run matched experiment seeds 5 and 21 next.
+- Server A runs one single-TPU queue in paired-seed order:
+  Batch seed 5, Group seed 5, Batch seed 21, then Group seed 21.
+- Each next run starts only after the preceding run exits successfully. A
+  failure or missing per-run exit-code file stops the queue.
+- Existing per-run `runs/` and `logs/` directories remain authoritative; the
+  queue adds a master log and status files under its own `logs/` directory.
+- The second server remains available for the other four retained methods once
+  its current work finishes.
+
+### Known risks / TODO
+
+- Seed 0 alone cannot establish a statistical tie with L2.
+- Verify every run records the requested experiment seed, dataset seed
+  (`42 + experiment seed`), rollout seed, full 1319-example evaluation, and
+  exit code 0.
+- After seeds 0, 5, and 21, calculate paired per-seed differences before
+  committing compute to seeds 42 and 84 for all six methods.
+
+---
+
 ## 2026-07-23 - Define unified seed-0 filtering audit without code changes
 
 ### Scope
@@ -8525,5 +8628,276 @@ This file tracks engineering changes made in this repository.
 ### Known risks / TODO
 
 - The new host's exact hostname/IP and optional host-key alias must come from its own `gcloud ... ssh --dry-run` output, not from another server's block.
+
+---
+## 2026-07-23 - Diagnose Policy-LOO TPU compile OOM on new server
+
+### Scope
+
+- Inspected the supplied first-step failure log for Batch and Group `dtv_loo_policy_only` runs.
+- Traced the failure to the shared Policy-LOO two-gradient compilation path; no code or launcher changes（无代码改动）.
+
+### Changed files
+
+1. `develop.md`
+
+### Validation commands and results
+
+- The fatal exception is `RESOURCE_EXHAUSTED: XLA:TPU compile permanent error`, not the preceding TFLOPs measurement message.
+- XLA reports a 39.21 GiB program requirement against 30.75 GiB available HBM, exceeding capacity by 8.46 GiB; 39.20 GiB is HLO temporary storage with only 0.8% fragmentation.
+- Largest allocations come from the vmapped JVP/transpose-JVP path for per-token log-probability gradients with shape `bf16[4,4,1,1024,6912]`.
+- Confirmed Batch and Group Policy-LOO share the same two vmapped gradient passes; their scope differs only after gradients are produced, so both are expected to have nearly identical compile-time HBM pressure.
+
+### Known risks / TODO
+
+- Compare TPU type/topology, JAX/jaxlib/libtpu/qwix versions, repository commit, mesh, and effective CLI arguments between a successful old server and the new server before attributing the difference to hardware.
+- A reduced sequence length or micro-batch can establish an HBM diagnosis, but results from such a run are not directly comparable to the existing full-configuration experiment.
+- Long-term same-configuration support may require rematerialization, sequentialized score/update gradient computation, or different sharding; these are code changes and were not attempted.
+
+---
+## 2026-07-23 - Refine Policy-LOO OOM diagnosis after smoke success
+
+### Scope
+
+- Incorporated the report that the new TPU server passes smoke testing but fails during the real Policy-LOO run.
+- Clarified that smoke success establishes general server health only if it does not compile the exact same Policy-LOO per-step shape and objective.
+- No code or launcher changes（无代码改动）.
+
+### Changed files
+
+1. `develop.md`
+
+### Validation commands and results
+
+- The failing real run compiled a Policy-LOO graph with completion activation shape `bf16[4,4,1,1024,6912]` and required 39.21 GiB HBM versus 30.75 GiB available.
+- `max_train_examples` and number of optimizer steps do not normally reduce the memory of one identically shaped jitted step; therefore an exact Policy-LOO smoke with the same micro-batch, generations, sequence lengths, mesh, and environment should reproduce the compile result.
+- If only baseline or ordinary LOO smoke passed, it does not test the second vmapped policy-score gradient pass responsible for Policy-LOO peak HBM.
+
+### Known risks / TODO
+
+- Retrieve the exact successful smoke command and its first compiled tensor shapes before concluding that smoke and full runs are equivalent.
+- Check for argument overrides, environment-variable leakage, different checkout/venv, shorter generation length, smaller micro-batch, or a different Policy/Policy-LOO method between the two runs.
+
+---
+## 2026-07-23 - Refine new-server Policy-LOO OOM diagnosis after smoke success
+
+### Scope
+
+- Incorporated the observation that Policy-LOO smoke tests pass on the new TPU while the full run fails, and that the same full experiment succeeds on two older TPU servers.
+- No code or launcher changes（无代码改动）.
+
+### Changed files
+
+1. `develop.md`
+
+### Findings
+
+- Smoke success rules out a general TPU/JAX failure but does not establish full-shape HBM capacity unless it compiled the same `[4,4,1,1024,6912]` path with identical flags and environment.
+- The full run fails at global step 0 during compilation, so the number of planned steps (691) is not itself consuming memory; the first real rollout batch is triggering a 1024-token worst-case static shape.
+- If the smoke used identical nominal CLI arguments, generated completion length or padding/bucketing may still have produced a smaller compiled shape.
+- If an old server demonstrably compiles the exact same shape and commit, the leading cause becomes JAX/jaxlib/libtpu/qwix/runtime/XLA configuration drift rather than faulty hardware.
+
+### Validation status
+
+- No server commands were executed locally. A three-server environment and effective-shape comparison remains required.
+
+### Known risks / TODO
+
+- Preserve the failing full-run log and compare its shape, exact invocation, commit, package versions, TPU device kind/count, and XLA-related environment variables with a successful old-server run.
+- Do not treat host RAM cleanup or reboot as a primary fix: the report is a permanent compile-time HBM requirement with zero argument memory and negligible fragmentation.
+
+---
+## 2026-07-23 - Refine new-server Policy-LOO OOM diagnosis after smoke success
+
+### Scope
+
+- Refined the diagnosis after learning that the new TPU server passes smoke tests and the other two nominally identical servers complete full Policy-LOO training.
+- Prepared a three-server fingerprint comparison covering effective command/config, repository state, Python packages, TPU topology, runtime variables, and XLA compilation inputs.
+- No experiment code or launcher changes（无代码改动）.
+
+### Changed files
+
+1. `develop.md`
+
+### Validation commands and results
+
+- A Baseline or ordinary-LOO smoke only establishes basic TPU health; it does not exercise Policy-LOO's two-gradient compile graph.
+- If a Policy-LOO smoke preserves micro-batch size 4, four generations, and sequence length 1024, changing only total steps should not change the first-step static compile shape. A pass/fail difference therefore indicates a hidden effective-input or environment difference.
+- The supplied failing graph is unambiguously `[4,4,1,1024,6912]` and requires 39.21 GiB versus 30.75 GiB available HBM.
+
+### Known risks / TODO
+
+- “Installed from the same instructions” does not prove binary/runtime identity; exact package hashes, TPU runtime image, XLA/libtpu variables, repository diff, and effective launcher arguments still need comparison.
+- Compilation-cache reuse can obscure whether an old server is recompiling the same executable; capture fresh logs and exact graph shapes on all servers before drawing a hardware conclusion.
+
+---
+## 2026-07-23 - Refine Policy-LOO full-run OOM diagnosis after smoke success
+
+### Scope
+
+- Incorporated the clarification that both Batch and Group Policy-LOO-only smoke tests passed on the new server while full training fails.
+- Refined the diagnosis toward smoke/full compile-shape or execution-path differences rather than a universally unsupported method or defective TPU.
+- No experiment code or launcher changes（无代码改动）.
+
+### Changed files
+
+1. `develop.md`
+
+### Validation commands and results
+
+- The failing full run compiles a worst-case-looking activation shape `bf16[4,4,1,1024,6912]` and requires 39.21 GiB HBM.
+- A passing smoke only proves parity if it actually completed an actor optimizer step with the same method class, 4x4 completion batch, sequence length 1024, mesh, and dependency/runtime build.
+- Because JAX specializes compiled programs by input shape, a smoke batch with shorter generated sequences can pass and a later/full batch reaching the 1024-token padded length can trigger a new, larger compilation.
+
+### Known risks / TODO
+
+- Verify the smoke was not training-skipped by an existing checkpoint or zero effective batches and that its log contains a completed Actor Training step plus Policy-LOO selection metrics.
+- Capture effective arguments, first compiled sequence shape, TPU device kind/count, runtime build, XLA flags, commit, and dirty diff on all three servers; nominally identical installation instructions do not prove bit-for-bit runtime parity.
+- If old full runs truly compiled the identical `[4,4,1,1024,6912]` graph on the same TPU topology and software builds, compare XLA dump/memory reports and environment flags before changing experiment settings.
+
+---
+## 2026-07-23 - Identify smoke/full method mismatch
+
+### Scope
+
+- Inspected the supplied successful smoke log and compared its method/launcher with the failing Policy-LOO-only path.
+- No experiment code or launcher changes（无代码改动）.
+
+### Changed files
+
+1. `develop.md`
+
+### Validation commands and results
+
+- The smoke genuinely completed one Actor Training optimizer step and model export with exit code 0.
+- Its header identifies `Method: group_policy` and `run_dbc_self_inf_group_policy.sh`, selecting `PolicySelfInfTrainer` (ordinary group DTV policy scoring).
+- The failing target described by the user is `group_loo_policy_only`/`batch_loo_policy_only`, which selects `PolicyOnlySelfInfLooTrainer` through a different launcher and compiled aggregation graph.
+- Therefore the supplied smoke does not establish that either LOO Policy-only method compiles on the new server.
+
+### Known risks / TODO
+
+- Run exact one-step smokes named `batch_loo_policy_only` and `group_loo_policy_only`, then verify the headers and selection JSONL identify LOO Policy-only rather than ordinary Policy-DTV.
+- If exact-method smokes pass but full runs fail, compare generated/padded sequence shapes; if they fail with the same 1024-length HBM report, the method mismatch explains the prior apparent contradiction.
+
+---
+## 2026-07-23 - Prepare Group Policy-DTV full experiment command
+
+### Scope
+
+- Confirmed the successful smoke maps to `group_policy` and prepared the corresponding seed-0 full-run procedure using the existing seeded launcher.
+- No experiment code or launcher changes（无代码改动）.
+
+### Changed files
+
+1. `develop.md`
+
+### Validation commands and results
+
+- Confirmed `run_seeded_full.sh group_policy 0` routes to `my_example/run_dbc_self_inf_group_policy.sh`.
+- Confirmed the seeded launcher creates timestamped run/log roots and supplies isolated TensorBoard, checkpoint, merged-model, stdout, and exit-code paths.
+- Confirmed no extra smoke-only arguments are needed for the full run; omitting them restores the standard 3,072-example and pre/post evaluation configuration.
+
+### Known risks / TODO
+
+- Verify available disk space and that no other `my_example` Python training process is active before launch.
+- Monitor the first Actor step for HBM compilation success and retain the generated `nohup.log`, `exit_code`, checkpoints, model export, TensorBoard, and evaluation metadata.
+- Complete seed 0 before dispatching additional seeds so the new server's full-run stability is established.
+
+---
+## 2026-07-23 - Confirm Group Policy full-run HBM failure on new TPU
+
+### Scope
+
+- Inspected the full `group_policy` failure after a successful one-step smoke on the same new server.
+- Compared the full path with the smoke configuration and current dataset splitting/evaluation order.
+- No experiment code or launcher changes（无代码改动）.
+
+### Changed files
+
+1. `develop.md`
+
+### Validation commands and results
+
+- Full pre-train evaluation completed over all 1,319 GSM8K examples before the failure.
+- The first Actor step then failed at XLA compile with 39.16 GiB required versus 30.75 GiB available HBM (8.41 GiB over capacity).
+- The failing graph again contains `bf16[4,4,1,1024,6912]` vmapped JVP/transpose-JVP activations and only 0.7% fragmentation.
+- The earlier smoke completed one real `group_policy` Actor step but skipped pre/post evaluation and used `max_steps=1`; therefore the TPU is functional, while an execution-context or compile-shape/runtime difference remains between smoke and full.
+- Current code performs pre-train evaluation with the same model before constructing the RL cluster and compiling the actor training step, making `--skip-eval-before` the smallest no-code isolation test.
+
+### Known risks / TODO
+
+- Compare accelerator type/device kind and HBM across old and new servers; identical source and Python package installation do not imply identical TPU hardware/runtime.
+- Re-run full `group_policy` with only `--skip-eval-before`. If it succeeds, pre-evaluation leaves compilation/runtime state that causes the new TPU to cross its HBM limit; if it still fails, compare exact XLA/runtime fingerprints and smoke/full shapes.
+- Skipping pre-evaluation does not change the training dataset or optimizer configuration, but the resulting artifact lacks run-local Pre Acc metadata and should use a separately recorded common base-model evaluation if reported.
+
+---
+## 2026-07-23 - Explain cross-server divergence under nominally identical setup
+
+### Scope
+
+- Documented why identical source/configuration and similarly installed Python environments can still produce different TPU XLA HBM outcomes across servers.
+- No experiment code or launcher changes（无代码改动）.
+
+### Changed files
+
+1. `develop.md`
+
+### Validation commands and results
+
+- The observed failure is below the Python training layer: XLA compiled a 39.16 GiB program for a 30.75 GiB-per-chip target.
+- The successful smoke proves the new TPU is operational, while peer-server full success makes a universal source-code failure unlikely.
+- Remaining differentiators include accelerator/HBM/topology, TPU runtime and libtpu/XLA build, sharding/compiler flags, actual generated sequence shapes, and pre-evaluation-to-training executable/buffer lifetime.
+
+### Known risks / TODO
+
+- No memory report from a successful peer-server full compile is available, so it is not yet known whether the peer compiled the identical 1024-length graph, used different rematerialization/sharding, or had more per-chip HBM.
+- If this server is revisited, capture a side-by-side runtime fingerprint and successful-server XLA shape/memory evidence before changing code or training hyperparameters.
+
+---
+## 2026-07-23 - Add server A DTV-Policy seed 5/21 one-shot queue
+
+### Scope
+
+- Recorded the completed Group `dtv_policy` seed-0 result and finalized the
+  proposed six-method GRPO main experiment matrix.
+- Added an independent one-shot server A queue for Batch/Group DTV-Policy
+  seeds 5 and 21.
+- No trainer, score, mask, GRPO configuration, or existing launcher changed.
+
+### Seed-0 result and main matrix
+
+- Group `dtv_policy` reached 731/1319 exact answers (55.4208%), 58.3776%
+  partial accuracy, and 80.2881% format accuracy.
+- The main matrix is Baseline, L2, Batch/Group DTV-Policy, and Batch/Group
+  Policy-LOO Full, all with identical hyperparameters and matched seeds.
+- Total-score DTV/LOO, keep75, and Policy-Only remain diagnostic ablations.
+
+### Changed files
+
+1. `my_example/run_server_a_dtv_policy_seeds_5_21.sh`
+2. `develop.md`
+
+### Queue behavior
+
+- Runs sequentially in this order: `batch_policy/5`, `group_policy/5`,
+  `batch_policy/21`, `group_policy/21`.
+- Reuses `run_seeded_full.sh` without overriding experiment parameters.
+- Refuses to start while another `my_example` Python task is active and stops
+  at the first failed run.
+- Writes PID, combined log, tab-separated run status, and final exit code under
+  `logs/server_a_dtv_policy_seeds_5_21_<timestamp>/`.
+
+### Validation commands and results
+
+- `bash -n my_example/run_server_a_dtv_policy_seeds_5_21.sh`: passed.
+- `git diff --check`: passed.
+- Confirmed the queue script is executable.
+
+### Known risks / TODO
+
+- The queue does not skip completed runs. After a partial failure, launch only
+  the remaining method/seed pairs rather than blindly restarting the queue.
+- Four runs can occupy server A for roughly 48 hours and create four complete
+  checkpoint/model/log artifact sets; verify disk capacity first.
 
 ---
