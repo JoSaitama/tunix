@@ -16,7 +16,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Literal, Tuple
+from typing import Any, Callable, Literal, Tuple
 
 from flax import nnx
 import jax
@@ -46,6 +46,15 @@ class SelfInfTrainer(rl_trainer.Trainer):
     self.scope = scope
     self.num_generations = num_generations
     self.dot_threshold = dot_threshold
+    self._score_loss_fn: Callable[..., Any] | None = None
+    self._score_loss_has_aux = False
+
+  def _with_score_loss_fn(
+      self, score_loss_fn: Callable[..., Any], *, has_aux: bool
+  ) -> None:
+    """Configures an optional score-only loss without changing update loss."""
+    self._score_loss_fn = score_loss_fn
+    self._score_loss_has_aux = has_aux
 
   def _train_step(
       self, model: nnx.Module, optimizer: nnx.Optimizer, inputs: Any
@@ -69,6 +78,26 @@ class SelfInfTrainer(rl_trainer.Trainer):
     (per_sample_loss, per_sample_aux), per_sample_grads = vmapped_grad_fn(
         model, inputs
     )
+
+    score_grads = per_sample_grads
+    if self._score_loss_fn is not None:
+      def per_sample_score_loss_fn(model, inputs):
+        if isinstance(inputs, dict):
+          return self._score_loss_fn(model, **inputs)
+        return self._score_loss_fn(model, inputs)
+
+      score_grad_fn = nnx.value_and_grad(
+          per_sample_score_loss_fn,
+          argnums=nnx.DiffState(0, wrt),
+          has_aux=self._score_loss_has_aux,
+      )
+      vmapped_score_grad_fn = jax.vmap(
+          score_grad_fn, in_axes=(None, inputs_in_axes)
+      )
+      if self._score_loss_has_aux:
+        (_, _), score_grads = vmapped_score_grad_fn(model, inputs)
+      else:
+        _, score_grads = vmapped_score_grad_fn(model, inputs)
 
     leaves = jax.tree_util.tree_leaves(per_sample_grads)
     if not leaves:
@@ -102,9 +131,9 @@ class SelfInfTrainer(rl_trainer.Trainer):
       return scores.reshape((batch_size,))
 
     if self.scope == "group":
-      scores = _scores_group_scope(per_sample_grads)
+      scores = _scores_group_scope(score_grads)
     else:
-      scores = _scores_batch_scope(per_sample_grads)
+      scores = _scores_batch_scope(score_grads)
 
     mask = scores >= self.dot_threshold
     num_kept = jnp.sum(mask.astype(jnp.float32))
@@ -135,4 +164,3 @@ class SelfInfTrainer(rl_trainer.Trainer):
       return final_loss, final_aux
 
     return final_loss, None
-

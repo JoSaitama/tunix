@@ -5,7 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 if [ "$#" -lt 2 ]; then
   echo "usage: $0 METHOD SEED [extra run_grpo_gemma.sh arguments...]" >&2
-  echo "methods: baseline batch group l2 batch_loo group_loo batch_loo_keep75 group_loo_keep75 batch_loo_policy group_loo_policy batch_loo_policy_keep75 group_loo_policy_keep75 batch_loo_policy_only group_loo_policy_only" >&2
+  echo "methods: baseline batch group batch_policy group_policy l2 batch_loo group_loo batch_loo_keep75 group_loo_keep75 batch_loo_policy group_loo_policy batch_loo_policy_keep75 group_loo_policy_keep75 batch_loo_policy_only group_loo_policy_only" >&2
   exit 2
 fi
 
@@ -32,6 +32,14 @@ case "${METHOD}" in
   group)
     METHOD_SLUG="dtv_selfinf_group"
     METHOD_SCRIPT="./my_example/run_dbc_self_inf_group.sh"
+    ;;
+  batch_policy)
+    METHOD_SLUG="dtv_selfinf_batch_policy"
+    METHOD_SCRIPT="./my_example/run_dbc_self_inf_batch_policy.sh"
+    ;;
+  group_policy)
+    METHOD_SLUG="dtv_selfinf_group_policy"
+    METHOD_SCRIPT="./my_example/run_dbc_self_inf_group_policy.sh"
     ;;
   l2)
     METHOD_SLUG="dtv_outlier_l2"

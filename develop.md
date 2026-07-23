@@ -8060,6 +8060,254 @@ This file tracks engineering changes made in this repository.
 
 ---
 
+## 2026-07-23 - Record Batch Policy-Only seed-0 result and pause method changes
+
+### Scope
+
+- Recorded the completed Batch DTV-LOO Policy-Only seed-0 result and consolidated all currently completed seed-0 GSM8K results for analysis while Group Policy-Only remains running.
+- No code, method, launcher, or test was changed（无代码改动）.
+
+### Changed files
+
+1. `develop.md`
+
+### Result
+
+- Batch Policy-Only: 679/1319, 51.4784% exact, 52.9947% partial, and 64.0637% format; improvement over the common pre-train result is 4.2456 percentage points and 56 correct answers.
+- Relative to Batch Policy-Full, Policy-Only loses 29 correct answers and 2.1986 points exact accuracy; format accuracy falls by 7.4299 points.
+- Relative to original Batch DTV it loses 32 answers and 2.4261 points; relative to L2 it loses 54 answers and 4.0940 points.
+
+### Interpretation
+
+- Policy-Only leaves the policy score/mask unchanged and restores only all-sample KL gradients. The degradation is evidence that, in this seed/run, retaining KL from policy-negative completions harms the final trajectory or removes a beneficial implicit KL curation effect of Full Mask.
+- This does not prove Policy-Only is universally worse from one seed, but the effect is too large to describe as equivalent to Policy-Full.
+- Do not change code or add another method until Group Policy-Only completes and selection/update diagnostics are compared.
+
+### Known risks / TODO
+
+- Verify the completed run's pre-train metrics, exit code, method identity, and `mask_application=policy_only` before final tabulation.
+- Group Policy-Only is pending and must be reported separately rather than inferred from the Batch result.
+
+---
+
+## 2026-07-23 - Select the highest-priority next method under compute limits
+
+### Scope
+
+- Analyzed counterfactual policy-gradient ordinary-DTV scores reconstructed from completed Policy-LOO logs under a 12-hour-per-method compute constraint.
+- Selected the single highest-priority next experiment without changing code, methods, launchers, or tests（无代码改动）.
+
+### Changed files
+
+1. `develop.md`
+
+### Counterfactual findings
+
+- Batch Policy-LOO has 2,346 negative samples (21.22%); restoring the ordinary DTV self term leaves only 277 Policy-DTV negatives (2.51%) and rescues 2,069 samples.
+- Group Policy-LOO has 2,370 negatives (21.44%); restoring self leaves 180 Policy-DTV negatives (1.63%) and rescues 2,190 samples.
+- Policy-DTV negatives are strict subsets of Policy-LOO negatives, as required mathematically; there are zero DTV-only negatives.
+- Rescued Batch samples have median raw self 11.64 versus median raw cross -1.67; rescued Group samples have median raw self 13.77 versus raw cross -1.59. Most strict-LOO conflicts are therefore mild relative to their self contribution.
+- Policy-DTV filter rates are close in scale to counterfactual policy-L2 outlier rates (Batch 2.29%, Group 2.20%) while retaining a direction-based criterion rather than a magnitude criterion.
+
+### Decision
+
+- The single highest-priority new experiment is Batch Policy-DTV with Full Mask: policy gradients for ordinary DTV score including self term, and the selected mask applied to the full policy+KL sample gradient.
+- Do not prioritize Group: Batch wins in original DTV and Policy-LOO Full, and Group Policy-DTV would filter only 1.63%, reducing the likelihood of a material gain.
+- Do not prioritize Policy-Only: the completed Batch result loses 2.1986 points versus Policy-Full.
+- Do not alter PPO solely to mirror GRPO. PPO Policy-Only preserves essential value learning; GRPO Policy-Only preserves KL regularization and has empirically degraded. The unified paper principle can be policy-gradient scoring with algorithm-appropriate treatment of auxiliary objectives.
+
+### Known risks / TODO
+
+- Counterfactual masks do not predict the post-first-step training trajectory; Batch Policy-DTV Full is the best evidence-based bet, not a guaranteed L2 win.
+- Before spending 12 hours, run a one-step smoke and verify the Policy-DTV filter count/identity. If implemented, keep it isolated and preserve every existing method.
+- Do not rerun the deleted PPO seed or change PPO masking until the GRPO candidate result is known and the paper's cross-algorithm ablation plan is fixed.
+
+---
+
+## 2026-07-23 - Define comprehensive seed-0 filtering audit
+
+### Scope
+
+- Clarified the Policy-LOO versus Policy-DTV self-term rescue interpretation and designed a no-code server-side audit for all completed seed-0 filtering methods.
+- No project code, method, launcher, or test was changed（无代码改动）.
+
+### Changed files
+
+1. `develop.md`
+
+### Clarification
+
+- Batch policy self term rescues 2,069 of 2,346 strict-LOO negatives. The rescued samples do not have small self terms: median raw self is 11.64 versus median raw cross -1.67, so the negative interaction is mild relative to self contribution and the ordinary DTV total score remains positive.
+- Group similarly rescues 2,190 of 2,370 negatives, with median raw self 13.77 versus raw cross -1.59.
+
+### Audit design
+
+- Historical original-DTV and L2 runs record aggregate `skipped_samples`/score or norm summaries in TensorBoard but do not contain per-sample identities, self/cross values, or masks.
+- LOO, Policy-LOO, and Policy-Only runs contain selection JSONL with per-sample self/cross/standard/LOO scores and masks.
+- The audit therefore reports actual aggregate filtering for DTV/L2 and exact actual filtering for LOO-family JSONL runs, plus explicitly labeled counterfactual DTV and L2 masks reconstructed on the same LOO-run gradients.
+- Exact overlap/disagreement categories are computed only among masks reconstructed from the same JSONL gradient population; separately trained trajectories are not aligned after their first different update.
+
+### Known risks / TODO
+
+- Log-directory discovery must be reviewed in the generated output because both older unseeded-name and newer seed-0-name conventions exist.
+- TensorBoard flush/aggregation can make actual aggregate event counts differ from 691; the report must print event counts and avoid claiming per-sample identity from scalar events.
+
+---
+
+## 2026-07-23 - Analyze comprehensive seed-0 filtering audit
+
+### Scope
+
+- Analyzed the generated audit output across L2, original total-loss DTV, strict total-loss LOO, Policy-LOO Full, and Policy-LOO Policy-Only.
+- Compared actual filtering intensity, counterfactual same-trajectory mask overlap, self/cross-term distributions, GRPO loss decomposition, and seed-0 accuracy.
+- No training code, method, launcher, or configuration was changed（无代码改动）.
+
+### Main findings
+
+- Batch Policy-LOO Full filters 21.22% versus L2's historical 2.32% (about 9.13 times as many), yet trails L2 by only 1.90 percentage points and 25 correct GSM8K examples.
+- Filter rate is not monotonic with accuracy: Batch Policy-Only filters less than Batch Policy-LOO Full but is 2.20 points worse, so the treatment of the KL component and the identity of selected samples dominate raw filtering intensity.
+- On the Batch Policy-LOO trajectory, counterfactual Policy-DTV and policy-gradient L2 each filter about 2% but have zero sample overlap. Policy-DTV targets moderate-norm samples with strongly negative cross terms; L2 targets very large-norm samples whose directional score is usually positive.
+- Strict LOO removes many mildly conflicting samples whose positive self term would protect them under ordinary DTV. The 2,069 batch self-rescued samples have median raw self 11.64 and raw cross -1.67.
+
+### Recommendation
+
+- Highest-priority single new experiment, if authorized later: Batch Policy-DTV score with Full mask. It preserves DTV's original self-plus-cross criterion, uses the reward-driving policy gradient for scoring, and follows the empirically stronger Full-mask behavior in current GRPO seed-0 results.
+- Do not infer that PPO must switch from Policy mask to Full mask; PPO value loss and GRPO KL regularization serve different roles.
+
+### Known risks / TODO
+
+- L2/original-DTV historical sample identities were not logged, so their exact mask intersections are counterfactual reconstructions on LOO-family trajectories rather than intersections of independently trained historical runs.
+- All accuracy comparisons are currently seed 0 and require matched-seed replication before statistical claims.
+
+---
+
+## 2026-07-23 - Clarify DTV policy naming and minimum-retention semantics
+
+### Scope
+
+- Clarified the proposed `dtv_policy` definition: retain the ordinary DTV self term, compute selection scores from policy loss gradients, and apply the resulting mask to the full/total GRPO update.
+- Corrected the description of `min_keep_fraction=0.75`: every batch, or every prompt group under group scope, retains at least 75% and therefore filters at most 25%.
+- No training code, method, launcher, or configuration was changed（无代码改动）.
+
+### Code verification
+
+- `_capped_mask` computes `ceil(population_size * min_keep_fraction)` and retains the highest scores.
+- Scores are sorted descending, so when the cap activates, nonnegative samples remain selected and negative samples closest to zero are restored first; for example `-2` is restored before `-20`.
+- `_group_capped_mask` applies the same cap independently to each prompt group.
+- `run_seeded_full.sh` sets `TUNIX_DBC_SELF_INF_MIN_KEEP_FRACTION=0.75` for methods ending in `_keep75`; the runtime default remains 0.25.
+
+### Validation commands and results
+
+- Attempted `python -m pytest tests/rl/self_inf_loo_trainer_test.py -q`; local shell has no `python` command.
+- Attempted `python3 -m pytest tests/rl/self_inf_loo_trainer_test.py -q`; the local Python installation has no `pytest`.
+- Static inspection confirms the intended ordering, and the existing test `test_cap_keeps_highest_quarter_without_sample_loop` explicitly expects `-1` to be retained from `[-4, -3, -2, -1]`.
+
+### Known risks / TODO
+
+- `dtv_policy` does not yet exist; implementing it requires explicit authorization and must be additive so all existing methods remain unchanged.
+- The currently running `dtv_loo_policy_keep75` experiment should finish before deciding whether `dtv_policy` needs a non-default retention cap.
+
+---
+
+## 2026-07-23 - Add ordinary DTV policy-score full-update methods
+
+### Scope
+
+- Added independent Batch and Group `dtv_policy` methods.
+- `dtv_policy` retains the ordinary DTV self term, computes selection scores
+  from KL-free policy-loss gradients, and applies the selected mask to the
+  full/total GRPO gradients and loss.
+- Existing baseline, L2, original total-loss DTV, total-loss LOO,
+  Policy-LOO Full, and Policy-LOO Policy-Only launch paths remain selected by
+  their existing environment variables and commands.
+
+### Changed files
+
+1. `tunix/rl/self_inf_trainer.py`
+2. `tunix/rl/self_inf_policy_trainer.py`
+3. `tunix/rl/rl_cluster.py`
+4. `my_example/run_dbc_self_inf_policy.sh`
+5. `my_example/run_dbc_self_inf_batch_policy.sh`
+6. `my_example/run_dbc_self_inf_group_policy.sh`
+7. `my_example/run_seeded_full.sh`
+8. `tests/rl/self_inf_policy_trainer_test.py`
+9. `develop.md`
+
+### Implementation details
+
+- Added an optional score-only loss hook to `SelfInfTrainer`. When unset, the
+  original DTV code uses total gradients for both scoring and updating exactly
+  as before.
+- Added `PolicySelfInfTrainer`, which exposes
+  `with_policy_score_loss_fn`; `GRPOLearner` therefore supplies the existing
+  `beta=0` policy loss for scoring while the ordinary total loss remains the
+  optimizer objective.
+- Added runtime selection through `TUNIX_DBC_SELF_INF_POLICY=1`. Combining it
+  with the LOO selector is rejected to prevent ambiguous method selection.
+- Added seeded method names `batch_policy` and `group_policy`.
+- The new launchers explicitly disable all LOO selectors in their child
+  process and do not set a minimum-retention cap; selection is ordinary
+  DTV `score >= 0`.
+
+### Validation commands and results
+
+- `python3 -m compileall -q ...`: passed for all changed Python modules and the
+  new test.
+- `bash -n ...`: passed for the common policy launcher, both scope wrappers,
+  and `run_seeded_full.sh`.
+- `git diff --check`: passed.
+- Full JAX unit tests could not run locally: the host shell has no `python`
+  command and `/usr/local/bin/python3` has no `pytest`. Server-side commands
+  are required in `.venv_jax081`.
+
+### Test coverage
+
+- The new trainer test verifies that policy gradients determine the mask while
+  total gradients determine the optimizer update.
+- Its fixture includes a sample with a negative LOO cross term but a positive
+  ordinary DTV score after adding the self term, guarding against accidental
+  regression to strict LOO.
+- Setter separation and missing-policy-loss validation are covered.
+
+### Known risks / TODO
+
+- TPU/JIT memory behavior must be checked with a one-step smoke test before a
+  691-step run. The method computes policy and total per-sample gradients, so
+  its peak profile should be comparable to Policy-LOO Full.
+- Run Batch seed 0 first; only start Group after the Batch smoke/full outcome
+  justifies the additional compute.
+
+---
+
+## 2026-07-23 - Define unified seed-0 filtering audit without code changes
+
+### Scope
+
+- Clarified the Policy-LOO versus Policy-DTV self-rescue interpretation and audited which historical methods contain sample-level filtering records.
+- Designed a standalone server-side analysis workflow for L2, original DTV, total LOO, Policy-LOO, and Policy-Only seed-0 runs without modifying repository code（无代码改动）.
+
+### Changed files
+
+1. `develop.md`
+
+### Clarification
+
+- Batch Policy-LOO marks 2,346 samples negative; adding the nonnegative self term leaves 277 Policy-DTV negatives, so exactly 2,069 are self-rescued.
+- The rescued samples do not have small self terms. Their median raw self is 11.64 versus median raw cross -1.67, meaning self is typically about seven times the opposing cross magnitude; the directional conflict is mild relative to self contribution.
+
+### Logging audit
+
+- Historical `RobustTrainer` (L2) and `SelfInfTrainer` (original DTV Batch/Group) record aggregate TensorBoard metrics only; they do not persist per-sample norms, self/cross terms, identities, or masks.
+- LOO-family runs persist selection JSONL with per-sample raw/standard self and cross terms, ordinary-DTV score, strict-LOO score, final/cap masks, and group/generation indices.
+- Therefore actual historical L2/DTV filtering intensity can be recovered from TensorBoard, but exact historical sample intersections cannot. Exact intersections can only be reconstructed counterfactually on each LOO run's identical gradients and must be labeled by score objective (total or policy).
+
+### Known risks / TODO
+
+- Logs may reside on different servers; the standalone script accepts explicit `METHOD=LOG_ROOT` arguments and skips missing paths.
+- TensorBoard scalar sums assume one `skipped_samples` event per optimizer step; the script reports event counts so incomplete logging is visible.
+
+---
+
 ## 2026-07-22 - Assess policy-score plus policy-only masking for GRPO
 
 ### Scope

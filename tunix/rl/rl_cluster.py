@@ -45,6 +45,7 @@ from tunix.perf import trace as perf_trace
 from tunix.rl import reshard
 from tunix.rl import robust_trainer
 from tunix.rl import self_inf_trainer
+from tunix.rl import self_inf_policy_trainer
 from tunix.rl import self_inf_loo_trainer
 from tunix.rl import self_inf_loo_policy_trainer
 from tunix.rl import self_inf_loo_policy_only_trainer
@@ -595,6 +596,9 @@ class RLCluster:
       use_self_inf_loo = os.environ.get(
           "TUNIX_DBC_SELF_INF_LOO", ""
       ).strip().lower() in ("1", "true", "yes", "on")
+      use_self_inf_policy = os.environ.get(
+          "TUNIX_DBC_SELF_INF_POLICY", ""
+      ).strip().lower() in ("1", "true", "yes", "on")
       use_self_inf_loo_policy = os.environ.get(
           "TUNIX_DBC_SELF_INF_LOO_POLICY", ""
       ).strip().lower() in ("1", "true", "yes", "on")
@@ -605,6 +609,11 @@ class RLCluster:
         raise ValueError(
             "TUNIX_DBC_SELF_INF_LOO_POLICY requires "
             "TUNIX_DBC_SELF_INF_LOO=1."
+        )
+      if use_self_inf_policy and use_self_inf_loo:
+        raise ValueError(
+            "TUNIX_DBC_SELF_INF_POLICY cannot be combined with "
+            "TUNIX_DBC_SELF_INF_LOO."
         )
       if use_self_inf_loo_policy_only and not use_self_inf_loo_policy:
         raise ValueError(
@@ -621,6 +630,8 @@ class RLCluster:
         )
       elif use_self_inf_loo:
         actor_trainer_cls = self_inf_loo_trainer.SelfInfLooTrainer
+      elif use_self_inf_policy:
+        actor_trainer_cls = self_inf_policy_trainer.PolicySelfInfTrainer
       else:
         actor_trainer_cls = self_inf_trainer.SelfInfTrainer
       actor_trainer_kwargs["scope"] = os.environ.get(
@@ -660,8 +671,9 @@ class RLCluster:
         )
       else:
         logging.info(
-            "Dynamic batch curation enabled: using SelfInfTrainer"
+            "Dynamic batch curation enabled: using %s"
             " (scope=%s, num_generations=%s).",
+            actor_trainer_cls.__name__,
             actor_trainer_kwargs["scope"],
             actor_trainer_kwargs["num_generations"],
         )
