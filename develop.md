@@ -8901,3 +8901,67 @@ This file tracks engineering changes made in this repository.
   checkpoint/model/log artifact sets; verify disk capacity first.
 
 ---
+## 2026-07-24 - Clarify preference mismatch noise in DPO versus GRPO
+
+### Scope
+
+- Explained whether online GRPO has a direct analogue of DPO chosen/rejected response mismatch noise.
+- Distinguished preference-label corruption from GRPO reward, rollout, grouping, and prompt noise.
+- No experiment code or launcher changes（无代码改动）.
+
+### Changed files
+
+1. `develop.md`
+
+### Validation commands and results
+
+- Confirmed the current GSM8K GRPO pipeline samples multiple responses online from each prompt and computes group-relative advantages from their rewards; it does not consume a fixed chosen/rejected preference pair.
+- Therefore a DPO-style operation that swaps or mismatches chosen/rejected responses is not natively defined for this experiment.
+- Identified the closest GRPO corruption analogues as reward corruption, response-to-prompt/group reassignment, prompt/answer corruption, and rollout-distribution changes; these test different failure modes and should not be labeled preference mismatch without a precise definition.
+
+### Known risks / TODO
+
+- Offline GRPO variants or GRPO implementations trained from stored rollouts can define response/group mismatch corruption, but that remains distinct from DPO preference-label mismatch.
+- Any cross-algorithm noise comparison should match the corrupted semantic signal (for example reward correctness) rather than reuse the same mechanical corruption operation.
+
+---
+## 2026-07-24 - Add separate seed queues for Baseline/L2 and Batch Policy-LOO
+
+### Scope
+
+- Added one independent queue for Baseline and L2 seed 21.
+- Added a second independent queue for Batch Policy-LOO Full seeds 5 and 21.
+- Both reuse `run_seeded_full.sh`; no trainer, score, mask, hyperparameter, or
+  existing method launcher was modified.
+
+### Changed files
+
+1. `my_example/run_baseline_l2_seed21.sh`
+2. `my_example/run_batch_loo_policy_seeds_5_21.sh`
+3. `develop.md`
+
+### Queue definitions
+
+- `run_baseline_l2_seed21.sh`: `baseline/21` followed by `l2/21`.
+- `run_batch_loo_policy_seeds_5_21.sh`: `batch_loo_policy/5` followed by
+  `batch_loo_policy/21`.
+- Each queue rejects an already-running `my_example` Python task, executes
+  sequentially, stops after the first failure, and records PID, combined log,
+  status TSV, and exit code under its timestamped `logs/` directory.
+
+### Validation commands and results
+
+- `bash -n` passed for both new queue scripts.
+- `git diff --check` passed.
+- Both scripts have executable permissions.
+- Static inspection confirmed the exact method/seed arrays and order.
+
+### Known risks / TODO
+
+- Do not launch both scripts concurrently on the same single-task TPU host.
+- After a partial failure, run only the unfinished method/seed pair instead of
+  restarting a queue and duplicating completed experiments.
+- Check disk capacity before each queue because every run exports a full merged
+  model plus checkpoints and logs.
+
+---
