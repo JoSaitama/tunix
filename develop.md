@@ -9041,3 +9041,172 @@ This file tracks engineering changes made in this repository.
   restarting and duplicating the completed run.
 
 ---
+## 2026-07-25 - Design DPO-aligned mismatch noise for online GRPO
+
+### Scope
+
+- Mapped the existing DPO corruption (cross-prompt response mismatch plus chosen/rejected reversal at 20% and 40%) to a principled online-GRPO corruption design.
+- Recommended corrupting response-to-reward assignment at the prompt-group level while preserving on-policy rollouts, response log-probabilities, prompts, and clean evaluation.
+- No experiment code or launcher changes（无代码改动）.
+
+### Changed files
+
+1. `develop.md`
+
+### Validation commands and results
+
+- In DPO, the corrupted unit is one preference pair; the corresponding GRPO unit should be one prompt response-group rather than an individual token or arbitrary completion count.
+- A within-group reward derangement preserves the prompt, sampled completions, reward multiset, group mean/std, batch shapes, and GRPO normalization while assigning each completion another completion's quality signal.
+- Reversing reward ranks within selected groups is the closest multi-response analogue of swapping chosen and rejected labels.
+- Clean GSM8K evaluation remains unchanged and should use the correct answers/reward computation.
+
+### Known risks / TODO
+
+- Literal cross-prompt completion replacement would make the data off-policy for the destination prompt unless likelihoods and the training formulation are redesigned; it should not be used as the primary online-GRPO noise condition.
+- If a cross-prompt component is required, foreign reward-vector assignment can be a secondary ablation, but it changes more than label assignment and is less controlled than within-group derangement/rank reversal.
+- Noise masks, permutations, and seeds must be fixed and shared across all compared GRPO methods, and corruption must occur before group-relative advantage normalization.
+
+---
+## 2026-07-25 - Assess additive Reward Rank Reversal implementation complexity
+
+### Scope
+
+- Statistically inspected the current GSM8K data, rollout, reward, advantage, trainer-selection, and launcher paths under a strict no-change-to-existing-flow requirement.
+- Evaluated an additive 20%/40% group-level Reward Rank Reversal design without implementing it.
+- No experiment code or launcher changes（无代码改动）.
+
+### Changed files
+
+1. `develop.md`
+
+### Validation commands and results
+
+- `my_example/data.py` emits only prompt/question/answer records; responses do not exist until online rollout inside `GRPOLearner._generate_and_compute_advantage`.
+- Total rewards are computed immediately before the registered group-relative advantage estimator, so rank reversal must occur at that boundary; a standalone replacement data loader cannot implement it by itself.
+- An additive learner subclass can preserve prompts, completions, log-probabilities, reward values, batch shapes, GRPO loss, and every existing DBC trainer while reversing only selected training-group reward assignments before advantage normalization.
+- Existing clean launchers can remain byte-for-byte untouched by using separate noise entrypoints and launchers; this raises integration duplication but isolates clean behavior completely.
+
+### Complexity assessment
+
+- Core corruption logic: low complexity (group reshape, deterministic group mask, stable rank reversal, train-only guard).
+- Reproducible exact-ratio selection, clean/corrupted metrics, checkpoint-resume stability, and all-method launcher integration: medium complexity.
+- Strict new-files-only implementation: medium overall, approximately 5-8 new files, 250-450 implementation lines, and 150-300 test lines depending on whether exact dataset-level ratios and JSONL auditing are required.
+- Allowing small opt-in branches in existing builder/seeded launcher would reduce duplication, but does not satisfy the strongest interpretation of keeping all current files untouched.
+
+### Known risks / TODO
+
+- Decide whether 20%/40% means exact dataset-level group counts or deterministic Bernoulli rates; exact counts require a stable manifest/preselection step.
+- Tied/all-equal reward groups can make rank reversal partially or fully ineffective, so realized effective corruption must be logged separately from selected-group rate.
+- Corruption must apply only in TRAIN mode and before advantage normalization; pre/post evaluation must remain clean.
+- A new-file-only entrypoint that injects a noisy trainer builder is isolated but more brittle than a small explicit opt-in branch, so it needs an integration test proving every existing method still selects the same trainer.
+
+---
+## 2026-07-25 - Refine minimal Reward Rank Reversal design
+
+### Scope
+
+- Refined the design after clarifying that existing files may receive an opt-in import/routing branch, provided every current clean launcher and clean function path remains behaviorally unchanged.
+- Adopted deterministic approximate prompt-group selection rather than an exact-ratio manifest and minimized the proposed file count.
+- No experiment code or launcher changes（无代码改动）.
+
+### Proposed minimal architecture (not implemented)
+
+- Add one `my_example/reward_rank_noise.py` containing stable prompt hashing, group rank reversal, environment parsing, the opt-in GRPO learner subclass, and noise audit metrics.
+- Add one `my_example/run_reward_rank_noise.sh` wrapper that sets noise-only environment variables and delegates to the unchanged `run_seeded_full.sh METHOD SEED` path.
+- Add one focused `tests/my_example/reward_rank_noise_test.py`.
+- Modify only `my_example/train.py` with a lazy opt-in builder branch; when the noise environment is absent or fraction is zero, instantiate the existing `GRPOLearner` exactly as today.
+- Do not add or change the existing Python CLI, `RLTrainingConfig`, clean launchers, method launchers, DBC trainers, reward functions, or evaluation code.
+
+### Reproducibility contract
+
+- Compute a stable uniform score from `SHA-256(schema_version, noise_seed, canonical_question_or_prompt)` and select a training group when the score is below the configured fraction.
+- Use the same noise seed for all methods at a given experiment seed; use one score with thresholds 0.2 and 0.4 so the 20% selected prompt set is a subset of the 40% set.
+- Apply corruption only in TRAIN mode, after summed clean rewards and before group-relative advantage normalization; evaluation remains clean.
+- Across methods, prompt selection and reversal rules remain identical. Exact generated responses/rewards cannot remain identical after methods make different policy updates; enforcing identical rollouts would convert the experiment toward an offline/frozen-rollout design.
+
+### Complexity assessment
+
+- Revised complexity: low-to-medium, approximately one small existing-file routing edit, two new runtime files, one new test file, 150-250 implementation lines, and 120-200 test lines.
+- No additional TPU-heavy computation or shape change is expected; corruption is host-side reward-array permutation.
+
+### Known risks / TODO
+
+- Rank reversal is ineffective for all-equal reward groups and partially ineffective under ties; log selected-group rate, effective-group rate, and changed-completion rate separately.
+- Decide whether training `rewards/sum` should represent clean diagnostic reward or corrupted optimization reward; recommended logging is corrupted `rewards/sum` plus explicit `rewards/clean_sum` and noise metrics.
+- Use stable cryptographic hashing, not Python `hash()`, and avoid mutable RNG state so asynchronous loading and checkpoint resume do not change prompt selection.
+
+---
+## 2026-07-25 - Reconfirm the six-method GRPO experiment scope and semantics
+
+### Scope
+
+- Re-inspected the implemented trainer formulas, policy/total loss split, routing, launchers, and focused unit tests for the six methods now declared in scope: Baseline, L2 Outlier, DTV Policy Batch/Group, and DTV LOO Policy Batch/Group.
+- No experiment code or launcher changes（无代码改动）.
+
+### Confirmed method contract
+
+- `baseline`: standard GRPO update over every completion.
+- `l2`: score by per-completion full-objective gradient L2 norm; drop norms above mean plus 3 standard deviations; update with the kept full gradients.
+- `batch_policy` / `group_policy`: compute ordinary DTV scores from KL-free policy-objective gradients, including each sample's self term in the batch/group mean; threshold at score >= 0; update with the masked full configured GRPO gradients.
+- `batch_loo_policy` / `group_loo_policy`: compute policy-gradient score `g_i dot mean(g_j, j != i)` over the full completion batch or within each prompt's generation group; update with the masked full configured GRPO gradients.
+- Policy scoring is wired by cloning the GRPO algorithm config with `beta=0.0`; the regular update loss retains the configured beta.
+
+### Important qualifications
+
+- LOO uses a default minimum keep fraction of 0.25. If fewer than that many scores are nonnegative, the highest-scoring quarter is retained, including negative scores when necessary; Group applies this cap independently within each prompt group.
+- “Full masking” removes a dropped completion's own total-objective gradient contribution (policy plus KL) and averages retained gradients by the number kept. It does not undo that completion's earlier contribution to group reward mean/std and GRPO advantage normalization.
+- With the current 4 prompts x 4 generations setup, Batch scope scores across 16 completion gradients; Group scope scores separately across each contiguous group of 4 completions.
+- Existing Policy-only mask-application variants and total-loss DTV/LOO variants exist in the repository but are not part of the newly fixed six-method experiment scope.
+
+### Validation commands and results
+
+- Static implementation and focused test inspection confirmed the formulas and distinct policy-score/full-update behavior.
+- Focused tests could not be executed in the local host environment: `python` is unavailable and `/usr/local/bin/python3` does not have `pytest`. Run them in `.venv_jax081` on a configured TPU worker if runtime reconfirmation is required.
+
+### Known risks / TODO
+
+- The future mismatch implementation and launcher should expose only these six method aliases for the stated experiment matrix, even though the general seeded launcher supports additional historical variants.
+- Noise must be applied before advantage computation so all six methods receive the corresponding corrupted training gradients, while clean evaluation remains unchanged.
+
+---
+## 2026-07-25 - Implement opt-in GRPO Reward Rank Reversal noise
+
+### Scope
+
+- Added deterministic prompt-group Reward Rank Reversal for online GRPO training.
+- Preserved the existing clean path: when `TUNIX_REWARD_RANK_NOISE_FRACTION` is absent or `0`, `build_trainer` still instantiates the original `GRPOLearner`.
+- Added a sequential seed suite covering exactly Baseline, L2 Outlier, DTV Policy Group/Batch, and DTV LOO Policy Group/Batch.
+- Did not change `RLTrainingConfig`, the Python CLI, existing method launchers, DBC trainer implementations, reward functions, or evaluation behavior.
+
+### Modified files
+
+- `my_example/reward_rank_noise.py` (new): environment parsing, SHA-256 prompt selection, reward-rank reversal, TRAIN-only learner subclass, and audit metrics.
+- `my_example/run_reward_rank_noise_suite.sh` (new): sequential six-method launcher for one seed and one noise fraction.
+- `my_example/train.py`: small opt-in learner-selection branch.
+- `my_example/run_seeded_full.sh`: noise-only run-name suffix and configuration header; clean run naming remains unchanged.
+- `tests/my_example/reward_rank_noise_test.py` (new): deterministic selection, nested 20%/40% sets, rank reversal, tie handling, input validation, and TRAIN/EVAL isolation tests.
+- `develop.md`: this development record.
+
+### Behavior and reproducibility
+
+- Select a prompt group when its stable SHA-256 score under `(schema, noise_seed, prompt)` is below the configured fraction. The realized ratio is deterministic and approximate.
+- With the same noise seed, every method uses the same prompt-selection rule, and the 20% selected set is a subset of the 40% set.
+- Reverse the assignment of the observed summed reward values inside each selected generation group. The reward multiset, group mean, and group standard deviation are preserved, while completion-to-reward assignments are reversed.
+- Corruption is returned only from TRAIN reward computation and therefore occurs before GRPO advantage normalization. EVAL returns the clean rewards.
+- Existing `rewards/sum` remains the clean reward metric emitted by the base learner for compatibility. Added `rewards/clean_sum`, `rewards/corrupted_sum`, configured/selected/effective group rates, changed-completion rate, and mean absolute reward-assignment delta.
+
+### Validation commands and results
+
+- `python3 -m py_compile my_example/reward_rank_noise.py my_example/train.py tests/my_example/reward_rank_noise_test.py`: passed.
+- `bash -n my_example/run_reward_rank_noise_suite.sh my_example/run_seeded_full.sh`: passed.
+- `git diff --check`: passed.
+- Independent SHA-256 selection check: seed 0 selected 194/1000 prompts at 20% and 396/1000 at 40%; the 20% set was a subset of the 40% set.
+- Runtime unit tests were not executable on the Mac host because its `python3` environment does not contain `pytest` or the TPU/JAX project dependencies. Run the focused test in `.venv_jax081` on the TPU worker before the full suite.
+
+### Known risks / TODO
+
+- Selected groups with tied or all-equal rewards can be partially or completely unchanged; use the effective-group and changed-completion metrics when reporting realized corruption.
+- Different methods share deterministic prompt selection but cannot be guaranteed to generate identical online completions after their policies diverge.
+- Run a one-step TPU smoke suite before the full seed0 20% and 40% experiments.
+
+---

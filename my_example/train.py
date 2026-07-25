@@ -162,10 +162,27 @@ def build_trainer(rl_cluster, grpo: GrpoGenerationConfig) -> GRPOLearner:
             check_answer,
             check_numbers,
         ]
-    return GRPOLearner(
+    learner_cls = GRPOLearner
+    learner_kwargs = {}
+    from .reward_rank_noise import config_from_env
+
+    noise_config = config_from_env()
+    if noise_config.enabled:
+        from .reward_rank_noise import RewardRankNoiseGRPOLearner
+
+        learner_cls = RewardRankNoiseGRPOLearner
+        learner_kwargs["noise_config"] = noise_config
+        print(
+            "Reward rank reversal enabled:",
+            f"fraction={noise_config.fraction}",
+            f"seed={noise_config.seed}",
+        )
+
+    return learner_cls(
         rl_cluster=rl_cluster,
         reward_fns=[
             *reward_fns,
         ],
         algo_config=grpo_config,
+        **learner_kwargs,
     )

@@ -98,7 +98,13 @@ if pgrep -af '[p]ython.*my_example' >/dev/null 2>&1; then
 fi
 
 RUN_TS="$(date +%Y%m%d_%H%M%S)"
-RUN_NAME="gsm8k_${METHOD_SLUG}_seed${SEED}_full_${RUN_TS}"
+NOISE_FRACTION="${TUNIX_REWARD_RANK_NOISE_FRACTION:-}"
+NOISE_SUFFIX=""
+if [ -n "${NOISE_FRACTION}" ] && [ "${NOISE_FRACTION}" != "0" ]; then
+  NOISE_FRACTION_SLUG="${NOISE_FRACTION//./p}"
+  NOISE_SUFFIX="_reward_rank_noise${NOISE_FRACTION_SLUG}"
+fi
+RUN_NAME="gsm8k_${METHOD_SLUG}_seed${SEED}${NOISE_SUFFIX}_full_${RUN_TS}"
 RUN_ROOT="${ROOT_DIR}/runs/${RUN_NAME}"
 LOG_ROOT="${ROOT_DIR}/logs/${RUN_NAME}"
 
@@ -127,6 +133,8 @@ echo "Seed:            ${SEED}"
 echo "Dataset seed:    $((42 + SEED))"
 echo "Rollout seed:    ${SEED}"
 echo "Min keep:        ${TUNIX_DBC_SELF_INF_MIN_KEEP_FRACTION:-method-default}"
+echo "Reward noise:    ${NOISE_FRACTION:-clean}"
+echo "Noise seed:      ${TUNIX_REWARD_RANK_NOISE_SEED:-n/a}"
 echo "Run:             ${RUN_ROOT}"
 echo "Logs:            ${LOG_ROOT}"
 echo "Method launcher: ${METHOD_SCRIPT}"
