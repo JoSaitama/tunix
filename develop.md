@@ -8965,3 +8965,79 @@ This file tracks engineering changes made in this repository.
   model plus checkpoints and logs.
 
 ---
+## 2026-07-24 - Diagnose TPU client initialization hang on second server
+
+### Scope
+
+- Diagnosed a JAX TPU probe hanging in `make_tpu_client()` on the second
+  server after it had previously trained successfully.
+- No repository code, environment, process, service, or TPU resource was
+  changed（无代码改动）.
+
+### Evidence
+
+- JAX imports successfully from `.venv_jax081`; the hang occurs while creating
+  the TPU backend client, not while importing the package.
+- The narrow process check only excluded Python commands containing
+  `my_example`; it did not exclude PPO, JAX, notebook, other-user, or stale TPU
+  processes.
+- Root disk has 18 GiB free. This is tight for multiple exported runs but does
+  not explain a TPU client initialization hang.
+- The probe was manually interrupted, so backend health remains unconfirmed.
+
+### Diagnostic order
+
+1. Restore the intended `.venv_jax081` environment and inspect JAX/libtpu
+   versions and TPU-related environment variables.
+2. Inspect all users' Python/JAX/TPU processes, rather than only
+   `python.*my_example`.
+3. Run bounded CPU and TPU probes and inspect `/tmp/tpu_logs`.
+4. Inspect TPU-related services/runtime only if no process owns the device.
+5. Restart a runtime or TPU VM only after confirming no useful task is active.
+
+### Known risks / TODO
+
+- Do not launch a training queue until a bounded TPU probe reports four TPU
+  devices.
+- Do not kill processes or restart services based only on the narrow grep;
+  identify PID, user, elapsed time, and command first.
+- 18 GiB free may be insufficient for two complete sequential model/checkpoint
+  exports; clean only explicitly verified obsolete artifacts.
+
+---
+## 2026-07-25 - Add Group Policy-LOO seeds 5/21 queue
+
+### Scope
+
+- Added an independent sequential queue for Group Policy-LOO Full seeds 5 and
+  21, completing the queued seed coverage for both Policy-LOO scopes.
+- No trainer, score, mask, retention cap, hyperparameter, or existing launcher
+  was modified.
+
+### Changed files
+
+1. `my_example/run_group_loo_policy_seeds_5_21.sh`
+2. `develop.md`
+
+### Queue definition
+
+- Runs `group_loo_policy/5` followed by `group_loo_policy/21`.
+- Reuses `run_seeded_full.sh`, so the method remains policy-gradient scoring,
+  strict LOO without the self term, Full mask, and default minimum keep 25%.
+- Refuses to start while another `my_example` Python task is active, stops at
+  the first failure, and records PID, combined log, status TSV, and exit code.
+
+### Validation commands and results
+
+- `bash -n my_example/run_group_loo_policy_seeds_5_21.sh`: passed.
+- `git diff --check`: passed.
+- Confirmed executable permissions and exact method/seed ordering.
+
+### Known risks / TODO
+
+- Do not launch Batch and Group Policy-LOO queues concurrently on the same
+  single-task TPU host.
+- After a partial failure, launch only the unfinished seed rather than
+  restarting and duplicating the completed run.
+
+---
