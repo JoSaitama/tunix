@@ -52,12 +52,12 @@ if pgrep -af '[p]ython.*my_example' >/dev/null 2>&1; then
 fi
 
 METHODS=(
-  "baseline"
   "l2"
-  "group_policy"
   "batch_policy"
-  "group_loo_policy"
+  "group_policy"
   "batch_loo_policy"
+  "group_loo_policy"
+  "baseline"
 )
 
 echo "Queue:          ${QUEUE_NAME}"
