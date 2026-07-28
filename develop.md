@@ -9210,3 +9210,36 @@ This file tracks engineering changes made in this repository.
 - Run a one-step TPU smoke suite before the full seed0 20% and 40% experiments.
 
 ---
+## 2026-07-28 - Fix three-seed audit execution and embedded Python syntax
+
+### Scope
+
+- Fixed `scripts/grpo_three_seed_audit.sh` after its first server execution
+  failed.
+- No training method, trainer, score, mask, dataset, or experiment result was
+  changed.
+
+### Root causes and fixes
+
+- The script lacked a Bash shebang and was invoked with `sh`, where `source`
+  is unavailable. Added `#!/usr/bin/env bash` and strict shell mode.
+- Multiline conditional expressions were embedded directly inside f-strings,
+  producing an unterminated-string `SyntaxError` on Python 3.11. Computed the
+  filter and keep percentages before formatting them.
+- Strict shell mode now stops immediately if the embedded Python audit fails,
+  rather than printing misleading `Wrote` messages for missing output files.
+
+### Validation commands and results
+
+- `bash -n scripts/grpo_three_seed_audit.sh`: passed.
+- Extracted embedded Python compiled successfully with `compile(..., "exec")`.
+- `git diff --check`: passed.
+- Confirmed executable permissions.
+
+### Known risks / TODO
+
+- Run the script as `bash scripts/grpo_three_seed_audit.sh` or execute it
+  directly; do not run it as `sh ...`.
+- Full data validation still requires the server logs and TensorBoard package.
+
+---

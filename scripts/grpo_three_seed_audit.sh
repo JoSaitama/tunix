@@ -1,3 +1,6 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
 cd ~/Project/tunix
 source .venv_jax081/bin/activate
 
@@ -541,6 +544,16 @@ for run in runs:
         if run["post_correct"] is not None
         else "MISSING"
     )
+    filter_percent = (
+        run["filter_fraction"] * 100
+        if run["filter_fraction"] is not None
+        else None
+    )
+    kept_percent = (
+        run["kept_fraction"] * 100
+        if run["kept_fraction"] is not None
+        else None
+    )
     print(
         f"{run['method']:24s} "
         f"{run['seed']:4d} "
@@ -551,16 +564,8 @@ for run in runs:
         f"{correct:>11s} "
         f"{fmt(run['post_partial']):>9s} "
         f"{fmt(run['post_format']):>9s} "
-        f"{fmt(
-            run['filter_fraction'] * 100
-            if run['filter_fraction'] is not None
-            else None
-        ):>9s} "
-        f"{fmt(
-            run['kept_fraction'] * 100
-            if run['kept_fraction'] is not None
-            else None
-        ):>9s} "
+        f"{fmt(filter_percent):>9s} "
+        f"{fmt(kept_percent):>9s} "
         f"{run['filter_source']:>16s}"
     )
 
