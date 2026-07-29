@@ -10,6 +10,203 @@ This file tracks engineering changes made in this repository.
 
 ---
 
+## 2026-07-29 - Add parameterized Random and Reward GRPO filters
+
+### Scope
+
+- Added independent `random_batch`, `random_group`, `reward_batch`, and
+  `reward_group` methods without changing existing method launch paths.
+- Random Filter selects samples reproducibly; Reward Filter ranks the complete
+  prompt-group advantages already computed by standard GRPO.
+- Both methods use stochastic rounding so configured ratios are achieved in
+  expectation, including Group scope with four generations.
+- Both methods reuse fixed-shape Full masking and retained-count normalization.
+- Added a 5-percentage-point ratio guard and ratio suffixes such as `0p20` to
+  run/result labels.
+- Extended the seeded launcher and reward-rank-noise suite; noise fraction zero
+  or omission selects clean data.
+
+### Modified files
+
+- `tunix/rl/fixed_filter_trainer.py`
+- `tunix/rl/grpo/grpo_learner.py`
+- `tunix/rl/rl_cluster.py`
+- `my_example/run_fixed_filter.sh`
+- `my_example/run_random_filter_batch.sh`
+- `my_example/run_random_filter_group.sh`
+- `my_example/run_reward_filter_batch.sh`
+- `my_example/run_reward_filter_group.sh`
+- `my_example/run_seeded_full.sh`
+- `my_example/run_reward_rank_noise_suite.sh`
+- `tests/rl/fixed_filter_trainer_test.py`
+- `develop.md`
+
+### Validation
+
+- `python3 -m py_compile ...`: passed.
+- `bash -n` on all added/modified launch scripts: passed.
+- `git diff --check`: passed.
+- Invalid ratio `0.095`: rejected with exit code 2 by both the method launcher
+  and suite launcher.
+- `python3 tests/rl/fixed_filter_trainer_test.py`: not runnable on the local
+  host because `absl`/project JAX dependencies are absent; run it in the server
+  `.venv_jax081`.
+
+### Known risks / follow-up
+
+- A one-step TPU smoke test remains required for Batch and Group paths.
+- Exact per-step filter counts vary by stochastic rounding; cumulative actual
+  fractions and per-step selections are written to TensorBoard/selection
+  JSONL for audit.
+
+---
+
+## 2026-07-29 - Define DPO-to-GRPO Reward Filter correspondence
+
+### Scope
+
+- Clarified that DPO reward margin is pair-relative, while the closest GRPO
+  analogue is signed group-relative reward/advantage.
+- Recommended using the already-computed observed GRPO advantage as the common
+  Reward Filter quality score for both Batch and Group selection scopes.
+- No repository code, script, configuration, or experiment artifact was
+  changed（无代码改动）.
+
+### Important distinction
+
+- Within one prompt group, raw reward, centered reward, reward relative to the
+  group maximum, and standardized advantage preserve the same ordering.
+- Across prompt groups, raw rewards and group-normalized advantages can produce
+  different Batch selections.
+- Filtering should use the most negative signed relative quality, not the
+  largest absolute reward deviation, because absolute deviation may remove the
+  best completion.
+
+---
+
+## 2026-07-29 - Clarify Reward Filter score and tie semantics
+
+### Scope
+
+- Clarified the standard GRPO interpretation of scalar per-completion rewards,
+  Bottom-K filtering, Batch/Group selection domains, and tied rewards.
+- No repository code, script, configuration, or experiment artifact was
+  changed（无代码改动）.
+
+---
+
+## 2026-07-29 - Estimate Codex usage for Random/Reward implementation
+
+### Scope
+
+- Provided a relative usage estimate only; account quota and dynamic model
+  billing are not visible in this workspace.
+- No repository code, script, configuration, or experiment artifact was
+  changed（无代码改动）.
+
+---
+
+## 2026-07-29 - Estimate Random/Reward filter implementation complexity
+
+### Scope
+
+- Assessed implementation difficulty without inspecting or changing training
+  code.
+- No repository code, script, configuration, or experiment artifact was
+  changed（无代码改动）.
+
+### Estimate
+
+- Random Filter: low complexity.
+- Reward Filter: low-to-medium complexity.
+- Both should reuse the existing fixed-shape Full-mask update path and differ
+  only in mask construction.
+- The main edge case is reproducible stochastic rounding for 10%/20% Group
+  filtering when each prompt has four completions.
+
+---
+
+## 2026-07-29 - Plan confirmatory seed for Batch collapse
+
+### Scope
+
+- Defined a resource-aware replication plan for the mismatch40 Seed 0 collapse
+  observed in Batch DTV-Policy and Batch Policy-LOO.
+- No repository code, script, configuration, or experiment artifact was
+  changed（无代码改动）.
+
+### Decision rule
+
+- Run both Batch methods with matched Seed 5 and unchanged hyperparameters.
+- Compare against a matched mismatch40 Baseline Seed 5; use Group Seed 5 only
+  when making a direct Batch-versus-Group scope decision.
+- If both Batch methods collapse again, treat the Batch/mismatch40 interaction
+  as reproducible enough to deprioritize Batch and spend remaining resources on
+  Group confirmation.
+- If neither collapses, run Seed 21 because Seed 0 may be an outlier.
+- If only one collapses, run Seed 21 for both methods and diagnose the
+  method-specific filtering statistics before selecting a scope.
+
+---
+
+## 2026-07-29 - Clarify natural GRPO group unit versus DTV scope
+
+### Scope
+
+- Distinguished GRPO's intrinsic prompt-group advantage normalization unit
+  from the independently chosen gradient-consensus/filtering scope.
+- No repository code, script, configuration, or experiment artifact was
+  changed（无代码改动）.
+
+### Conclusion
+
+- GRPO is intrinsically group-based for relative reward normalization and
+  advantage construction.
+- DTV Group is the structurally aligned local variant: it asks whether a
+  completion agrees with the update direction of alternative completions for
+  the same prompt.
+- DTV Batch remains a valid method: it asks whether a completion agrees with
+  the aggregate update direction across prompts in the optimizer step.
+- Therefore Group is a natural GRPO inductive bias, not a logically mandatory
+  filtering scope. Batch versus Group should be stated as local versus global
+  gradient consensus rather than as correct versus incorrect GRPO.
+
+---
+
+## 2026-07-29 - Design Random/Reward filtering controls for GRPO
+
+### Scope
+
+- Defined an additive design for parameterized Random Filter and Reward Filter
+  controls with Batch and Group scopes.
+- Clarified that these controls should share GRPO reward/advantage computation,
+  fixed-shape masking, retained-count normalization, seeds, logging, and update
+  objectives with the selected DTV method.
+- No repository code, script, configuration, or experiment artifact was
+  changed（无代码改动）.
+
+### Design constraints
+
+- Filtering is applied after full prompt-group advantages are computed; neither
+  control recomputes rewards or advantages after selection.
+- Random filtering is independent of rewards and gradients.
+- Reward filtering uses the observed training reward after any configured
+  mismatch transformation, never the hidden clean reward.
+- Filter ratio and scope are independent runtime parameters; Batch and Group
+  variants should reuse one implementation rather than separate algorithms.
+- Existing baseline, DTV, DTV-LOO, and other launch paths remain unchanged.
+
+### Known decisions still required
+
+- Define whether a nominal Group ratio means exact per-group cardinality,
+  stochastic expected cardinality, or a ratio enforced over the full actor
+  batch, because four generations per prompt cannot represent exact 10% or 20%
+  deterministic filtering within each group.
+- Freeze the primary Batch or Group scope using development evidence before
+  final confirmatory evaluation.
+
+---
+
 ## 2026-03-07: DeepScaler live eval progress inspection
 
 ### Scope
@@ -9241,5 +9438,268 @@ This file tracks engineering changes made in this repository.
 - Run the script as `bash scripts/grpo_three_seed_audit.sh` or execute it
   directly; do not run it as `sh ...`.
 - Full data validation still requires the server logs and TensorBoard package.
+
+---
+## 2026-07-28 - Summarize six methods as mean plus one standard deviation
+
+### Scope
+
+- Calculated three-seed mean ± one sample standard deviation (`ddof=1`) for
+  the six finalized clean GSM8K methods.
+- Metrics include pre/post exact accuracy, improvement, correct count,
+  partial accuracy, and format accuracy.
+- No repository code, script, configuration, or experiment artifact was
+  changed（无代码改动）.
+
+### Validation
+
+- Used all 18 CSV rows: six methods × seeds 0, 5, and 21.
+- Confirmed all run exit codes are zero and the audit reports `COMPLETE`.
+- Cross-checked calculated post-accuracy means/SDs against the generated audit
+  output.
+
+### Statistical convention
+
+- Standard deviations are sample SDs across the three matched seeds
+  (`statistics.stdev`, `ddof=1`).
+- Correct is summarized as the mean ± SD of each seed's correct count, with
+  the common evaluation denominator 1319.
+
+---
+## 2026-07-28 - Explain identical pre-training accuracy across seeds
+
+### Scope
+
+- Verified why all 18 clean GSM8K runs report the same pre-training result
+  (623/1319, 47.2328%).
+- No repository code, script, configuration, or experiment artifact was
+  changed（无代码改动）.
+
+### Findings
+
+- Every run evaluates the same downloaded base Gemma model and untrained LoRA
+  policy before constructing the trainer or performing an optimizer update.
+- Pre-evaluation uses greedy generation (`temperature=None`, `top_k=1`) and
+  `evaluate()` passes the deterministic generation seed `p`; with one
+  evaluation pass this is always seed 0, independent of experiment seed.
+- Experiment seed controls dataset shuffle (`42 + seed`) and the training
+  rollout PRNG key. Those differences affect training, not the initial model.
+- The test dataset is shuffled, but all 1319 test examples are evaluated, so
+  changing order cannot change aggregate correct/partial/format counts.
+
+### Statistical implication
+
+- A pre-accuracy sample SD of zero is expected for this controlled design.
+- Because every run subtracts the same pre value, Delta has the same SD as
+  Post Acc.
+- Different post-training metrics and filtering rates confirm that experiment
+  seeds are active during training.
+
+---
+## 2026-07-28 - Assess conference suitability of deterministic pre-evaluation
+
+### Scope
+
+- Assessed whether the fixed deterministic pre-training evaluation and
+  three-seed matched experimental design are suitable for a top-tier ML
+  conference submission.
+- No repository code, script, configuration, or experiment artifact was
+  changed（无代码改动）.
+
+### Conclusion
+
+- Identical pre-training accuracy is valid because every run starts from the
+  same checkpoint and uses deterministic full-test-set evaluation.
+- The main claims must rely on post-training matched-seed comparisons, clearly
+  defined uncertainty, complete hyperparameter/seed disclosure, and avoidance
+  of test-set-driven method selection.
+- Three seeds are defensible for an initial/full-cost LLM study but relatively
+  weak for a narrow sub-one-point superiority claim; five matched seeds or a
+  paired uncertainty analysis is preferable.
+
+### Known risks / TODO
+
+- Current DTV-Policy Batch versus L2 mean gap is 0.9351 percentage points over
+  three seeds. Do not claim statistically established superiority from
+  overlapping mean ± SD intervals alone.
+- Method development used observed GSM8K test outcomes; the final paper should
+  disclose the development protocol and validate the frozen method on
+  additional tasks or a held-out development benchmark.
+
+---
+## 2026-07-28 - Clarify held-out validation after GSM8K-guided development
+
+### Scope
+
+- Clarified how to address test-set adaptation after using GSM8K results to
+  compare and refine GRPO DTV variants.
+- No repository code, script, configuration, or experiment artifact was
+  changed（无代码改动）.
+
+### Recommendation
+
+- Treat the current GSM8K study as method development and mechanism analysis.
+- Freeze the selected method, hyperparameters, filtering rule, and reporting
+  protocol before evaluating on a previously unused confirmation benchmark.
+- Do not tune again on the confirmation benchmark; otherwise it becomes a
+  second development set and a third held-out test is required.
+
+### Alternatives
+
+- If additional full training is infeasible, create a validation split from
+  training data for method selection and reserve the official test set for the
+  frozen comparison, though prior repeated official-test inspection cannot be
+  retroactively undone.
+- Cross-algorithm DPO/PPO evidence strengthens breadth but does not fully
+  replace a held-out GRPO confirmation task for a GRPO-specific claim.
+
+---
+## 2026-07-28 - Summarize preliminary reward-rank-reversal results
+
+### Scope
+
+- Organized preliminary mismatch20 and mismatch40 GSM8K results into
+  per-seed and available-seed aggregate metric tables.
+- Analyzed the results against the implemented prompt-group reward rank
+  reversal mechanism.
+- No repository code, script, configuration, or experiment artifact was
+  changed（无代码改动）.
+
+### Coverage
+
+- mismatch20: seed 0 for all six methods; seed 5 for five methods, with
+  Baseline seed 5 still missing.
+- mismatch40: seed 0 only for all six methods.
+
+### Main observations
+
+- At mismatch20, Batch DTV-Policy is stable across seeds 0 and 5
+  (55.6861 ± 0.3753 exact accuracy); Batch Policy-LOO is close
+  (55.4587 ± 0.9114) but has highly variable format accuracy.
+- mismatch20 L2 seed 5 collapses to 3.2600% despite seed 0 reaching 54.6626%;
+  this must be audited as a possible seed-specific optimization collapse and
+  not treated as ordinary variance.
+- At mismatch40 seed 0, Group Policy-LOO is best (52.9947%), followed by Group
+  DTV-Policy (50.6444%), while both Batch directional methods collapse.
+
+### Mechanistic caveat
+
+- The implementation does not negate rewards. For deterministically selected
+  prompt groups, it preserves the reward multiset but reassigns ascending
+  values to samples in descending rank, so best and worst completions exchange
+  reward assignments.
+- Because corruption is prompt-group-local, Group filtering is structurally
+  aligned with the corruption unit; the mismatch40 seed-0 result is consistent
+  with this hypothesis but requires additional seeds.
+
+### Known risks / TODO
+
+- Complete mismatch20 Baseline seed 5 before computing fair paired
+  improvements over Baseline.
+- Audit L2 seed 5 for exit code, 691 optimizer steps, fresh checkpoint path,
+  actual selected/effective/changed noise fractions, filtering rate, and
+  nonfinite/gradient anomalies.
+- mismatch40 needs matched seeds 5 and 21 before making robustness claims.
+
+---
+## 2026-07-29 - Select one DTV scope and plan random/reward filter controls
+
+### Scope
+
+- Assessed whether Batch or Group Policy-DTV should remain after removing the
+  L2 outlier comparator and adding Random Filter 10/20% and Reward Filter
+  10/20% controls.
+- No repository code, script, configuration, or experiment artifact was
+  changed（无代码改动）.
+
+### Evidence
+
+- Clean three-seed Post Acc: Batch 55.9768 ± 0.3502; Group
+  55.0670 ± 0.8177.
+- mismatch20 two-seed Post Acc: Batch 55.6861 ± 0.3753; Group
+  54.4731 ± 1.7691.
+- mismatch40 seed 0: Batch 26.7627; Group 50.6444.
+- Group remains above Baseline in every currently observed clean/noisy
+  condition, whereas Batch collapses under mismatch40 seed 0.
+
+### Recommendation
+
+- For a reward-noise robustness paper, retain Group Policy-DTV because its
+  scope matches the prompt-group unit where rank reversal is applied and its
+  worst-case behavior is substantially stronger.
+- Treat the decision as provisional until at least mismatch40 seed 5 is
+  available; mismatch40 currently has only one seed.
+
+### Comparator design constraints
+
+- Implement one parameterized Random Filter and one parameterized Reward
+  Filter, with 0.10/0.20 ratios supplied at launch rather than duplicating
+  trainer logic.
+- Reward filtering under mismatch must use the reward visible to the learner
+  after corruption; using the hidden clean reward would be an unfair oracle.
+- Keep tensor shapes static, apply Full masks, renormalize by retained samples,
+  use matched seeds, and log configured and realized filter fractions.
+
+### Known risks / TODO
+
+- With four completions per prompt, exact 10% or 20% per-group filtering is not
+  directly representable; the filtering population and rounding/stochastic
+  policy must be specified before implementation.
+- Fixed 10/20% controls filter much more than clean Policy-DTV (~1.5% Group),
+  so report actual rates and consider a rate-matched control in the appendix.
+
+---
+## 2026-07-29 - Restate current DTV and DTV-LOO filtering rules
+
+### Scope
+
+- Restated the Batch/Group selection rules for current Policy-score DTV and
+  Policy-LOO Full methods from the established experiment design.
+- No repository code, script, configuration, or experiment artifact was
+  changed（无代码改动）.
+
+### Rules
+
+- Batch DTV compares each policy gradient with the full 16-completion batch
+  mean, including the sample's own gradient.
+- Group DTV compares against the four-completion same-prompt mean, including
+  self.
+- Batch LOO compares against the other 15 completion gradients.
+- Group LOO compares against the other three completions from the same prompt.
+- Scores below zero are filtered. Policy gradients define the mask, while the
+  mask is applied to the full Policy+KL update.
+- LOO uses a default 25% minimum-retention cap; Group applies it independently
+  per prompt and restores negative scores closest to zero first. Ordinary DTV
+  has no minimum-retention cap.
+
+---
+## 2026-07-29 - Clarify filtering relative to GRPO group reward statistics
+
+### Scope
+
+- Clarified the established execution order between GRPO group reward
+  normalization and DTV/LOO gradient masking.
+- No repository code, script, configuration, or experiment artifact was
+  changed（无代码改动）.
+
+### Execution order
+
+1. Generate all completions for every prompt group.
+2. Score every completion and compute group reward mean/std and advantages
+   using the complete group.
+3. Build per-completion policy/total losses and gradients from those fixed
+   advantages.
+4. Compute Batch or Group DTV/LOO scores once using all relevant gradients.
+5. Apply the resulting fixed-shape mask only when aggregating the optimizer
+   update.
+
+### Consequences
+
+- Filtered completions still influence the reward mean/std and therefore the
+  advantages assigned to the other completions in their prompt group.
+- Under Full masking, the filtered completion's own Policy and KL gradient
+  contribution is removed from the optimizer update.
+- Advantages and DTV scores are not recomputed after masking; this avoids a
+  circular filter/re-normalize loop and preserves static JAX/TPU shapes.
 
 ---

@@ -3,15 +3,17 @@ set -uo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-if [ "$#" -lt 2 ]; then
-  echo "usage: $0 SEED FRACTION [extra run_grpo_gemma.sh arguments...]" >&2
-  echo "example: $0 0 0.2" >&2
+if [ "$#" -lt 1 ]; then
+  echo "usage: $0 SEED [NOISE_FRACTION=0] [FILTER_RATIO=0.10] [GRPO arguments...]" >&2
+  echo "example clean:    $0 0 0 0.10" >&2
+  echo "example mismatch: $0 5 0.2 0.20" >&2
   exit 2
 fi
 
 SEED="$1"
-FRACTION="$2"
-shift 2
+FRACTION="${2:-0}"
+FILTER_RATIO="${3:-0.10}"
+shift "$(( $# >= 3 ? 3 : $# ))"
 
 case "${SEED}" in
   ''|*[!0-9]*)
@@ -21,9 +23,19 @@ case "${SEED}" in
 esac
 
 if ! awk -v value="${FRACTION}" \
-  'BEGIN { exit !(value ~ /^[0-9]+([.][0-9]+)?$/ && value > 0 && value <= 1) }'
+  'BEGIN { exit !(value ~ /^[0-9]+([.][0-9]+)?$/ && value >= 0 && value <= 1) }'
 then
-  echo "error: FRACTION must be a number in (0, 1]; got '${FRACTION}'" >&2
+  echo "error: NOISE_FRACTION must be in [0, 1]; got '${FRACTION}'" >&2
+  exit 2
+fi
+
+if ! awk -v value="${FILTER_RATIO}" 'BEGIN {
+  scaled = value * 100; rounded = int(scaled + 0.5);
+  exit !(value ~ /^[0-9]+([.][0-9]+)?$/ &&
+         value > 0 && value < 1 &&
+         scaled == rounded && rounded % 5 == 0)
+}'; then
+  echo "error: FILTER_RATIO must be a 5% step in (0,1); got '${FILTER_RATIO}'" >&2
   exit 2
 fi
 
@@ -52,12 +64,15 @@ if pgrep -af '[p]ython.*my_example' >/dev/null 2>&1; then
 fi
 
 METHODS=(
-  "l2"
-  # "batch_policy"
-  "group_policy"
-  # "batch_loo_policy"
-  "group_loo_policy"
   "baseline"
+  "random_batch"
+  "random_group"
+  "reward_batch"
+  "reward_group"
+  "batch_policy"
+  "group_policy"
+  "batch_loo_policy"
+  "group_loo_policy"
 )
 
 echo "Queue:          ${QUEUE_NAME}"
@@ -65,6 +80,7 @@ echo "Queue root:     ${QUEUE_ROOT}"
 echo "Seed:           ${SEED}"
 echo "Noise fraction: ${FRACTION}"
 echo "Noise seed:     ${SEED}"
+echo "Filter ratio:   ${FILTER_RATIO}"
 echo "Methods:        ${METHODS[*]}"
 
 for method in "${METHODS[@]}"; do
@@ -80,6 +96,7 @@ for method in "${METHODS[@]}"; do
 
   TUNIX_REWARD_RANK_NOISE_FRACTION="${FRACTION}" \
   TUNIX_REWARD_RANK_NOISE_SEED="${SEED}" \
+  TUNIX_FILTER_RATIO="${FILTER_RATIO}" \
     "${ROOT_DIR}/my_example/run_seeded_full.sh" \
       "${method}" "${SEED}" "$@"
   status=$?
@@ -102,4 +119,4 @@ done
 
 printf '0\n' > "${QUEUE_ROOT}/exit_code"
 echo
-echo "All six reward-rank-noise runs completed successfully."
+echo "All configured runs completed successfully."

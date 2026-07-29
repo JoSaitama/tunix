@@ -5,7 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 if [ "$#" -lt 2 ]; then
   echo "usage: $0 METHOD SEED [extra run_grpo_gemma.sh arguments...]" >&2
-  echo "methods: baseline batch group batch_policy group_policy l2 batch_loo group_loo batch_loo_keep75 group_loo_keep75 batch_loo_policy group_loo_policy batch_loo_policy_keep75 group_loo_policy_keep75 batch_loo_policy_only group_loo_policy_only" >&2
+  echo "methods: baseline batch group batch_policy group_policy l2 batch_loo group_loo batch_loo_keep75 group_loo_keep75 batch_loo_policy group_loo_policy batch_loo_policy_keep75 group_loo_policy_keep75 batch_loo_policy_only group_loo_policy_only random_batch random_group reward_batch reward_group" >&2
   exit 2
 fi
 
@@ -85,6 +85,22 @@ case "${METHOD}" in
     METHOD_SLUG="dtv_selfinf_group_loo_policy_only"
     METHOD_SCRIPT="./my_example/run_dbc_self_inf_group_loo_policy_only.sh"
     ;;
+  random_batch)
+    METHOD_SLUG="random_batch"
+    METHOD_SCRIPT="./my_example/run_random_filter_batch.sh"
+    ;;
+  random_group)
+    METHOD_SLUG="random_group"
+    METHOD_SCRIPT="./my_example/run_random_filter_group.sh"
+    ;;
+  reward_batch)
+    METHOD_SLUG="reward_batch"
+    METHOD_SCRIPT="./my_example/run_reward_filter_batch.sh"
+    ;;
+  reward_group)
+    METHOD_SLUG="reward_group"
+    METHOD_SCRIPT="./my_example/run_reward_filter_group.sh"
+    ;;
   *)
     echo "error: unknown METHOD '${METHOD}'" >&2
     exit 2
@@ -104,7 +120,19 @@ if [ -n "${NOISE_FRACTION}" ] && [ "${NOISE_FRACTION}" != "0" ]; then
   NOISE_FRACTION_SLUG="${NOISE_FRACTION//./p}"
   NOISE_SUFFIX="_reward_rank_noise${NOISE_FRACTION_SLUG}"
 fi
-RUN_NAME="gsm8k_${METHOD_SLUG}_seed${SEED}${NOISE_SUFFIX}_full_${RUN_TS}"
+FILTER_RATIO="${TUNIX_FILTER_RATIO:-}"
+FILTER_SUFFIX=""
+case "${METHOD}" in
+  random_batch|random_group|reward_batch|reward_group)
+    if [ -z "${FILTER_RATIO}" ]; then
+      echo "error: TUNIX_FILTER_RATIO is required for ${METHOD}" >&2
+      exit 2
+    fi
+    FILTER_PERCENT="$(awk -v value="${FILTER_RATIO}" 'BEGIN { printf "%02d", value * 100 }')"
+    FILTER_SUFFIX="_ratio0p${FILTER_PERCENT}"
+    ;;
+esac
+RUN_NAME="gsm8k_${METHOD_SLUG}${FILTER_SUFFIX}_seed${SEED}${NOISE_SUFFIX}_full_${RUN_TS}"
 RUN_ROOT="${ROOT_DIR}/runs/${RUN_NAME}"
 LOG_ROOT="${ROOT_DIR}/logs/${RUN_NAME}"
 
@@ -134,6 +162,7 @@ echo "Dataset seed:    $((42 + SEED))"
 echo "Rollout seed:    ${SEED}"
 echo "Min keep:        ${TUNIX_DBC_SELF_INF_MIN_KEEP_FRACTION:-method-default}"
 echo "Reward noise:    ${NOISE_FRACTION:-clean}"
+echo "Filter ratio:    ${FILTER_RATIO:-n/a}"
 echo "Noise seed:      ${TUNIX_REWARD_RANK_NOISE_SEED:-n/a}"
 echo "Run:             ${RUN_ROOT}"
 echo "Logs:            ${LOG_ROOT}"

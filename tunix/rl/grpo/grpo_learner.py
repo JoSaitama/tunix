@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import dataclasses
+import os
 from typing import Iterable, List, Sequence, TypeVar
 
 import flax
@@ -36,7 +37,7 @@ MetricFn = rl_learner.MetricFn
 
 @flax.struct.dataclass(frozen=True)
 class TrainExample(common.TrainExample):
-  pass
+  filter_random_values: jax.Array | None = None
 
 
 @dataclasses.dataclass(slots=True, kw_only=True)
@@ -204,6 +205,8 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
             "self_inf_dot_mean": np.mean,
             "self_inf_dot_std": np.mean,
             "self_inf_kept_fraction": np.mean,
+            "fixed_filter_kept_fraction": np.mean,
+            "fixed_filter_target_count": np.mean,
             "loo_score_mean": np.mean,
             "loo_score_std": np.mean,
             "loo_score_min": np.min,
@@ -369,7 +372,26 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
         ref_per_token_logps=ref_per_token_logps,
         advantages=jax.device_put(advantages),
         old_per_token_logps=old_per_token_logps,
+        filter_random_values=self._fixed_filter_random_values(
+            len(advantages)
+        ),
     )
+
+  def _fixed_filter_random_values(self, batch_size: int) -> jax.Array:
+    """Builds reproducible selection/tie randomness outside the jitted update."""
+    seed = int(os.environ.get("TUNIX_EXPERIMENT_SEED", "0"))
+    step = int(self.rl_cluster.global_steps)
+    group_size = int(self.algo_config.num_generations)
+    values = np.empty((batch_size, 2), dtype=np.float32)
+    for start in range(0, batch_size, group_size):
+      group_index = start // group_size
+      rng = np.random.default_rng(
+          np.random.SeedSequence([seed, step, group_index])
+      )
+      values[start : start + group_size] = rng.random(
+          (group_size, 2), dtype=np.float32
+      )
+    return jnp.asarray(values)
 
   def _compute_trajectory_ids(
       self, example: TrainingInputT, steps: int

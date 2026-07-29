@@ -42,6 +42,7 @@ import optax
 # Internal placeholder for vllm rollout worker stub, don't change this line.
 from tunix.perf import metrics as perf_metrics
 from tunix.perf import trace as perf_trace
+from tunix.rl import fixed_filter_trainer
 from tunix.rl import reshard
 from tunix.rl import robust_trainer
 from tunix.rl import self_inf_trainer
@@ -592,7 +593,36 @@ class RLCluster:
       )
     actor_trainer_kwargs = {}
     dbc_variant = os.environ.get("TUNIX_DBC_VARIANT", "").strip().lower()
-    if actor_config.use_dynamic_batch_curation and dbc_variant == "self_inf":
+    if actor_config.use_dynamic_batch_curation and dbc_variant == "fixed_filter":
+      method = os.environ.get("TUNIX_FIXED_FILTER_METHOD", "").strip().lower()
+      scope = os.environ.get("TUNIX_FIXED_FILTER_SCOPE", "").strip().lower()
+      try:
+        filter_ratio = float(os.environ["TUNIX_FIXED_FILTER_RATIO"])
+        num_generations = int(os.environ["TUNIX_GRPO_NUM_GENERATIONS"])
+      except (KeyError, ValueError) as exc:
+        raise ValueError(
+            "Fixed filtering requires valid TUNIX_FIXED_FILTER_RATIO and "
+            "TUNIX_GRPO_NUM_GENERATIONS."
+        ) from exc
+      actor_trainer_cls = fixed_filter_trainer.FixedFilterTrainer
+      actor_trainer_kwargs.update({
+          "method": method,
+          "scope": scope,
+          "filter_ratio": filter_ratio,
+          "num_generations": num_generations,
+          "decisions_path": os.environ.get(
+              "TUNIX_FIXED_FILTER_DECISIONS_PATH"
+          ),
+      })
+      logging.info(
+          "Dynamic batch curation enabled: using FixedFilterTrainer "
+          "(method=%s, scope=%s, ratio=%s, num_generations=%s).",
+          method,
+          scope,
+          filter_ratio,
+          num_generations,
+      )
+    elif actor_config.use_dynamic_batch_curation and dbc_variant == "self_inf":
       use_self_inf_loo = os.environ.get(
           "TUNIX_DBC_SELF_INF_LOO", ""
       ).strip().lower() in ("1", "true", "yes", "on")
