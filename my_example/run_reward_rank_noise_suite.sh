@@ -53,9 +53,9 @@ fi
 
 METHODS=(
   "l2"
-  "batch_policy"
+  # "batch_policy"
   "group_policy"
-  "batch_loo_policy"
+  # "batch_loo_policy"
   "group_loo_policy"
   "baseline"
 )
