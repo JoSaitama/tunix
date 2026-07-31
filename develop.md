@@ -10,6 +10,78 @@ This file tracks engineering changes made in this repository.
 
 ---
 
+## 2026-07-31 - Remove duplicate flat per-training logs
+
+### Scope
+
+- Removed the suite-created `logs/<stem>.log` duplicate for individual
+  training runs.
+- Each run now keeps console output only at `logs/<stem>/nohup.log`.
+- The single top-level suite/nohup log remains:
+  `logs/grpo_<dataset>_seed_<seeds>_<mode>_<timestamp>.log`.
+- Suite status rows now point to each structured run directory's `nohup.log`.
+- No training, filtering, or model-output logic changed.
+
+### Modified files
+
+- `my_example/run_reward_rank_noise_suite.sh`
+- `develop.md`
+
+### Expected layout
+
+- `runs/<stem>/`
+- `logs/<stem>/`
+- `logs/grpo_<dataset>_seed_<seeds>_<mode>_<timestamp>.log`
+
+---
+
+## 2026-07-31 - Clarify structured versus flat per-run logs
+
+### Scope
+
+- Clarified that `logs/<stem>/` is a structured run directory containing
+  TensorBoard, exported results, PID/exit status, and its own `nohup.log`,
+  whereas `logs/<stem>.log` is a suite-created flat copy of console output.
+- Identified the flat per-run `.log` as redundant because
+  `logs/<stem>/nohup.log` already records the same training stream.
+- No repository code, script, configuration, or experiment artifact was
+  changed（无代码改动）.
+
+---
+
+## 2026-07-31 - Restore full DTV method slugs in future output names
+
+### Scope
+
+- Updated future model directories, structured log directories, and suite
+  per-training logs to use full method slugs.
+- Naming rules:
+  - Baseline: `baseline`
+  - Random/Reward: unchanged (`random_group`, `reward_batch`, etc.)
+  - DTV family: `dtv_selfinf_<method>`
+  - L2 outlier: `dtv_outlier_l2`
+- Historical outputs remain untouched.
+
+### Modified files
+
+- `my_example/run_seeded_full.sh`
+- `my_example/run_reward_rank_noise_suite.sh`
+- `develop.md`
+
+### Validation
+
+- `bash -n` on both modified launch scripts: passed.
+- `git diff --check`: passed.
+- Static inspection confirmed that `RUN_NAME` and suite `METHOD_STEM` use the
+  same method-slug mapping.
+
+### Known risks / follow-up
+
+- Historical renaming should be run in dry-run mode and backed up before
+  applying.
+
+---
+
 ## 2026-07-31 - Unify future model and log directory naming
 
 ### Scope

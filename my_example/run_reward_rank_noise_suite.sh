@@ -246,13 +246,27 @@ for seed in "${SEEDS[@]}"; do
     FILTER_SUFFIX=""
     METHOD_FILTER_RATIO="n/a"
     case "${method}" in
+      baseline)
+        METHOD_OUTPUT_SLUG="baseline"
+        ;;
+      l2)
+        METHOD_OUTPUT_SLUG="dtv_outlier_l2"
+        ;;
+      random_batch|random_group|reward_batch|reward_group)
+        METHOD_OUTPUT_SLUG="${method}"
+        ;;
+      *)
+        METHOD_OUTPUT_SLUG="dtv_selfinf_${method}"
+        ;;
+    esac
+    case "${method}" in
       random_batch|random_group|reward_batch|reward_group)
         FILTER_SUFFIX="_filter${FILTER_SLUG}"
         METHOD_FILTER_RATIO="${FILTER_RATIO}"
         ;;
     esac
-    METHOD_STEM="grpo_${DATASET}_${method}${FILTER_SUFFIX}_seed${seed}_${DATA_MODE}_${RUN_TS}"
-    METHOD_LOG="${LOG_DIR}/${METHOD_STEM}.log"
+    METHOD_STEM="grpo_${DATASET}_${METHOD_OUTPUT_SLUG}${FILTER_SUFFIX}_seed${seed}_${DATA_MODE}_${RUN_TS}"
+    METHOD_LOG="${LOG_DIR}/${METHOD_STEM}/nohup.log"
     timestamp="$(date '+%Y-%m-%dT%H:%M:%S%z')"
 
     echo
@@ -270,9 +284,8 @@ for seed in "${SEEDS[@]}"; do
     TUNIX_DATASET_NAME="${DATASET}" \
     TUNIX_RUN_TIMESTAMP="${RUN_TS}" \
       "${ROOT_DIR}/my_example/run_seeded_full.sh" \
-        "${method}" "${seed}" "${EXTRA_ARGS[@]}" \
-        2>&1 | tee "${METHOD_LOG}"
-    status="${PIPESTATUS[0]}"
+        "${method}" "${seed}" "${EXTRA_ARGS[@]}"
+    status=$?
 
     timestamp="$(date '+%Y-%m-%dT%H:%M:%S%z')"
     if [ "${status}" -ne 0 ]; then
