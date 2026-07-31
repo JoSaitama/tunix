@@ -9,6 +9,170 @@ This file tracks engineering changes made in this repository.
 - If a task has no code changes, note that explicitly.
 
 ---
+## 2026-07-29 - Preserve one DTV definition across reward regimes
+
+### Scope
+
+- Clarified the paper-level method boundary for binary AIME rewards versus the
+  existing GRPO/PPO experiments.
+- No Python, shell, configuration, or experiment code was changed（无代码改动）.
+
+### Decision
+
+- Do not add AIME-specific zero-variance-group skipping or KL removal to the
+  main Policy-DTV/Policy-DTV-LOO methods.
+- Keep the established definition across all datasets: use KL-free policy
+  gradients for DTV attribution, keep score-zero samples, and apply the
+  resulting mask to the full Policy+KL update.
+- Treat frequent `[0, 0]`/`[1, 1]` groups as a property and limitation of the
+  sparse binary AIME reward regime, not as grounds to redefine DTV for one
+  experiment.
+- If zero-variance gating is ever tested, label it as a separate exploratory
+  ablation; do not merge it into the primary cross-dataset method comparison.
+
+### Validation
+
+- Conceptual consistency review only; no training or runtime validation.
+
+### Known risk / TODO
+
+- Report the zero-variance and mixed-reward group rates for AIME so readers can
+  interpret how often Policy-DTV has nonzero attribution signal without
+  changing the method.
+
+---
+## 2026-07-29 - Clarify binary rewards versus Policy-DTV gradients
+
+### Scope
+
+- Clarified that DTV operates in gradient space, while GRPO rewards affect the
+  gradients indirectly through group-relative advantages and the policy loss.
+- No Python, shell, configuration, or experiment code was changed（无代码改动）.
+
+### Finding
+
+- For an all-equal reward group such as `[0, 0]` or `[1, 1]`, current GRPO
+  normalization produces zero advantages for every completion.
+- Policy-DTV and Policy-DTV-LOO explicitly score with `beta=0`, so their
+  KL-free policy gradients are zero for that group. The issue is therefore
+  degenerate/no policy-attribution signal, not that DTV directly reads rewards.
+- The full update loss may still contain a KL gradient when configured
+  `beta != 0`, but that KL gradient is excluded from Policy-DTV scoring.
+- Mixed groups such as `[0, 1]` produce nonzero opposite-signed advantages and
+  usable policy-gradient geometry.
+
+### Validation
+
+- Read-only inspection of `tunix/rl/grpo/grpo_learner.py`,
+  `tunix/rl/self_inf_policy_trainer.py`,
+  `tunix/rl/self_inf_loo_policy_trainer.py`, and
+  `tunix/rl/self_inf_trainer.py`.
+- No runtime validation was performed.
+
+### Known risk / TODO
+
+- Before applying Policy-DTV methods to binary AIME rewards, measure the
+  fraction of prompt groups with zero reward variance; this is the relevant
+  signal-availability diagnostic.
+
+---
+## 2026-07-29 - Assess AIME method reuse, seeds, mismatch, and TPU runtime
+
+### Scope
+
+- Performed a read-only comparison of the DeepScaleR/Qwen + DeepScaleR train
+  + AIME 2024 evaluation path against the established GSM8K experiment path.
+- Assessed whether Policy-DTV, Policy-DTV-LOO, Random Filter, and Reward Filter
+  can reuse the shared Tunix trainer implementations.
+- Reviewed experiment seed behavior and likely v5p-8 versus v5p-16 runtime
+  bottlenecks.
+- No Python or shell code was changed（无代码改动）.
+
+### Files reviewed
+
+- `my_example_qwen_aime/{config.py,data.py,main.py,train.py,model.py,generate.py,run_grpo_qwen_aime.sh}`
+- `my_example/{config.py,data.py,seeding.py,main.py,train.py,sharding.py}`
+- `tunix/rl/{rl_cluster.py,fixed_filter_trainer.py}`
+- `tunix/utils/math_rewards.py`
+
+### Findings
+
+- Do not include reward-label mismatch in the AIME main experiment by default.
+  AIME uses sparse binary correctness rewards, so rank reversal mostly turns
+  correct/incorrect labels into artificial corruption rather than modeling
+  plausible mathematical ambiguity. If retained, treat it as a separately
+  labeled robustness appendix with corruption fraction and seed reported.
+- The six target families can reuse the shared trainer implementations:
+  Batch/Group Policy-DTV, Batch/Group Policy-DTV-LOO, Random Filter, and Reward
+  Filter. AIME still needs dataset-side launch/config wiring, correct
+  `num_generations`, scope, decision logging, and matched-seed handling before
+  those methods are operationally comparable.
+- Both legacy paths shuffle with seed 42. GSM8K additionally supports
+  `TUNIX_EXPERIMENT_SEED`, deriving dataset shuffle as `42 + seed` and setting
+  the training rollout PRNG. AIME currently keeps shuffle fixed at 42 and does
+  not expose the corresponding training-rollout experiment seed.
+- The dominant expected cost is autoregressive rollout: up to 1024 generated
+  tokens, long 2048-token prompts/KV cache, repeated generations, and vanilla
+  JAX sampling. Per-sample-gradient DTV methods add substantial backward-pass
+  cost, but do not explain a slow baseline.
+- v5p-16 supplies twice the chips/cores of v5p-8, but this 1.5B workload is too
+  small to assume linear strong scaling. The second host and added
+  communication, tensor-parallel sharding, small effective rollout batches,
+  and sequential decoding can materially reduce the gain.
+
+### Validation
+
+- Commands: targeted `rg` and `sed` reads only; no training, tests, compilation,
+  checkpoint restore, or profiler run.
+- Result: static conclusions above; actual v5p scaling still requires one short,
+  matched throughput measurement using identical examples and token settings.
+
+### Known risks / TODO
+
+- Binary Reward Filter has many tied zero-reward samples; specify deterministic
+  or seeded tie-breaking and log realized class/filter rates.
+- Before a full run, compare a short fixed-step v5p-8/v5p-16 smoke benchmark
+  using generated tokens/second and step time rather than end-to-end wall time.
+- Prioritize shorter generation limits, early EOS verification, fewer
+  completions/evaluation passes, and rollout batching before purchasing more
+  TPU cores.
+
+---
+
+## 2026-07-29 - Clarify fallback actor trainer routing
+
+### Scope
+
+- Explained that the `RobustTrainer if use_dynamic_batch_curation else
+  Trainer` expression is the fallback branch after fixed-filter and
+  self-influence variants have already been routed.
+- No repository code, script, configuration, or experiment artifact was
+  changed（无代码改动）.
+
+---
+
+## 2026-07-29 - Map GRPO and filtering implementation locations
+
+### Scope
+
+- Documented the call chain and source locations for baseline GRPO, group
+  advantage computation, DTV/LOO, Random/Reward, trainer routing, and launch
+  scripts.
+- No repository code, script, configuration, or experiment artifact was
+  changed（无代码改动）.
+
+---
+
+## 2026-07-29 - Confirm fixed-filter output directory naming
+
+### Scope
+
+- Confirmed that seeded and suite Random/Reward runs include the configured
+  ratio in both `runs/` and `logs/` directory names.
+- No repository code, script, configuration, or experiment artifact was
+  changed（无代码改动）.
+
+---
 
 ## 2026-07-29 - Add parameterized Random and Reward GRPO filters
 
