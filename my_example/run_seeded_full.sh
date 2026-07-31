@@ -113,12 +113,22 @@ if pgrep -af '[p]ython.*my_example' >/dev/null 2>&1; then
   exit 3
 fi
 
-RUN_TS="$(date +%Y%m%d_%H%M%S)"
+RUN_TS="${TUNIX_RUN_TIMESTAMP:-$(date +%Y%m%d_%H%M%S)}"
+DATASET_NAME="${TUNIX_DATASET_NAME:-gsm8k}"
+case "${DATASET_NAME}" in
+  ''|*[!A-Za-z0-9_-]*)
+    echo "error: TUNIX_DATASET_NAME may contain only letters, digits, '_' and '-'" >&2
+    exit 2
+    ;;
+esac
 NOISE_FRACTION="${TUNIX_REWARD_RANK_NOISE_FRACTION:-}"
-NOISE_SUFFIX=""
+DATA_MODE="clean"
 if [ -n "${NOISE_FRACTION}" ] && [ "${NOISE_FRACTION}" != "0" ]; then
-  NOISE_FRACTION_SLUG="${NOISE_FRACTION//./p}"
-  NOISE_SUFFIX="_reward_rank_noise${NOISE_FRACTION_SLUG}"
+  NOISE_FRACTION_CANONICAL="$(
+    awk -v value="${NOISE_FRACTION}" 'BEGIN { printf "%g", value }'
+  )"
+  NOISE_FRACTION_SLUG="${NOISE_FRACTION_CANONICAL//./p}"
+  DATA_MODE="mismatch${NOISE_FRACTION_SLUG}"
 fi
 FILTER_RATIO="${TUNIX_FILTER_RATIO:-}"
 FILTER_SUFFIX=""
@@ -129,10 +139,10 @@ case "${METHOD}" in
       exit 2
     fi
     FILTER_PERCENT="$(awk -v value="${FILTER_RATIO}" 'BEGIN { printf "%02d", value * 100 }')"
-    FILTER_SUFFIX="_ratio0p${FILTER_PERCENT}"
+    FILTER_SUFFIX="_filter0p${FILTER_PERCENT}"
     ;;
 esac
-RUN_NAME="gsm8k_${METHOD_SLUG}${FILTER_SUFFIX}_seed${SEED}${NOISE_SUFFIX}_full_${RUN_TS}"
+RUN_NAME="grpo_${DATASET_NAME}_${METHOD}${FILTER_SUFFIX}_seed${SEED}_${DATA_MODE}_${RUN_TS}"
 RUN_ROOT="${ROOT_DIR}/runs/${RUN_NAME}"
 LOG_ROOT="${ROOT_DIR}/logs/${RUN_NAME}"
 
@@ -157,11 +167,13 @@ exec > >(tee "${LOG_ROOT}/nohup.log") 2>&1
 printf '%s\n' "$$" > "${LOG_ROOT}/pid"
 
 echo "Method:          ${METHOD}"
+echo "Dataset:         ${DATASET_NAME}"
 echo "Seed:            ${SEED}"
 echo "Dataset seed:    $((42 + SEED))"
 echo "Rollout seed:    ${SEED}"
 echo "Min keep:        ${TUNIX_DBC_SELF_INF_MIN_KEEP_FRACTION:-method-default}"
-echo "Reward noise:    ${NOISE_FRACTION:-clean}"
+echo "Data mode:       ${DATA_MODE}"
+echo "Reward noise:    ${NOISE_FRACTION:-0}"
 echo "Filter ratio:    ${FILTER_RATIO:-n/a}"
 echo "Noise seed:      ${TUNIX_REWARD_RANK_NOISE_SEED:-n/a}"
 echo "Run:             ${RUN_ROOT}"

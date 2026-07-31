@@ -267,6 +267,8 @@ for seed in "${SEEDS[@]}"; do
     TUNIX_REWARD_RANK_NOISE_FRACTION="${FRACTION_CANONICAL}" \
     TUNIX_REWARD_RANK_NOISE_SEED="${seed}" \
     TUNIX_FILTER_RATIO="${FILTER_RATIO}" \
+    TUNIX_DATASET_NAME="${DATASET}" \
+    TUNIX_RUN_TIMESTAMP="${RUN_TS}" \
       "${ROOT_DIR}/my_example/run_seeded_full.sh" \
         "${method}" "${seed}" "${EXTRA_ARGS[@]}" \
         2>&1 | tee "${METHOD_LOG}"

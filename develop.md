@@ -10,6 +10,66 @@ This file tracks engineering changes made in this repository.
 
 ---
 
+## 2026-07-31 - Unify future model and log directory naming
+
+### Scope
+
+- Updated future seeded runs so model directories under `runs/` and structured
+  run directories under `logs/` use the same naming convention as the suite's
+  per-training top-level log.
+- Historical output directories are intentionally untouched.
+- The suite now passes its dataset label and per-run timestamp into
+  `run_seeded_full.sh`, giving all three artifacts the same stem:
+  - `runs/<stem>/`
+  - `logs/<stem>/`
+  - `logs/<stem>.log`
+
+### Naming
+
+- Clean:
+  `grpo_<dataset>_<method>[_filter0pXX]_seed<seed>_clean_<timestamp>`
+- Mismatch:
+  `grpo_<dataset>_<method>[_filter0pXX]_seed<seed>_mismatch0pX_<timestamp>`
+- Filter suffixes remain exclusive to Random/Reward methods.
+
+### Modified files
+
+- `my_example/run_seeded_full.sh`
+- `my_example/run_reward_rank_noise_suite.sh`
+- `develop.md`
+
+### Validation
+
+- `bash -n` on both modified scripts: passed.
+- `git diff --check`: passed.
+- Static inspection confirmed suite propagation of `TUNIX_DATASET_NAME` and
+  `TUNIX_RUN_TIMESTAMP`.
+
+### Known risks / follow-up
+
+- Existing historical directories retain their old names until explicitly
+  migrated after backup.
+- `--dataset` remains a naming label until a different dataset loader is wired
+  into the training pipeline.
+
+---
+
+## 2026-07-31 - Plan migration to unified run/log directory names
+
+### Scope
+
+- Confirmed that the new suite-level and per-run top-level `.log` names follow
+  the `grpo_<dataset>_...` convention, while `runs/` model directories and
+  structured `logs/<run>/` directories still use the legacy
+  `gsm8k_<method>_..._full_<timestamp>` convention from `run_seeded_full.sh`.
+- Defined a dry-run-first migration mapping for completed historical
+  directories, including clean/mismatch, implicit Seed 0, and Random/Reward
+  ratio suffixes.
+- No repository code, script, configuration, or experiment artifact was
+  changed（无代码改动）.
+
+---
+
 ## 2026-07-31 - Add multi-seed/multi-method GRPO suite launcher
 
 ### Scope
