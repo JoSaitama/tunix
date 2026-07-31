@@ -210,12 +210,13 @@ FILTER_SLUG="0p${FILTER_PERCENT}"
 
 LOG_DIR="${ROOT_DIR}/logs"
 SUITE_STEM="grpo_${DATASET}_seed_${SEED_SLUG}_${DATA_MODE}_${SUITE_TS}"
-SUITE_LOG="${LOG_DIR}/${SUITE_STEM}.log"
-SUITE_STATUS="${LOG_DIR}/${SUITE_STEM}.status.tsv"
-SUITE_PID="${LOG_DIR}/${SUITE_STEM}.pid"
-SUITE_EXIT_CODE="${LOG_DIR}/${SUITE_STEM}.exit_code"
+SUITE_DIR="${LOG_DIR}/${SUITE_STEM}"
+SUITE_LOG="${SUITE_DIR}/nohup.log"
+SUITE_STATUS="${SUITE_DIR}/status.tsv"
+SUITE_PID="${SUITE_DIR}/pid"
+SUITE_EXIT_CODE="${SUITE_DIR}/exit_code"
 
-mkdir -p "${LOG_DIR}"
+mkdir -p "${SUITE_DIR}"
 exec > >(tee "${SUITE_LOG}") 2>&1
 
 printf '%s\n' "$$" > "${SUITE_PID}"
@@ -230,6 +231,7 @@ if pgrep -af '[p]ython.*my_example' >/dev/null 2>&1; then
 fi
 
 TOTAL_RUNS=$(( ${#SEEDS[@]} * ${#METHODS[@]} ))
+echo "Suite directory: ${SUITE_DIR}"
 echo "Suite log:      ${SUITE_LOG}"
 echo "Status:         ${SUITE_STATUS}"
 echo "Dataset:        ${DATASET}"

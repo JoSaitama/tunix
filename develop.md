@@ -10,6 +10,51 @@ This file tracks engineering changes made in this repository.
 
 ---
 
+## 2026-07-31 - Store suite control files in a dedicated directory
+
+### Scope
+
+- Updated future suite runs to create:
+  `logs/grpo_<dataset>_seed_<seeds>_<mode>_<timestamp>/`.
+- Moved the suite's logical output paths inside that directory:
+  - `nohup.log`
+  - `status.tsv`
+  - `pid`
+  - `exit_code`
+- Per-training structured log directories and model directories are unchanged.
+- This local change does not affect the suite already running on the server.
+
+### Modified files
+
+- `my_example/run_reward_rank_noise_suite.sh`
+- `develop.md`
+
+---
+
+## 2026-07-31 - Plan suite-control log directory cleanup
+
+### Scope
+
+- Agreed to place suite-level `nohup.log`, `status.tsv`, `pid`, and
+  `exit_code` inside a dedicated
+  `logs/grpo_<dataset>_seed_<seeds>_<mode>_<timestamp>/` directory.
+- Deferred script modification until the currently running suite finishes to
+  avoid changing a shell script while it is executing.
+- No training code or active experiment output was changed（无代码改动）.
+
+---
+
+## 2026-07-31 - Clarify Bash syntax-check command
+
+### Scope
+
+- Clarified that `bash -n` parses shell scripts for syntax errors without
+  executing training commands.
+- No repository code, script, configuration, or experiment artifact was
+  changed（无代码改动）.
+
+---
+
 ## 2026-07-31 - Remove duplicate flat per-training logs
 
 ### Scope
