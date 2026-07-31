@@ -65,14 +65,15 @@ fi
 
 METHODS=(
   "baseline"
-  "random_batch"
   "random_group"
-  "reward_batch"
   "reward_group"
-  "batch_policy"
   "group_policy"
-  "batch_loo_policy"
   "group_loo_policy"
+  # "l2"
+  # "random_batch"
+  # "reward_batch"
+  # "batch_policy"
+  # "batch_loo_policy"
 )
 
 echo "Queue:          ${QUEUE_NAME}"
