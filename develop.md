@@ -9,6 +9,70 @@ This file tracks engineering changes made in this repository.
 - If a task has no code changes, note that explicitly.
 
 ---
+
+## 2026-07-31 - Add multi-seed/multi-method GRPO suite launcher
+
+### Scope
+
+- Extended `my_example/run_reward_rank_noise_suite.sh` with:
+  - `--seeds SEED [SEED ...]`
+  - `--methods METHOD [METHOD ...]`
+  - `--mismatch FRACTION`
+  - `--filter RATIO`
+  - `--dataset NAME`
+- Preserved the legacy positional `SEED [NOISE_FRACTION] [FILTER_RATIO]`
+  interface.
+- Added sequential seed-by-method execution and an explicit total-run summary.
+- Added one top-level suite/nohup log and one top-level log per training run.
+- Existing run directories and their internal `nohup.log` files remain
+  unchanged.
+
+### Naming
+
+- Suite log:
+  `logs/grpo_<dataset>_seed_<seeds>_<clean|mismatchX>_<timestamp>.log`
+- Per-run log:
+  `logs/grpo_<dataset>_<method>[_filter0pXX]_seed<seed>_<mode>_<timestamp>.log`
+- Filter suffixes and status filter ratios apply only to Random/Reward methods;
+  other methods record `n/a`.
+
+### Modified files
+
+- `my_example/run_reward_rank_noise_suite.sh`
+- `develop.md`
+
+### Validation
+
+- `bash -n my_example/run_reward_rank_noise_suite.sh`: passed.
+- `--help`: passed.
+- Invalid ratio `0.095`: rejected with exit code 2.
+- Unknown method: rejected with exit code 2 and valid-method list.
+- `git diff --check`: passed.
+
+### Known risks / follow-up
+
+- `--dataset` currently controls experiment naming only; the present training
+  pipeline still runs GSM8K until another dataset is wired into the GRPO data
+  configuration.
+- TPU execution remains sequential; runtime smoke testing is required on the
+  server environment.
+
+---
+
+## 2026-07-31 - Plan multi-seed/method suite CLI
+
+### Scope
+
+- Confirmed the current reward-rank-noise suite accepts one seed per invocation
+  and uses a shell-edited method list.
+- Proposed a backward-compatible CLI supporting explicit seed and method lists,
+  mismatch fraction, and Random/Reward filter ratio.
+- Confirmed `TUNIX_FILTER_RATIO` is consumed only by Random/Reward launch paths;
+  Baseline, DTV/LOO, and L2 behavior is unchanged.
+- No repository code, script, configuration, or experiment artifact was
+  changed（无代码改动）.
+
+---
 ## 2026-07-29 - Preserve one DTV definition across reward regimes
 
 ### Scope
