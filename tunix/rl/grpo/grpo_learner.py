@@ -153,6 +153,12 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
            ...       # ... }
       data_shuffle_seed: The seed used to shuffle the training data.
     """  # fmt: skip
+    variant = rl_cluster.cluster_config.training_config.dynamic_batch_curation_variant
+    if variant is not None:
+      raise ValueError(
+          "Self-influence dynamic batch curation is only supported for "
+          f"training_mode='agentic_grpo'. Received variant={variant!r}."
+      )
     super().__init__(
         rl_cluster=rl_cluster,
         algo_config=algo_config,
@@ -230,6 +236,7 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
             self._rollout_micro_batch_size * self.algo_config.num_generations
         ),
         trace_tags=perf_tags,
+        internal_request_tags=perf_tags,
     )
     padded_completion_ids = np.array([
         utils.pad_to_length(

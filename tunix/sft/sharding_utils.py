@@ -22,6 +22,29 @@ import jax.sharding as shd
 import numpy as np
 
 
+def _make_input_array(
+    input_value: jax.Array | np.ndarray,
+    sharding: shd.NamedSharding,
+) -> jax.Array:
+  local_input = input_value
+  if isinstance(input_value, jax.Array):
+    if input_value.is_fully_addressable:
+      local_input = np.asarray(input_value)
+    else:
+      local_input = np.zeros(input_value.shape, dtype=input_value.dtype)
+      for shard in input_value.addressable_shards:
+        local_input[shard.index] = np.asarray(shard.data)
+
+  if not sharding.addressable_devices_indices_map(local_input.shape):
+    return jax.make_array_from_callback(
+        local_input.shape,
+        sharding,
+        lambda index: local_input[index],
+    )
+
+  return jax.make_array_from_process_local_data(sharding, local_input)
+
+
 def shard_input(
     input_data: jax.Array, data_sharding_axis: Tuple[str, ...]
 ) -> jax.Array:
@@ -56,8 +79,8 @@ def shard_input(
 
   with jax.transfer_guard("allow"):
     return jax.tree.map(
-        lambda x: jax.make_array_from_process_local_data(
-            get_sharding(x, mesh=mesh, pspec=pspec), x
+        lambda x: _make_input_array(
+            x, get_sharding(x, mesh=mesh, pspec=pspec)
         ),
         input_data,
     )

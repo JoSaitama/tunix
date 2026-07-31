@@ -46,6 +46,7 @@ from tunix.perf import trace as perf_trace
 from tunix.perf.experimental import constants as perf_constants
 from tunix.perf.experimental import tracer as perf_tracer_v2
 from tunix.rl import reshard
+from tunix.rl import self_inf_trainer
 from tunix.rl import trainer as rl_trainer
 from tunix.rl import utils as rl_utils
 from tunix.rl.inference import inference_worker
@@ -59,6 +60,20 @@ from tunix.sft import utils as sft_utils
 ModelOrPath = nnx.Module | str
 MetricsT = perf_metrics.MetricsT
 MetricsBuffer = perf_metrics.MetricsBuffer
+
+
+def _mesh_owner_process_index(mesh: Mesh) -> int | None:
+  process_indices = {device.process_index for device in mesh.devices.flat}
+  if len(process_indices) != 1:
+    return None
+  return next(iter(process_indices))
+
+
+def _process_hosts_from_env() -> list[str] | None:
+  process_hosts = os.getenv("TUNIX_PROCESS_HOSTS")
+  if not process_hosts:
+    return None
+  return [host.strip() for host in process_hosts.split(",") if host.strip()]
 
 
 class Mode(enum.Enum):
@@ -106,6 +121,8 @@ class RLTrainingConfig(peft_trainer.TrainingConfig):
   train_micro_batch_size: int | None = None
   rollout_micro_batch_size: int | None = None
   compute_logps_micro_batch_size: int | None = None
+  dynamic_batch_curation_variant: str | None = None
+  self_influence_dot_threshold: float = 0.0
 
   def __post_init__(self):
     """Validates the configuration after initialization."""
@@ -138,6 +155,14 @@ class RLTrainingConfig(peft_trainer.TrainingConfig):
       )
       self.gradient_accumulation_steps = (
           self.mini_batch_size // self.train_micro_batch_size
+      )
+
+    valid_variants = {None, "self_inf_batch", "self_inf_group"}
+    if self.dynamic_batch_curation_variant not in valid_variants:
+      raise ValueError(
+          "dynamic_batch_curation_variant must be one of "
+          f"{sorted(v for v in valid_variants if v is not None)} or None. "
+          f"Received: {self.dynamic_batch_curation_variant!r}"
       )
 
 
@@ -414,19 +439,48 @@ class RLCluster:
         raise ValueError("Rollout vllm model version or path is missing!")
 
       # TODO(linchai): maybe support offloading for vllm rollout.
+      actor_owner_process_index = _mesh_owner_process_index(
+          self.r2m[Role.ACTOR]
+      )
+      rollout_owner_process_index = _mesh_owner_process_index(
+          self.r2m[Role.ROLLOUT]
+      )
+      process_hosts = _process_hosts_from_env()
       with self._get_mesh_and_logical_axis_rules_cm(Role.ROLLOUT):
         # vLLM handles model initialization and loading internally, so we need
         # to provide logical axis rules for vLLM to correctly shard the model on
         # the rollout mesh. This is important for out-of-tree models in vLLM
         # that are implemented with custom logical axis rules, like is the case
         # for MaxText models.
-        self._rollout = vllm_rollout.VllmRollout(
-            self.rollout_actor,
-            self.tokenizer,
-            cache_config_or_size=max_kv_cache_size,
-            mesh=self.r2m[Role.ROLLOUT],
-            rollout_config=loaded_vllm_config,
-        )
+        if (
+            jax.process_count() > 1
+            and actor_owner_process_index is not None
+            and rollout_owner_process_index is not None
+            and actor_owner_process_index != rollout_owner_process_index
+        ):
+          if process_hosts is None or len(process_hosts) != jax.process_count():
+            raise ValueError(
+                "Distributed vLLM rollout requires TUNIX_PROCESS_HOSTS to"
+                " list one host per JAX process."
+            )
+          self._rollout = vllm_rollout.DistributedVllmRollout(
+              self.rollout_actor,
+              self.tokenizer,
+              cache_config_or_size=max_kv_cache_size,
+              mesh=self.r2m[Role.ROLLOUT],
+              rollout_config=loaded_vllm_config,
+              actor_owner_process_index=actor_owner_process_index,
+              rollout_owner_process_index=rollout_owner_process_index,
+              process_hosts=process_hosts,
+          )
+        else:
+          self._rollout = vllm_rollout.VllmRollout(
+              self.rollout_actor,
+              self.tokenizer,
+              cache_config_or_size=max_kv_cache_size,
+              mesh=self.r2m[Role.ROLLOUT],
+              rollout_config=loaded_vllm_config,
+          )
     elif self.cluster_config.rollout_engine == "sglang_jax":
       from tunix.rl.rollout import sglang_jax_rollout
 
@@ -556,8 +610,28 @@ class RLCluster:
       actor_config.checkpoint_root_directory = os.path.join(
           actor_config.checkpoint_root_directory, "actor"
       )
+    actor_trainer_cls = rl_trainer.Trainer
+    actor_trainer_kwargs = {}
+    if actor_config.dynamic_batch_curation_variant == "self_inf_batch":
+      actor_trainer_cls = self_inf_trainer.SelfInfTrainer
+      actor_trainer_kwargs = {
+          "scope": "batch",
+          "dot_threshold": actor_config.self_influence_dot_threshold,
+      }
+    elif actor_config.dynamic_batch_curation_variant == "self_inf_group":
+      actor_trainer_cls = self_inf_trainer.SelfInfTrainer
+      actor_trainer_kwargs = {
+          "scope": "group",
+          "dot_threshold": actor_config.self_influence_dot_threshold,
+      }
+    if actor_trainer_cls is self_inf_trainer.SelfInfTrainer:
+      logging.info(
+          "Using SelfInfTrainer for actor updates (scope=%s, dot_threshold=%s).",
+          actor_trainer_kwargs["scope"],
+          actor_config.self_influence_dot_threshold,
+      )
     with self._get_mesh_and_logical_axis_rules_cm(Role.ACTOR):
-      self._actor_trainer = rl_trainer.Trainer(
+      self._actor_trainer = actor_trainer_cls(
           model=self.train_actor,
           optimizer=self.cluster_config.training_config.actor_optimizer,
           training_config=actor_config,
@@ -568,6 +642,7 @@ class RLCluster:
           metrics_logger=self._rl_metrics_logger,
           perf_tracer=self._perf,
           perf_tracer_v2=self._perf_v2,
+          **actor_trainer_kwargs,
       )
     del self.rollout_actor
     del self.train_actor
@@ -840,6 +915,7 @@ class RLCluster:
       mode: Mode = Mode.TRAIN,
       micro_batch_size: int | None = None,
       trace_tags: Mapping[str, Any] | None = None,
+      internal_request_tags: Mapping[str, Any] | None = None,
   ) -> base_rollout.RolloutOutput:
     """Generates text from the given prompts.
 
@@ -853,6 +929,8 @@ class RLCluster:
       micro_batch_size: The micro-batch size for generation. If None, no
         micro-batching is performed.
       trace_tags: Optional tags to add to the performance tracer.
+      internal_request_tags: Optional tags used for deterministic distributed
+        rollout request routing.
 
     Returns:
       A `RolloutOutput` object containing the generated text and other info.
@@ -898,12 +976,24 @@ class RLCluster:
           mesh.devices,
           tags=perf_tags,
       ) as span_v2:
-        outputs = [
-            self.rollout.generate(string_prompts[s], rollout_config)
-            for s in rl_utils.chunk_slices_by_size(
-                stop=len(string_prompts), step=micro_batch_size
-            )
-        ]
+        outputs = []
+        for s in rl_utils.chunk_slices_by_size(
+            stop=len(string_prompts), step=micro_batch_size
+        ):
+          rollout_kwargs = {}
+          if self.cluster_config.rollout_engine == "vllm":
+            request_tags = dict(internal_request_tags or trace_tags or {})
+            request_tags.update({
+                "chunk_start": s.start,
+                "chunk_stop": s.stop,
+                "mode": str(mode),
+            })
+            rollout_kwargs["internal_request_tags"] = request_tags
+          outputs.append(
+              self.rollout.generate(
+                  string_prompts[s], rollout_config, **rollout_kwargs
+              )
+          )
         span.device_end([o.tokens for o in outputs])
         span_v2.async_end([o.tokens for o in outputs])
       self._maybe_offload_model_to_cpu(model, Role.ROLLOUT)

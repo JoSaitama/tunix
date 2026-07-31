@@ -30,6 +30,8 @@ import optax
 from transformers import tokenization_utils_base
 from tunix.generate import mappings
 from tunix.rl import rl_cluster as rl_cluster_lib
+from tunix.rl import self_inf_trainer
+from tunix.rl import trainer as rl_trainer
 from tunix.rl import utils
 from tunix.rl.rollout import base_rollout
 from tunix.tests import test_common as tc
@@ -226,6 +228,51 @@ class RlClusterTest(parameterized.TestCase):
     self.assertIsInstance(rl_cluster.perf, expected_perf_type)
     self.assertIsInstance(rl_cluster.perf_v2, expected_perf_v2_type)
 
+  def _create_cluster(
+      self,
+      *,
+      dynamic_batch_curation_variant: str | None = None,
+      self_influence_dot_threshold: float = 0.0,
+  ) -> rl_cluster_lib.RLCluster:
+    mesh = Mesh(
+        np.array(jax.devices()).reshape(self.device_count, 1), ('fsdp', 'tp')
+    )
+    cluster_config = rl_cluster_lib.ClusterConfig(
+        role_to_mesh={
+            rl_cluster_lib.Role.ACTOR: mesh,
+            rl_cluster_lib.Role.REFERENCE: mesh,
+            rl_cluster_lib.Role.ROLLOUT: mesh,
+        },
+        rollout_engine='vanilla',
+        offload_to_cpu=False,
+        training_config=rl_cluster_lib.RLTrainingConfig(
+            actor_optimizer=optax.sgd(1e-3),
+            eval_every_n_steps=1,
+            max_steps=1,
+            dynamic_batch_curation_variant=dynamic_batch_curation_variant,
+            self_influence_dot_threshold=self_influence_dot_threshold,
+        ),
+        rollout_config=base_rollout.RolloutConfig(
+            max_tokens_to_generate=10,
+            max_prompt_length=256,
+            kv_cache_size=1024,
+            data_type=jnp.bfloat16,
+        ),
+    )
+    vocab = tc.MockVocab()
+    model = tc.ToyTransformer(
+        config=tc.ModelConfig(vocab_size=vocab.GetPieceSize()), rngs=nnx.Rngs(0)
+    )
+    ref_model = tc.ToyTransformer(
+        config=tc.ModelConfig(vocab_size=vocab.GetPieceSize()), rngs=nnx.Rngs(0)
+    )
+    return rl_cluster_lib.RLCluster(
+        actor=model,
+        reference=ref_model,
+        tokenizer=vocab,
+        cluster_config=cluster_config,
+    )
+
   def test_batch_size_config(self):
     cfg = rl_cluster_lib.RLTrainingConfig(
         actor_optimizer=optax.sgd(1e-3),
@@ -253,6 +300,53 @@ class RlClusterTest(parameterized.TestCase):
             train_micro_batch_size=train_micro_batch_size,
             eval_every_n_steps=1,
         )
+
+  def test_dynamic_batch_curation_variant_validation(self):
+    with self.assertRaisesRegex(
+        ValueError, "dynamic_batch_curation_variant must be one of"
+    ):
+      rl_cluster_lib.RLTrainingConfig(
+          actor_optimizer=optax.sgd(1e-3),
+          eval_every_n_steps=1,
+          dynamic_batch_curation_variant='unknown_variant',
+      )
+
+  def test_actor_trainer_defaults_to_standard_trainer(self):
+    rl_cluster = self._create_cluster()
+
+    self.assertIsInstance(rl_cluster.actor_trainer, rl_trainer.Trainer)
+    self.assertFalse(
+        isinstance(rl_cluster.actor_trainer, self_inf_trainer.SelfInfTrainer)
+    )
+
+  @parameterized.named_parameters(
+      dict(
+          testcase_name='batch',
+          dynamic_batch_curation_variant='self_inf_batch',
+          expected_scope='batch',
+      ),
+      dict(
+          testcase_name='group',
+          dynamic_batch_curation_variant='self_inf_group',
+          expected_scope='group',
+      ),
+  )
+  def test_actor_trainer_uses_self_inf_trainer(
+      self,
+      *,
+      dynamic_batch_curation_variant: str,
+      expected_scope: str,
+  ):
+    rl_cluster = self._create_cluster(
+        dynamic_batch_curation_variant=dynamic_batch_curation_variant,
+        self_influence_dot_threshold=0.25,
+    )
+
+    self.assertIsInstance(
+        rl_cluster.actor_trainer, self_inf_trainer.SelfInfTrainer
+    )
+    self.assertEqual(rl_cluster.actor_trainer.scope, expected_scope)
+    self.assertEqual(rl_cluster.actor_trainer.dot_threshold, 0.25)
 
   def test_generate_with_chat_template(self):  # pylint: disable=g-doc-args
     mesh = Mesh(

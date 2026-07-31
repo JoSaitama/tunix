@@ -407,6 +407,7 @@ class GrpoPipeline(config.HyperParameters):
   def create_rl_training_config(self):
     base_key = "rl_training_config"
     constructed_rl_training_config = self.obtain_training_config_dict(base_key)
+    constructed_rl_training_config.pop("gradient_accumulation_steps", None)
 
     base_config = self.config[base_key]
     if base_config.get("actor_optimizer_config"):
@@ -737,6 +738,19 @@ class GrpoPipeline(config.HyperParameters):
     )
 
     rl_cluster = self.create_rl_cluster(tokenizer)
+    if getattr(rl_cluster.rollout, "should_serve_only", lambda: False)():
+      logging.info(
+          "Process %d will run as the distributed rollout service.",
+          jax.process_index(),
+      )
+      try:
+        rl_cluster.rollout.serve_until_shutdown()
+      finally:
+        close_fn = getattr(rl_cluster.rollout, "close", None)
+        if callable(close_fn):
+          close_fn()
+      return
+
     algo_config = self._create_agentic_grpo_config()
 
     reward_fns = (
@@ -765,7 +779,12 @@ class GrpoPipeline(config.HyperParameters):
       learner_kwargs["env_kwargs"] = dict(self.config.get("env_kwargs") or {})
 
     logging.info("Starting agentic GRPO training...")
-    GRPOLearner(**learner_kwargs).train(dataset)
+    try:
+      GRPOLearner(**learner_kwargs).train(dataset)
+    finally:
+      close_fn = getattr(rl_cluster.rollout, "close", None)
+      if callable(close_fn):
+        close_fn()
 
   # ------------------------------------------------------------------
   # Dispatcher

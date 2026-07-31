@@ -414,6 +414,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         apply_chat_template=False if self.chat_parser else True,
         mode=rl_cluster_lib.Mode.TRAIN,
         trace_tags=tags,
+        internal_request_tags=tags,
     )
 
     return result

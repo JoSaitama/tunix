@@ -42,6 +42,7 @@ from tunix.generate import tokenizer_adapter
 from tunix.rl import common as rl_common
 from tunix.rl import function_registry
 from tunix.rl import rl_cluster as rl_cluster_lib
+from tunix.rl import self_inf_trainer
 from tunix.rl.agentic import agentic_grpo_learner
 from tunix.rl.agentic.agents.agent_types import Action, Step
 from tunix.rl.agentic.agents.base_agent import ConversationAgentBase
@@ -216,6 +217,111 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
     self._mock_generate = functools.partial(
         _mock_generate, tokenizer=self.tokenizer
     )
+
+  def _create_agentic_grpo_learner(
+      self,
+      *,
+      dynamic_batch_curation_variant: str | None = None,
+      self_influence_dot_threshold: float = 0.0,
+  ) -> agentic_grpo_learner.GRPOLearner:
+    model = test_common.ToyTransformer(
+        config=test_common.ModelConfig(vocab_size=self.vocab.GetPieceSize()),
+        rngs=nnx.Rngs(0),
+    )
+    ref_model = test_common.ToyTransformer(
+        config=test_common.ModelConfig(vocab_size=self.vocab.GetPieceSize()),
+        rngs=nnx.Rngs(0),
+    )
+    mesh = pxla.thread_resources.env.physical_mesh
+    training_config = rl_cluster_lib.RLTrainingConfig(
+        actor_optimizer=optax.sgd(1e-3),
+        eval_every_n_steps=10,
+        max_steps=1,
+        mini_batch_size=1,
+        train_micro_batch_size=1,
+        rollout_micro_batch_size=1,
+        compute_logps_micro_batch_size=1,
+        dynamic_batch_curation_variant=dynamic_batch_curation_variant,
+        self_influence_dot_threshold=self_influence_dot_threshold,
+    )
+    cluster_config = rl_cluster_lib.ClusterConfig(
+        role_to_mesh={
+            rl_cluster_lib.Role.ACTOR: mesh,
+            rl_cluster_lib.Role.REFERENCE: mesh,
+            rl_cluster_lib.Role.ROLLOUT: mesh,
+        },
+        rollout_engine="vanilla",
+        offload_to_cpu=False,
+        training_config=training_config,
+        rollout_config=base_rollout.RolloutConfig(
+            max_prompt_length=32,
+            max_tokens_to_generate=10,
+            return_logprobs=True,
+            kv_cache_size=256,
+            temperature=0.5,
+        ),
+    )
+    rl_cluster = rl_cluster_lib.RLCluster(
+        actor=model,
+        reference=ref_model,
+        tokenizer=self.tokenizer,
+        cluster_config=cluster_config,
+    )
+    grpo_config = agentic_grpo_learner.GRPOConfig(
+        num_generations=2,
+        num_iterations=1,
+        max_response_length=10,
+    )
+    return agentic_grpo_learner.GRPOLearner(
+        rl_cluster=rl_cluster,
+        reward_fns=reward_fn_1,
+        algo_config=grpo_config,
+        chat_parser=MockChatParser(),
+    )
+
+  def test_self_inf_group_binds_num_generations_and_metrics(self):
+    grpo_learner = self._create_agentic_grpo_learner(
+        dynamic_batch_curation_variant="self_inf_group",
+        self_influence_dot_threshold=0.25,
+    )
+
+    actor_trainer = grpo_learner.rl_cluster.actor_trainer
+    self.assertIsInstance(actor_trainer, self_inf_trainer.SelfInfTrainer)
+    self.assertEqual(actor_trainer.scope, "group")
+    self.assertEqual(
+        actor_trainer.num_generations, grpo_learner.algo_config.num_generations
+    )
+    self.assertEqual(actor_trainer.dot_threshold, 0.25)
+    for metric_name in (
+        "skipped_samples",
+        "self_inf_dot_mean",
+        "self_inf_dot_std",
+        "self_inf_kept_fraction",
+    ):
+      self.assertIn(metric_name, actor_trainer.rl_metrics_to_log)
+
+  def test_baseline_actor_metrics_omit_self_inf_metrics(self):
+    grpo_learner = self._create_agentic_grpo_learner()
+
+    actor_trainer = grpo_learner.rl_cluster.actor_trainer
+    self.assertFalse(
+        isinstance(actor_trainer, self_inf_trainer.SelfInfTrainer)
+    )
+    for metric_name in (
+        "kl",
+        "entropy",
+        "pg_loss",
+        "pg_clipfrac",
+        "ppo_kl",
+    ):
+      self.assertIn(metric_name, actor_trainer.rl_metrics_to_log)
+    for metric_name in (
+        "skipped_samples",
+        "self_inf_dot_mean",
+        "self_inf_dot_std",
+        "self_inf_kept_fraction",
+    ):
+      self.assertNotIn(metric_name, actor_trainer.rl_metrics_to_log)
 
   def test_iterator(self):
     class _MockTrainer(agentic_grpo_learner.GRPOLearner):

@@ -18,6 +18,7 @@ from collections.abc import Iterable
 import contextlib
 import dataclasses
 import functools
+import os
 import time
 from typing import Any, Callable, Concatenate, Dict, List, ParamSpec, Tuple
 
@@ -49,6 +50,7 @@ _ModelInputT = Dict[str, ArrayLike]
 P = ParamSpec("P")
 MetricsLogger = sft_metrics_logger.MetricsLogger
 MetricsLoggerOptions = sft_metrics_logger.MetricsLoggerOptions
+_SKIP_FINAL_CHECKPOINT_ENV = "TUNIX_SKIP_FINAL_CHECKPOINT"
 
 
 @dataclasses.dataclass(slots=True, kw_only=True)
@@ -127,7 +129,46 @@ class MetricsBuffer:
   @property
   def loss(self):
     """Returns the mean of the recorded losses for the step."""
-    return np.mean(np.array([np.array(x) for x in self.losses]))
+    return float(
+        np.nanmean(
+            np.asarray(
+                [_local_metric_value_to_scalar(x) for x in self.losses],
+                dtype=np.float32,
+            )
+        )
+    )
+
+
+def _local_metric_value_to_numpy(value: ArrayLike | list[ArrayLike]) -> np.ndarray:
+  if isinstance(value, list):
+    converted = [_local_metric_value_to_numpy(x) for x in value]
+    if not converted:
+      return np.asarray(np.nan, dtype=np.float32)
+    return np.concatenate([np.ravel(np.asarray(x)) for x in converted])
+
+  if isinstance(value, jax.Array):
+    if value.is_fully_addressable:
+      return np.asarray(value, dtype=np.float32)
+    local_shards = [
+        np.asarray(shard.data, dtype=np.float32)
+        for shard in value.addressable_shards
+        if shard.data is not None
+    ]
+    if local_shards:
+      return np.concatenate([np.ravel(shard) for shard in local_shards])
+    return np.asarray(np.nan, dtype=np.float32)
+
+  try:
+    return np.asarray(value, dtype=np.float32)
+  except Exception:  # pylint: disable=broad-exception-caught
+    return np.asarray(np.nan, dtype=np.float32)
+
+
+def _local_metric_value_to_scalar(value: ArrayLike) -> np.float32:
+  metric_value = np.asarray(_local_metric_value_to_numpy(value))
+  if metric_value.size == 0:
+    return np.float32(np.nan)
+  return np.float32(np.nanmean(metric_value))
 
 
 def _calculate_global_batch_size(train_example: Any) -> int:
@@ -455,17 +496,21 @@ class PeftTrainer:
       additional_metrics: dict[str, ArrayLike] | None = None,
   ):
     """Logs the metrics to the metrics logger and console."""
-    perplexity = np.exp(jax.device_get(loss))
-    self.metrics_logger.log(self.metrics_prefix, "loss", loss, self._mode, step)
+    loss_value = _local_metric_value_to_scalar(loss)
+    perplexity = np.exp(loss_value)
+    self.metrics_logger.log(
+        self.metrics_prefix, "loss", loss_value, self._mode, step
+    )
     self.metrics_logger.log(
         self.metrics_prefix, "perplexity", perplexity, self._mode, step
     )
     learning_rate = self._try_get_learning_rate()
     if learning_rate is not None:
+      learning_rate = _local_metric_value_to_scalar(learning_rate)
       self.metrics_logger.log(
           self.metrics_prefix,
           "learning_rate",
-          jax.device_get(learning_rate),
+          learning_rate,
           self._mode,
           step,
       )
@@ -474,7 +519,7 @@ class PeftTrainer:
       logging.info(
           "Train step %d training loss: %f  - training perplexity: %f",
           step,
-          loss,
+          loss_value,
           perplexity,
       )
     for k, v in (additional_metrics or {}).items():
@@ -526,18 +571,11 @@ class PeftTrainer:
     self._buffered_train_metrics = None
 
   def _write_metrics(self, metrics_buffer: MetricsBuffer):
-    def _to_np_array(v):
-      if isinstance(v, jax.Array):
-        return np.asarray(v, dtype=np.float32)
-      elif isinstance(v, list):
-        return [_to_np_array(x) for x in v]
-      return v
-
     self._log_metrics(
         loss=metrics_buffer.loss,
         step=metrics_buffer.step,
         additional_metrics={
-            k: op(_to_np_array(v))
+            k: op(_local_metric_value_to_numpy(v))
             for k, (
                 v,
                 op,
@@ -712,14 +750,8 @@ class PeftTrainer:
           self._train_steps += 1
           self._write_train_metrics()
 
-          # Checkpoint frequency is configured by checkpointing_options.
-          self.checkpoint_manager.save(
-              self._train_steps,
-              self.model,
-              self.optimizer,
-              save_only_lora_params=self._lora_enabled,
-              custom_metadata=self.custom_checkpoint_metadata(),
-          )
+          # Checkpoints are saved on close. This avoids writing early,
+          # low-value checkpoints during short or SSD-constrained runs.
 
           if (
               eval_ds
@@ -740,6 +772,12 @@ class PeftTrainer:
       self.close()
 
   def _save_last_checkpoint(self):
+    if os.getenv(_SKIP_FINAL_CHECKPOINT_ENV) == "1":
+      logging.info(
+          "Skipping final checkpoint save because %s=1.",
+          _SKIP_FINAL_CHECKPOINT_ENV,
+      )
+      return
     last_saved_step = self.checkpoint_manager.latest_step()
     if last_saved_step is None or last_saved_step < self._train_steps:
       self.checkpoint_manager.save(
@@ -772,7 +810,13 @@ class PeftTrainer:
     """
     self._write_train_metrics()
     self._save_last_checkpoint()
-    self.checkpoint_manager.close()
+    if os.getenv(_SKIP_FINAL_CHECKPOINT_ENV) == "1":
+      logging.info(
+          "Skipping checkpoint manager close because %s=1.",
+          _SKIP_FINAL_CHECKPOINT_ENV,
+      )
+    else:
+      self.checkpoint_manager.close()
     self.metrics_logger.close()
     if self._pbar is not None:
       self._pbar.close()

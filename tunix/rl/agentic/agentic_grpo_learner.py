@@ -30,6 +30,7 @@ The data flow is designed around an asynchronous producer-consumer pattern:
 from __future__ import annotations
 
 import dataclasses
+import os
 from typing import Any, Dict, List, Sequence, Type, TypeVar
 
 from absl import logging
@@ -41,6 +42,7 @@ from tunix.perf.experimental import constants as perf_constants
 from tunix.rl import common
 from tunix.rl import function_registry
 from tunix.rl import rl_cluster as rl_cluster_lib
+from tunix.rl import self_inf_trainer
 from tunix.rl import utils as rl_utils
 from tunix.rl.agentic import agentic_rl_learner
 from tunix.rl.agentic import utils as agentic_utils
@@ -57,6 +59,7 @@ RewardFn = agentic_rl_learner.RewardFn
 MetricFn = agentic_rl_learner.MetricFn
 
 TrainExample = agentic_rl_learner.TrainExample
+_DISABLE_TRAJECTORY_LOGGING_ENV = "TUNIX_DISABLE_TRAJECTORY_LOGGING"
 
 
 @dataclasses.dataclass(slots=True, kw_only=True)
@@ -209,7 +212,12 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
         metrics_logger_options.log_dir if metrics_logger_options else None
     )
 
-    if metrics_log_dir:
+    if os.getenv(_DISABLE_TRAJECTORY_LOGGING_ENV) == "1":
+      logging.info(
+          "Skipping trajectory logging because %s=1.",
+          _DISABLE_TRAJECTORY_LOGGING_ENV,
+      )
+    elif metrics_log_dir:
       self._trajectory_logger = trajectory_logger.AsyncTrajectoryLogger(
           metrics_log_dir
       )
@@ -238,13 +246,41 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
             "algo_config": self.algo_config,
         }
     )
-    self.rl_cluster.actor_trainer.with_rl_metrics_to_log({
+    rl_metrics_to_log = {
         "kl": np.mean,
         "entropy": np.mean,
         "pg_loss": np.mean,
         "pg_clipfrac": np.mean,
         "ppo_kl": np.mean,
-    })
+    }
+    if isinstance(self.rl_cluster.actor_trainer, self_inf_trainer.SelfInfTrainer):
+      variant = (
+          self.rl_cluster.cluster_config.training_config
+          .dynamic_batch_curation_variant
+      )
+      if variant == "self_inf_group":
+        if self.algo_config.num_generations <= 1:
+          raise ValueError(
+              "self_inf_group requires agentic_grpo_config.num_generations > 1."
+          )
+        self.rl_cluster.actor_trainer.with_num_generations(
+            self.algo_config.num_generations
+        )
+      logging.info(
+          "Enabled self-influence actor trainer (variant=%s, scope=%s, "
+          "num_generations=%s, dot_threshold=%s).",
+          variant,
+          self.rl_cluster.actor_trainer.scope,
+          self.rl_cluster.actor_trainer.num_generations,
+          self.rl_cluster.actor_trainer.dot_threshold,
+      )
+      rl_metrics_to_log.update({
+          "skipped_samples": np.mean,
+          "self_inf_dot_mean": np.mean,
+          "self_inf_dot_std": np.mean,
+          "self_inf_kept_fraction": np.mean,
+      })
+    self.rl_cluster.actor_trainer.with_rl_metrics_to_log(rl_metrics_to_log)
     self.rl_cluster.actor_trainer.with_tqdm_metrics_to_display([
         lambda: "kl"
         if self.algo_config.force_compute_kl

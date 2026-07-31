@@ -25,6 +25,7 @@ from typing import Any, Callable
 
 from absl import logging
 import jax
+from jax.experimental import multihost_utils
 import jaxtyping
 from flax import nnx
 from tunix.rl import utils
@@ -131,10 +132,26 @@ def _get_reshard_fn_jax_device_put(
     cache_resharding_plans: bool = False,  # pylint: disable=unused-argument
     use_experimental_pre_reshard: bool = False,  # pylint: disable=unused-argument
 ):
-  return functools.partial(
-      jax.device_put,
-      donate=donate,
-  )
+  def _materialize_leaf(x: Any) -> Any:
+    if isinstance(x, jax.Array) and not x.is_fully_addressable:
+      return multihost_utils.process_allgather(x, tiled=True)
+    return x
+
+  def _reshard_fn(
+      x: Any,
+      sharding: jax.sharding.Sharding | Any,
+  ):
+    return jax.tree_util.tree_map(
+        lambda leaf, dst: jax.device_put(
+            _materialize_leaf(leaf),
+            dst,
+            donate=donate,
+        ),
+        x,
+        sharding,
+    )
+
+  return _reshard_fn
 
 
 def _get_reshard_fn(

@@ -14,6 +14,7 @@
 
 """Checkpoint manager for PEFT."""
 
+import dataclasses
 import os
 import time
 from typing import Any, Tuple
@@ -21,6 +22,7 @@ from typing import Any, Tuple
 from absl import logging
 from flax import nnx
 import jax
+import numpy as np
 import orbax.checkpoint as ocp
 
 _DEFAULT_CHECKPOINTING_OPTIONS = ocp.CheckpointManagerOptions(
@@ -28,6 +30,7 @@ _DEFAULT_CHECKPOINTING_OPTIONS = ocp.CheckpointManagerOptions(
         minimum_interval_secs=180,
     ),
     max_to_keep=3,
+    enable_async_checkpointing=False,
 )
 
 
@@ -46,8 +49,24 @@ class CheckpointManager:
         the checkpoint manager will be disabled.
       options: The options for the checkpoint manager.
     """
+    self._is_primary_process = jax.process_index() == 0
+    self._root_directory = root_directory
     self._checkpoint_manager: ocp.CheckpointManager | None = None
-    if root_directory is not None:
+    checkpoint_manager_options = options or _DEFAULT_CHECKPOINTING_OPTIONS
+    if root_directory is not None and self._is_primary_process:
+      os.makedirs(root_directory, exist_ok=True)
+      if jax.process_count() > 1:
+        checkpoint_manager_options = dataclasses.replace(
+            checkpoint_manager_options,
+            create=False,
+            multiprocessing_options=ocp.options.MultiprocessingOptions(
+                primary_host=0,
+                active_processes={0},
+            ),
+        )
+    self._checkpoint_manager_options = checkpoint_manager_options
+    self._item_handlers: dict[str, Any] | None = None
+    if root_directory is not None and self._is_primary_process:
       # When using Pathways, the checkpoint manager only supports persistence
       # APIs now.
       if 'proxy' in os.getenv('JAX_PLATFORMS', ''):
@@ -68,17 +87,44 @@ class CheckpointManager:
             'optimizer_state': ocp.PyTreeCheckpointHandler(),
         }
       item_handlers['custom_metadata'] = ocp.JsonCheckpointHandler()
-      self._checkpoint_manager = ocp.CheckpointManager(
-          root_directory,
-          item_handlers=item_handlers,
-          options=options or _DEFAULT_CHECKPOINTING_OPTIONS,
-      )
+      self._item_handlers = item_handlers
+
+  def _has_checkpoint_entries(self) -> bool:
+    if not self._root_directory or not os.path.isdir(self._root_directory):
+      return False
+    with os.scandir(self._root_directory) as entries:
+      return next(entries, None) is not None
+
+  def _ensure_checkpoint_manager(self) -> ocp.CheckpointManager | None:
+    if self._checkpoint_manager is not None:
+      return self._checkpoint_manager
+    if not self._is_primary_process or self._root_directory is None:
+      return None
+    if self._item_handlers is None:
+      return None
+    self._checkpoint_manager = ocp.CheckpointManager(
+        self._root_directory,
+        item_handlers=self._item_handlers,
+        options=self._checkpoint_manager_options,
+    )
+    return self._checkpoint_manager
+
+  def _prepare_save_item(self, item: Any) -> Any:
+    return jax.tree.map(
+        lambda x: np.asarray(x)
+        if isinstance(x, jax.Array) and x.is_fully_addressable
+        else x,
+        item,
+    )
 
   def latest_step(self) -> int | None:
     """Returns the latest step."""
-    if self._checkpoint_manager is None:
+    if not self._has_checkpoint_entries():
       return None
-    return self._checkpoint_manager.latest_step()
+    manager = self._ensure_checkpoint_manager()
+    if manager is None:
+      return None
+    return manager.latest_step()
 
   def save(
       self,
@@ -104,14 +150,22 @@ class CheckpointManager:
     Returns:
       Whether the checkpoint was saved.
     """
-    if self._checkpoint_manager is None:
+    manager = self._ensure_checkpoint_manager()
+    if manager is None:
       return False
-    if not force and not self._checkpoint_manager.should_save(step):
+    if not force and not manager.should_save(step):
       return False
+    logging.info(
+        'Saving checkpoint for step %d to %s (force=%s).',
+        step,
+        self._root_directory,
+        force,
+    )
     if save_only_lora_params:
       params = nnx.state(model, nnx.LoRAParam)
     else:
       params = nnx.state(model)
+    params = self._prepare_save_item(params)
 
     model_cp_args = ocp.args.PyTreeSave(
         item=params, save_args=jax.tree.map(lambda _: ocp.SaveArgs(), params)
@@ -122,17 +176,25 @@ class CheckpointManager:
     }
     if optimizer is not None:
       optimizer_state = nnx.state(optimizer, nnx.optimizer.OptState)
+      optimizer_state = self._prepare_save_item(optimizer_state)
       optimizer_cp_args = ocp.args.PyTreeSave(
           item=optimizer_state,
           save_args=jax.tree.map(lambda _: ocp.SaveArgs(), optimizer_state),
       )
       cp_save_args['optimizer_state'] = optimizer_cp_args
-    return self._checkpoint_manager.save(
+    saved = manager.save(
         step,
         args=ocp.args.Composite(**cp_save_args),
         custom_metadata=custom_metadata or {},
         force=force,
     )
+    logging.info(
+        'Checkpoint save finished for step %d to %s: saved=%s.',
+        step,
+        self._root_directory,
+        saved,
+    )
+    return saved
 
   def maybe_restore(
       self,
@@ -159,15 +221,28 @@ class CheckpointManager:
       RuntimeError: If the checkpoint cannot be restored.
     """
     restore_start = time.time()
-    if self._checkpoint_manager is None:
+    if not self._has_checkpoint_entries():
+      logging.info(
+          'No checkpoint entries found under %s. Skipping restore.',
+          self._root_directory,
+      )
+      return 0, {}
+    manager = self._ensure_checkpoint_manager()
+    if manager is None:
       return 0, {}
     if step is None:
-      step = self._checkpoint_manager.latest_step()
+      step = manager.latest_step()
       # If no checkpoint is available, return 0.
       if step is None:
         return 0, {}
 
-    metadata = self._checkpoint_manager.metadata(step)
+    logging.info(
+        'Restoring checkpoint from step %d under %s.',
+        step,
+        self._root_directory,
+    )
+
+    metadata = manager.metadata(step)
 
     # Load the params from the checkpoint.
     if restore_only_lora_params:
@@ -206,7 +281,7 @@ class CheckpointManager:
               target=optimizer_state, sharding_tree=fixed_sharding
           ),
       )
-      ckpt = self._checkpoint_manager.restore(
+      ckpt = manager.restore(
           step,
           args=ocp.args.Composite(
               model_params=model_cp_args,
@@ -215,7 +290,7 @@ class CheckpointManager:
       )
       nnx.update(optimizer, ckpt.optimizer_state)
     else:
-      ckpt = self._checkpoint_manager.restore(
+      ckpt = manager.restore(
           step,
           args=ocp.args.Composite(
               model_params=model_cp_args,

@@ -511,19 +511,19 @@ class PeftTrainerTest(parameterized.TestCase):
           testcase_name='without_grad_accu',
           grad_accu=1,
           resume_step=0,
-          expected_save_steps=[1, 2, 3, 4],
+          expected_save_steps=[4],
       ),
       dict(
           testcase_name='grad_accu',
           grad_accu=2,
           resume_step=0,
-          expected_save_steps=[1, 2],
+          expected_save_steps=[2],
       ),
       dict(
           testcase_name='with_resume',
           grad_accu=1,
           resume_step=1,
-          expected_save_steps=[2, 3, 4],
+          expected_save_steps=[4],
       ),
       dict(
           testcase_name='with_resume_and_grad_accu',
@@ -575,16 +575,6 @@ class PeftTrainerTest(parameterized.TestCase):
             mock.call.maybe_restore(
                 mock.ANY, mock.ANY, restore_only_lora_params=True
             ),
-            *[
-                mock.call.save(
-                    i,
-                    mock.ANY,
-                    mock.ANY,
-                    save_only_lora_params=True,
-                    custom_metadata={},
-                )
-                for i in expected_save_steps
-            ],
             mock.call.latest_step(),
             mock.call.save(
                 expected_save_steps[-1],

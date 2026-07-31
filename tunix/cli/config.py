@@ -16,6 +16,7 @@ import ast
 import collections
 from collections.abc import Callable
 import copy
+import dataclasses
 import importlib
 import inspect
 import os
@@ -199,7 +200,6 @@ class HyperParameters:
         "training_config",
         "optimizer_config",
         "profiler_options",
-        "rl_training_config",
     }
 
     all_overrides = []
@@ -280,8 +280,9 @@ class HyperParameters:
   def _validate_tokenizer(self):
     """Validate the tokenizer configuration.
 
-    Currently only sentencepiece and huggingface are supported. `HF_TOKEN` must
-    be set if huggingface tokenizer is used.
+    Currently only sentencepiece and huggingface are supported. Public
+    Hugging Face tokenizers can be accessed anonymously; gated/private repos
+    still require `HF_TOKEN` at load time.
     """
     tokenizer_config = self.config["tokenizer_config"]
     tokenizer_type = tokenizer_config["tokenizer_type"]
@@ -293,8 +294,6 @@ class HyperParameters:
           f" {valid_tokenizer_type} is supported"
       )
     if tokenizer_type == "huggingface":
-      if "HF_TOKEN" not in os.environ:
-        raise ValueError("Missing `HF_TOKEN` to access hf tokenizer")
       if not tokenizer_path:
         raise ValueError("tokenizer_path must be specified.")
 
@@ -699,9 +698,15 @@ class HyperParameters:
     for key, value in training_config.items():
       if key == "checkpointing_options" and value:
         try:
-          constructed_training_config[key] = ocp.CheckpointManagerOptions(
+          checkpoint_options = ocp.CheckpointManagerOptions(
               **value
           )
+          if checkpoint_options.enable_async_checkpointing:
+            checkpoint_options = dataclasses.replace(
+                checkpoint_options,
+                enable_async_checkpointing=False,
+            )
+          constructed_training_config[key] = checkpoint_options
         except ValueError as e:
           raise ValueError(f"Invalid checkpointing options: {value}") from e
       elif key == "metrics_logging_options" and value:

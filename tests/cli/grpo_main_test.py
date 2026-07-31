@@ -560,6 +560,29 @@ vllm_config:
     self.assertEqual(p.config["agentic_grpo_config"]["system_prompt"], "")
 
 
+class RLTrainingConfigTest(absltest.TestCase):
+
+  def test_self_influence_cli_overrides_propagate_to_training_config(self):
+    pipeline = _make_pipeline_with_cli_args(
+        "",
+        [
+            "rl_training_config.dynamic_batch_curation_variant=self_inf_group",
+            "rl_training_config.self_influence_dot_threshold=0.25",
+        ],
+    )
+
+    with mock.patch.object(
+        pipeline, "create_optimizer", return_value=mock.sentinel.optimizer
+    ):
+      training_config = pipeline.create_rl_training_config()
+
+    self.assertEqual(
+        training_config.dynamic_batch_curation_variant, "self_inf_group"
+    )
+    self.assertEqual(training_config.self_influence_dot_threshold, 0.25)
+    self.assertEqual(training_config.gradient_accumulation_steps, 1)
+
+
 class SplitMeshConfigTest(absltest.TestCase):
 
   def test_split_mesh_uses_explicit_role_meshes(self):

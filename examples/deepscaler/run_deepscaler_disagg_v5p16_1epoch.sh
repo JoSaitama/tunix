@@ -23,6 +23,50 @@
 
 set -euo pipefail
 
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+repo_root="$(cd -- "${script_dir}/../.." && pwd)"
+cd "${repo_root}"
+
+python_bin="${PYTHON_BIN:-}"
+if [[ -z "${python_bin}" && -x "${repo_root}/.venv/bin/python" ]]; then
+  python_bin="${repo_root}/.venv/bin/python"
+fi
+python_bin="${python_bin:-python}"
+
+default_train_data_path="gs://tunix/data/DeepScaleR-Preview-Dataset/deepscaler.json"
+default_eval_data_path="gs://tunix/data/HuggingFaceH4/aime_2024/train-00000-of-00001.parquet"
+if [[ -f "/home/eve/tunix-hf-data/deepscaler_train.json" ]]; then
+  default_train_data_path="/home/eve/tunix-hf-data/deepscaler_train.json"
+fi
+if [[ -f "/home/eve/tunix-hf-data/aime_eval.parquet" ]]; then
+  default_eval_data_path="/home/eve/tunix-hf-data/aime_eval.parquet"
+fi
+
+train_data_path="${train_data_path:-${default_train_data_path}}"
+eval_data_path="${eval_data_path:-${default_eval_data_path}}"
+
+if [[ "${TUNIX_INIT_JAX_DISTRIBUTED:-0}" == "1" && -z "${TUNIX_PROCESS_HOSTS:-}" ]]; then
+  fqdn="$(hostname -f 2>/dev/null || true)"
+  if [[ "${fqdn}" =~ ^(.*-w-)([0-9]+)(\..*)$ ]]; then
+    host_prefix="${BASH_REMATCH[1]}"
+    host_suffix="${BASH_REMATCH[3]}"
+    process_hosts=()
+    for i in $(seq 0 15); do
+      candidate="${host_prefix}${i}${host_suffix}"
+      if getent hosts "${candidate}" >/dev/null 2>&1; then
+        process_hosts+=("${candidate}")
+      elif [[ ${#process_hosts[@]} -gt 0 ]]; then
+        break
+      fi
+    done
+    if [[ ${#process_hosts[@]} -gt 0 ]]; then
+      export TUNIX_PROCESS_HOSTS
+      TUNIX_PROCESS_HOSTS="$(IFS=,; echo "${process_hosts[*]}")"
+      echo "Auto-detected TUNIX_PROCESS_HOSTS=${TUNIX_PROCESS_HOSTS}" >&2
+    fi
+  fi
+fi
+
 export SKIP_JAX_PRECOMPILE=true
 
 grpo_module="tunix.cli.grpo_main"
@@ -31,7 +75,7 @@ if [[ "${TUNIX_INIT_JAX_DISTRIBUTED:-0}" == "1" ]]; then
 fi
 
 num_batches="${num_batches:-312}"
-num_train_epochs="${num_train_epochs:-3}"
+num_train_epochs="${num_train_epochs:-1}"
 train_fraction="${train_fraction:-1.0}"
 warmup_ratio="${warmup_ratio:-0.1}"
 
@@ -47,7 +91,7 @@ warmup_steps=$(awk "BEGIN {
   printf \"%.0f\", value;
 }")
 
-python -m "${grpo_module}" \
+"${python_bin}" -m "${grpo_module}" \
   tunix/cli/base_agentic_config.yaml \
   \
   `# ── Model ────────────────────────────────────────────────────────────` \
@@ -66,8 +110,8 @@ python -m "${grpo_module}" \
   \
   `# ── Data ─────────────────────────────────────────────────────────────` \
   data_module="tunix.cli.recipes.deepscaler_data" \
-  data_config.train_data_path="gs://tunix/data/DeepScaleR-Preview-Dataset/deepscaler.json" \
-  data_config.eval_data_path="gs://tunix/data/HuggingFaceH4/aime_2024/train-00000-of-00001.parquet" \
+  data_config.train_data_path="${train_data_path}" \
+  data_config.eval_data_path="${eval_data_path}" \
   data_config.shuffle=true \
   data_config.seed=42 \
   prompt_key="prompts" \
