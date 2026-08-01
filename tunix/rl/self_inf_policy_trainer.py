@@ -128,6 +128,10 @@ class PolicySelfInfTrainer(self_inf_trainer.SelfInfTrainer):
 
     def staged_train_step(raw_inputs):
       inputs = self.gen_model_input_fn(raw_inputs)
+      # Agentic GRPO loss closures already capture their full and policy-only
+      # configs. Do not send the non-array config object through a sample JIT.
+      inputs = dict(inputs)
+      inputs.pop("algo_config", None)
       stats = memory_bounded_curation.staged_dtv_statistics(
           score_step,
           inputs,

@@ -232,7 +232,7 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
     policy_loss_fn = function_registry.get_policy_loss_fn(
         self.algo_config.policy_loss_fn
     )
-    loss_fn = lambda model, train_example, algo_config: policy_loss_fn(
+    loss_fn = lambda model, train_example, algo_config=None: policy_loss_fn(
         model,
         train_example,
         algo_config=self.algo_config,
@@ -246,7 +246,7 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
     )
     if hasattr(self.rl_cluster.actor_trainer, "with_policy_score_loss_fn"):
       policy_only_config = dataclasses.replace(self.algo_config, beta=0.0)
-      score_loss_fn = lambda model, train_example, algo_config: policy_loss_fn(
+      score_loss_fn = lambda model, train_example, algo_config=None: policy_loss_fn(
           model,
           train_example,
           algo_config=policy_only_config,

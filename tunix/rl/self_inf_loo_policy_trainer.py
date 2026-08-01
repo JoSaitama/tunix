@@ -193,6 +193,8 @@ class PolicySelfInfLooTrainer(self_inf_loo_trainer.SelfInfLooTrainer):
 
     def staged_train_step(raw_inputs):
       inputs = self.gen_model_input_fn(raw_inputs)
+      inputs = dict(inputs)
+      inputs.pop("algo_config", None)
       stats = memory_bounded_curation.staged_dtv_statistics(
           score_step,
           inputs,

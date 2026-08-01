@@ -439,3 +439,14 @@ production training loop correctly calls the bound staged function with only
 CPU tests are a fast gate for Python, NNX/JIT API, filtering, and small-model
 numerical behavior; they do not validate TPU SPMD sharding, 8192-token compile
 memory, or dual-host distributed execution, which remain TPU smoke-test gates.
+
+The next TPU smoke exposed a production-only staged-input mismatch. Agentic
+`gen_model_input_fn` includes a `GRPOConfig` object under `algo_config`; the
+single-sample JIT attempted to abstract it as an array and failed before
+compilation. Both full and policy-only loss lambdas already capture the intended
+configs and ignore the passed object. Their compatibility parameter is now
+optional, and staged policy trainers remove `algo_config` before invoking the
+single-sample JIT. The CPU regression input now includes a non-array config
+sentinel so this production shape is covered. The vLLM restart messages after
+the exception were distributed shutdown recovery and did not indicate resumed
+training.

@@ -24,12 +24,14 @@ class _ScalarModel(nnx.Module):
     return self.weight[...] * feature
 
 
-def _update_loss(model, feature):
+def _update_loss(model, feature, algo_config=None):
+  del algo_config
   loss = jnp.sum(model(feature))
   return loss, {"base_loss": loss}
 
 
-def _score_loss(model, feature):
+def _score_loss(model, feature, algo_config=None):
+  del algo_config
   return jnp.sum(model(feature))
 
 
@@ -83,7 +85,9 @@ class MemoryBoundedCurationTest(absltest.TestCase):
     )
     trainer.with_loss_fn(_update_loss, has_aux=True)
     trainer.with_policy_score_loss_fn(_score_loss)
-    trainer.with_gen_model_input_fn(lambda x: {"feature": x})
+    trainer.with_gen_model_input_fn(
+        lambda x: {"feature": x, "algo_config": object()}
+    )
     train_step, _ = trainer.jit_train_and_eval_step(cache_nnx_graph=True)
 
     loss, aux, grad_norm = train_step(jnp.asarray([4.0, -1.0]))
