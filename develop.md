@@ -9,6 +9,458 @@ This file tracks engineering changes made in this repository.
 - If a task has no code changes, note that explicitly.
 
 ---
+## 2026-07-31 - Attach server AIME branches to Mac-published remote refs
+
+### Scope
+
+- Defined the server-side remote/upstream setup after the Mac successfully
+  published both AIME branches.
+- No Python or shell code was changed（无代码改动）.
+
+### Plan
+
+- Use public HTTPS for server fetch/pull and retain the JoSaitama SSH alias for
+  push.
+- Fetch remote refs, verify local and remote commit equality, attach both local
+  branches to their matching upstreams, and continue only on
+  `for_GRPO_vLLM`.
+
+---
+## 2026-07-31 - Confirm Mac AIME bundle import is ready to publish
+
+### Scope
+
+- Confirmed both imported local AIME branches point to archive commit
+  `3a2396b4`, the Mac remote targets `JoSaitama/tunix`, and SSH authenticates as
+  `JoSaitama`.
+- No Python or shell code was changed（无代码改动）.
+
+### Next action
+
+- Push `for_GRPO_vLLM_0731` first, then `for_GRPO_vLLM`; verify both remote
+  refs and continue development only on `for_GRPO_vLLM`.
+
+---
+## 2026-07-31 - Switch AIME branch publication to Git bundle via Mac
+
+### Scope
+
+- Confirmed the server-to-GitHub SSH upload also times out over port 443.
+- No Python or shell code was changed（无代码改动）.
+
+### Decision
+
+- Stop retrying server-side pushes.
+- Create one Git bundle containing `for_GRPO_vLLM_0731` and
+  `for_GRPO_vLLM`, verify and checksum it, transfer it to the Mac, fetch both
+  refs into the existing AIME clone, and push them from the Mac.
+- After publication, the server repository can fetch the same remote refs and
+  attach its existing local branches as upstreams because both sides point to
+  archive commit `3a2396b`.
+
+---
+## 2026-07-31 - Escalate interrupted AIME branch push strategy
+
+### Scope
+
+- Confirmed from the supplied GitHub branch screenshot and `git ls-remote`
+  output that neither AIME branch exists remotely.
+- No Python or shell code was changed（无代码改动）.
+
+### Finding
+
+- The local branches and archive commit are intact; SSH disconnects after
+  compression before the remote refs are created.
+- Retry once using low Git pack concurrency and GitHub SSH over port 443 with
+  keepalives.
+- If that still fails, create a Git bundle containing both AIME branches,
+  transfer it to the Mac, fetch the bundle into the existing AIME clone, and
+  push from the Mac network.
+- Existing remote `for_GRPO` remains the GSM8K branch and must not be
+  overwritten.
+
+---
+## 2026-07-31 - Diagnose missing remote AIME development branch
+
+### Scope
+
+- Diagnosed the Mac `invalid reference: for_GRPO_vLLM` error and the preceding
+  server-side interrupted SSH push.
+- No Python or shell code was changed（无代码改动）.
+
+### Finding
+
+- The Mac clone succeeded, but the development branch was not available from
+  GitHub because the server push disconnected before the remote ref was
+  updated.
+- Verify remote refs with `git ls-remote`, push the immutable baseline branch
+  first, then push the development branch. Afterward fetch and create the
+  tracking branch in the AIME clone.
+- Keep the existing sibling project layout (`DTV_GRPO/tunix` for GSM8K and
+  `DTV_GRPO_AIME/tunix` for AIME); renaming an active Codex/IDE workspace is
+  unnecessary and can invalidate saved paths.
+
+---
+## 2026-07-31 - Create AIME Agentic development handoff
+
+### Scope
+
+- Added `AIME_GRPO_VLLM_HANDOFF.md` to transfer the finalized repository,
+  method, execution, naming, storage, and validation decisions into a new Codex
+  project rooted at the Agentic AIME clone.
+- No Python or shell code was changed（无代码改动）.
+
+### Validation
+
+- Documentation-only handoff; no training or tests were run.
+
+---
+## 2026-07-31 - Diagnose GitHub HTTPS authentication and recommend SSH
+
+### Scope
+
+- Diagnosed the personal branch push failure against
+  `https://github.com/JoSaitama/tunix.git`.
+- No Python or shell code was changed（无代码改动）.
+
+### Finding
+
+- GitHub no longer accepts account passwords for HTTPS Git operations.
+- Configure a dedicated ED25519 SSH authentication key for the user's Linux
+  account, add only its public key to the JoSaitama GitHub account, use a
+  host alias in `~/.ssh/config`, switch `origin` to the SSH URL, test the
+  identity, and retry the existing push.
+- The failed push did not alter the local commit or branch.
+
+---
+## 2026-07-31 - Diagnose AIME snapshot commit failure
+
+### Scope
+
+- Reviewed the supplied terminal transcript for the personal
+  `for_GRPO_vLLM_0731` snapshot workflow.
+- No Python or shell code was changed（无代码改动）.
+
+### Finding
+
+- The source copy and staging succeeded: 29 files are staged with 2973
+  insertions and 88 deletions.
+- Missing `rg` affected only an optional path-safety check and did not alter the
+  index.
+- The commit failed solely because the personal repository has no configured
+  Git author name/email. Configure repository-local identity, rerun the safety
+  check with `grep -E`, then commit; no restaging is necessary.
+
+---
+## 2026-07-31 - Plan personal AIME Agentic baseline branch and shared data access
+
+### Scope
+
+- Defined a non-destructive copy workflow from the LHF-owned Ziao AIME
+  worktree into the user's existing personal Tunix repository.
+- No Python or shell code was changed（无代码改动）.
+
+### Branch plan
+
+- Create `for_GRPO_vLLM_0731` in the user's existing repository as an immutable
+  snapshot branch based on Google Tunix commit
+  `0fac961beb0db9e60e87707d50e26a9c0d52a046` plus Ziao's tracked and untracked
+  source changes.
+- Keep existing GSM8K branches separate; do not merge their histories into the
+  snapshot branch.
+- Create a later development branch from `for_GRPO_vLLM_0731` for Agentic AIME
+  Policy-DTV/LOO and fixed-filter integration.
+
+### Data/model access
+
+- Reuse LHF-owned model and dataset files read-only only when every parent
+  directory grants traverse access and the files grant read access to the
+  user's account.
+- The same absolute paths and permissions must exist on every TPU worker.
+- Use a separate user-owned virtual environment and user-owned run,
+  checkpoint, TensorBoard, cache, and temporary directories; do not write into
+  LHF experiment roots.
+- Prefer group or ACL-based read-only sharing over world-writable permissions
+  or duplicating large model/data files.
+
+### Risks
+
+- Copying only a Git commit would omit Ziao's working-tree changes. Copy the
+  reviewed source tree or preserve both the tracked patch and explicit
+  untracked source files.
+- Exclude `.git`, `.venv`, credentials, models, data, checkpoints, caches, and
+  logs from the source copy and Git commit.
+
+---
+## 2026-07-31 - Recommend preserving Ziao AIME worktree as a separate lineage
+
+### Scope
+
+- Assessed how to preserve and transfer the detached Ziao/LHF AIME working tree
+  based on public `google/tunix` commit
+  `0fac961beb0db9e60e87707d50e26a9c0d52a046`.
+- No Python or shell code was changed（无代码改动）.
+
+### Recommendation
+
+- Do not push the experimental snapshot to the Google `origin` and do not force
+  merge it into the existing GSM8K repository.
+- After obtaining permission from the owner of the LHF account/worktree,
+  create a local archival branch from the detached HEAD, explicitly stage the
+  relevant tracked and untracked source files while excluding `.venv`, secrets,
+  data, logs, and checkpoints, and commit the exact experiment snapshot.
+- Prefer transferring the committed branch with `git bundle` to the user's own
+  account, then push it to a private fork or personal repository under a
+  separate AIME lineage.
+- Port selected Policy-DTV/LOO/fixed-filter commits or semantics into that AIME
+  lineage; do not merge two heavily diverged experiment stacks wholesale.
+
+### Risks
+
+- The commit hash alone does not include the experiment modifications.
+- Staging all untracked files can accidentally include `.venv`, credentials,
+  model artifacts, data, or logs; stage explicit paths and review the staged
+  diff and file sizes before committing or publishing.
+- Old AIME results remain tied to the archived Agentic/distributed-vLLM
+  snapshot and should retain that provenance in run metadata.
+
+---
+## 2026-07-31 - Compare Ziao Agentic AIME snapshot with local training path
+
+### Scope
+
+- Compared the supplied remote snapshots of `agentic_grpo_learner.py`,
+  `grpo_learner.py`, `rl_cluster.py`, `self_inf_trainer.py`, and
+  `run_deepscaler_disagg_v5p16_1epoch.sh` against the current local repository.
+- No Python or shell code was changed（无代码改动）.
+
+### Findings
+
+- Ziao's experiment is an Agentic GRPO, distributed-vLLM, dual-worker training
+  regime, not the same execution path as local `my_example_qwen_aime`.
+- The remote base launcher uses batch size 128, eight generations per prompt,
+  response/generation length 8192, prompt length 2048 before wrapper overrides,
+  token-mean aggregation, beta 0 by default, and a 4x1 actor plus 4x1 rollout
+  disaggregated mesh. The officialish self-inf wrapper overrides prompt length
+  to 1024, beta to 0.001, and aggregation to
+  sequence-mean-token-mean.
+- The remote self-influence trainer scores and updates with the same full loss;
+  it has no separate policy-score loss and no LOO implementation.
+- The remote Agentic learner defaults `degenerate_group_masking=True`, skipping
+  complete all-zero-advantage groups before the actor trainer. This materially
+  differs from local ordinary GRPO behavior and must be held constant across
+  baseline and all AIME methods if old results are reused.
+- The remote `rl_cluster.py` and unprovided `vllm_rollout.py` contain substantial
+  multi-host/disaggregated-vLLM work. Local `my_example_qwen_aime` cannot
+  reproduce that regime through a small method-only change.
+- Recommended direction: preserve Ziao's exact working-tree snapshot as the
+  AIME execution base, then port the already established Policy-DTV,
+  Policy-DTV-LOO, Random, and Reward trainer semantics into the Agentic wiring.
+  Do not port the entire AIME experiment onto the lightweight local example
+  path if comparability with old results is required.
+
+### Version-control risk
+
+- The remote run was made from detached commit
+  `0fac961beb0db9e60e87707d50e26a9c0d52a046` plus 1196 inserted/88 deleted
+  tracked changes and multiple untracked production files.
+- The commit hash alone cannot reproduce the experiment. The remote origin,
+  full tracked diff, untracked files, dependency lock/environment, and effective
+  run config must be archived before further runs or cleanup.
+
+### Decision required
+
+- Reuse old AIME baseline only if the final suite keeps Agentic GRPO,
+  degenerate-group masking, vLLM/disaggregated mesh, generations, length,
+  batching, beta, and loss aggregation identical.
+- If the paper requires ordinary-GRPO semantics without degenerate-group
+  skipping, disable it for every method and rerun the baseline; old baseline
+  results then become historical rather than matched controls.
+
+---
+## 2026-07-31 - Compare Ziao Agentic AIME snapshot with local implementations
+
+### Scope
+
+- Read-only comparison of the supplied remote snapshot files:
+  `agentic_grpo_learner.py`, `grpo_learner.py`, `rl_cluster.py`,
+  `self_inf_trainer.py`, and `run_deepscaler_disagg_v5p16_1epoch.sh`.
+- Compared them with local `tunix/rl` and `my_example_qwen_aime` paths.
+- No Python or shell code was changed（无代码改动）.
+
+### Major semantic differences
+
+- Ziao's run uses distributed Agentic GRPO with vLLM, asynchronous grouped
+  trajectories, batch size 128, 8 completions per prompt, prompt length 1024
+  after the officialish wrapper override, response length 8192, and disjoint
+  actor and rollout meshes across the v5p-16 workers.
+- The remote Agentic learner returns one combined `TrainExample` for the whole
+  completion group and applies `degenerate_group_masking=True` by default:
+  all-zero-advantage groups have their completion mask cleared for baseline and
+  self-influence alike.
+- Local `my_example_qwen_aime` uses ordinary synchronous GRPO, vanilla rollout,
+  much smaller batches and generation groups, and does not reproduce the
+  Agentic degenerate-group behavior.
+- The supplied remote SelfInf trainer scores the same full loss used for the
+  update. It has neither the local optional policy-only score loss nor LOO/fixed
+  filter support.
+- The local shared stack contains Policy-DTV, Policy-DTV-LOO, and fixed
+  random/reward trainers, but its current experimental Agentic learner and
+  cluster differ substantially from the remote multihost snapshot; direct file
+  replacement in either direction is unsafe.
+
+### Recommendation
+
+- Use Ziao's Agentic DeepScaleR/AIME pipeline as the behavioral baseline for
+  reproducing prior AIME runs, then forward-port only the established
+  Policy-DTV, Policy-DTV-LOO, and fixed-filter capabilities with explicit
+  compatibility work.
+- Do not use `my_example_qwen_aime` as the primary formal AIME experiment path;
+  it can remain a lightweight diagnostic/smoke path.
+- Preserve Agentic baseline semantics, including degenerate-group masking,
+  identically across baseline and all curation methods. This is a base learner
+  behavior, not an AIME-specific DTV rule.
+
+### Validation
+
+- Static diffs and targeted source inspection only; no import, compilation,
+  distributed startup, or training validation.
+
+### Known risks / TODO
+
+- The remote base `agentic_rl_learner.py`, CLI entrypoints/config schema,
+  data recipe, distributed vLLM implementation, and exact git revision are
+  still needed before implementation.
+- Group integrity must be verified after any batching/gradient-accumulation
+  changes; Policy-DTV/LOO must receive complete contiguous 8-completion groups.
+
+---
+## 2026-07-31 - Define remote AIME equivalence and storage audit
+
+### Scope
+
+- Defined the minimum remote files and runtime evidence required to compare
+  `examples/deepscaler` experiments with local `my_example_qwen_aime`.
+- Estimated checkpoint/log storage bounds for planning the finalized AIME
+  method suite.
+- No Python or shell code was changed（无代码改动）.
+
+### Decision boundary
+
+- Do not assume the two AIME entrypoints are equivalent merely because both
+  eventually use shared `tunix/rl` modules.
+- Confirm the remote entrypoint/config chain, reward and advantage code,
+  prompt-group layout, trainer dispatch, Policy-DTV/LOO score-loss wiring,
+  fixed-filter implementation, seed behavior, and checkpoint item structure.
+- If these resolve to the established shared implementations with identical
+  semantics, reuse the finalized design. Otherwise discuss and reconcile the
+  remote branch before launching expensive AIME runs.
+
+### Run naming
+
+- Use normalized names of the form
+  `grpo_<dataset>_<method>_seed<seed>_mismatch<ratio>_<timestamp>`.
+- For clean AIME runs, use a clean marker/directory rather than implying
+  mismatch, for example
+  `runs/saved_clean/grpo_aime_dtv_selfinf_group_policy_seed5_clean_<timestamp>`.
+
+### Storage assessment
+
+- Exact storage cannot be inferred until checking the remote checkpoint item
+  tree. A 1.5B BF16 actor is roughly 3 GB for weights alone; a full Adam
+  checkpoint can plausibly be roughly 12--25 GB after optimizer state,
+  padding/sharding, and checkpoint overhead. LoRA-only checkpoints can be much
+  smaller.
+- TensorBoard and ordinary stdout logs are normally small relative to
+  checkpoints when trajectory logging is disabled.
+- Obtain `du` totals for one completed run, checkpoint subitems, TensorBoard,
+  stdout, and all saved runs before choosing a retention/deletion policy.
+
+### Known risk / TODO
+
+- `max_to_keep=1` limits managed steps but may not remove final exports,
+  interrupted temporary checkpoints, merged model exports, or duplicate run
+  roots.
+- Never delete runs until method, seed, effective config, final metrics, and
+  checkpoint recoverability have been inventoried with Ziao.
+
+---
+## 2026-07-31 - Reassess officialish AIME self-inf wrapper and final method plan
+
+### Scope
+
+- Reviewed the newly supplied
+  `run_deepscaler_disagg_v5p16_selfinf_group_officialish_8k.sh` wrapper.
+- Reconciled its threshold and beta behavior with the finalized AIME plan:
+  baseline, Group Policy-DTV, Group Policy-DTV-LOO, Random 5%/10%, and Reward
+  5%/10%, with clean data first and mismatch only where a meaningful reward
+  corruption experiment exists.
+- No Python or shell code was changed（无代码改动）.
+
+### Findings
+
+- The wrapper delegates to `run_deepscaler_disagg_v5p16_1epoch.sh`; it injects
+  local model-cache paths, prompt length 1024, beta 0.001, sequence/token loss
+  aggregation, and `dynamic_batch_curation_variant=self_inf_group`.
+- Its internal self-influence threshold default is `0.0`, but queue-level
+  overrides appended after the wrapper can replace it with `-0.05` or `0.05`.
+- `officialish_8k` is a historical label; this wrapper explicitly sets prompt
+  length 1024 and does not itself set response length to 8192.
+- Existing threshold-sweep results remain valid as early Group Self-Influence
+  results, but are not direct results for the finalized Group Policy-DTV or
+  Group Policy-DTV-LOO methods.
+- The finalized AIME plan can reuse shared trainer mathematics; the main work
+  is AIME-side launch/config dispatch and experiment logging. Core DTV/LOO,
+  fixed-filter, and GRPO loss code need not be reimplemented.
+- `beta=0.001` is the KL strength in both baseline and self-influence runs.
+  Earlier summaries omitted it for DTV because the DTV score uses the
+  policy-only (`beta=0`) auxiliary loss, while the actual retained-sample
+  optimizer update still uses the configured full Policy+KL loss.
+
+### Known risk / TODO
+
+- Verify effective Hydra override precedence in logs when queue commands append
+  a threshold after this wrapper's default.
+- Do not mix old total/self-influence threshold results with the finalized
+  policy-score DTV/LOO results in one method label.
+
+---
+## 2026-07-31 - Analyze DeepScaleR/AIME short sweep queue
+
+### Scope
+
+- Read-only analysis of `short_sweep_queue_20260707.md` and the supplied
+  `run_official_like_dual_worker.sh` attachment.
+- No Python or shell code was changed（无代码改动）.
+
+### Findings
+
+- Round 1 runs Group Self-Influence/DTV with thresholds `-0.05`, `0.0`, and
+  `0.05`, each for `num_batches=64`, using v5p-16, vLLM, and disaggregated
+  actor/reference/rollout workers.
+- The matched control is a non-self-influence DeepScaleR run with
+  `max_prompt_length=1024`, `beta=0.001`, and
+  `sequence-mean-token-mean` aggregation.
+- Round 2 holds the selected Round-1 threshold and sweeps KL strength
+  `beta=0.0003/0.001/0.003`.
+- Round 3 optionally holds the selected method/configuration and sweeps maximum
+  response length `4096/8192`.
+- The supplied runner discovers two TPU worker IPs, launches the same command
+  on local and remote workers, enables JAX distributed initialization, and
+  defaults to DeepScaleR train plus AIME eval paths. The referenced remote
+  training scripts were not present locally, so their un-overridden defaults
+  (batch size, generations, optimizer, exact max steps, and seed) remain
+  unconfirmed.
+
+### Known risk / TODO
+
+- `RUN_NAME` paths are constructed by the runner under `/tmp/${RUN_NAME}`, while
+  the queue also passes explicit TensorBoard/checkpoint paths. Effective
+  precedence depends on the downstream Hydra/config parser; verify from logs.
+- `num_batches=64` is explicit, but whether it maps exactly to 64 optimizer
+  steps depends on the remote training script.
+
+---
 
 ## 2026-07-31 - Store suite control files in a dedicated directory
 
@@ -10108,3 +10560,23 @@ This file tracks engineering changes made in this repository.
   circular filter/re-normalize loop and preserves static JAX/TPU shapes.
 
 ---
+## 2026-07-31：AIME 复用 GSM8K DTV/固定过滤实验的只读评估
+
+- 改动范围：仅静态盘点 GSM8K 分支中 Policy-DTV、Policy-DTV-LOO、random/reward fixed filter 的实现、测试和启动脚本，形成 AIME Agentic/vLLM 分支迁移建议。
+- 修改文件：`develop.md`（按项目记录要求追加本条）；无 Python、Shell 或训练逻辑改动。
+- 验证命令：使用 `rg` 查询 trainer、learner、cluster 和 `my_example` 启动脚本中的方法入口、配置字段及调用关系；未运行训练或测试。
+- 结果：确认新 trainer 文件可作为移植来源；`tunix/rl/rl_cluster.py`、learner 和启动入口只能在 AIME 代码上逐段合并，不能用 GSM8K 版本整文件覆盖。
+- 已知风险/待办：AIME 使用 Agentic GRPO、分布式 vLLM 和不同的 `TrainExample`/trainer 调用契约；迁移前应在 AIME 项目中先建立接口对照和最小单元测试。
+## 2026-08-01：AIME Policy-DTV 迁移文件清单复核
+
+- 改动范围：只读复核 GSM8K 中 Policy-DTV、Policy-DTV-LOO、random/reward、seed、clean/mismatch 与训练入口相关文件，并整理 AIME 开发清单；明确排除所有 non-policy DTV score 方案。
+- 修改文件：`develop.md`（按项目记录要求追加本条）；无 Python、Shell 或训练逻辑改动。
+- 验证命令：使用 `rg --files`、`rg` 和 `git show --name-only` 核对相关实现、测试、入口脚本及历史提交文件范围。
+- 结果：确认核心迁移不仅包含四种 Policy-DTV scope 和 fixed filter，还包括 learner/cluster 接线、seed、decision logs、结果命名、测试及 baseline 对照；AIME 主实验暂不迁移 mismatch。
+- 已知风险/待办：AIME 的 Agentic GRPO/vLLM 接口不同，公共文件必须逐段适配；reward filter 当前 GSM8K 实现使用 advantage 排序，AIME 开发前需固定实验定义。
+## 2026-08-01：新增 AIME Policy-DTV 迁移源码参考清单
+
+- 改动范围：整理当前 GSM8K 已实现的 Policy-DTV、Policy-DTV-LOO、random/reward、seed、clean/mismatch、训练入口和测试文件，供 AIME `for_GRPO_vLLM` 新项目直接参考。
+- 修改文件：新增 `AIME_POLICY_METHOD_PORT_REFERENCE.md`；更新 `develop.md`。无 Python、Shell 或训练逻辑改动。
+- 验证命令与结果：使用 `git show --name-only` 核对功能提交 `bedb18c`、`8b5396f`、`db67150`、`2d13863`、`86445a5`、`66659ad`、`8e119d8` 的实际文件范围；清单与提交记录一致。
+- 已知风险/待办：AIME 为 Agentic GRPO + distributed vLLM，公共 learner/cluster/CLI 文件只能逐段适配；不能用 GSM8K 文件整文件覆盖。
