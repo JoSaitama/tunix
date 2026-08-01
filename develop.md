@@ -13,6 +13,8 @@
 - Validation performed locally without TPU execution: Python byte-compilation, Bash syntax checking, and `git diff --check` passed. Pytest was not run because the Mac system Python does not have pytest installed; the tests must be run in the server environment.
 - Confirmed the port boundary: AIME retains its original distributed vLLM rollout, two-worker orchestration, online reward computation, Agentic queue/coalescing, resharding, checkpoint, and dataset-loading paths. GSM8K is used only as the semantic reference for score gradients, LOO/fixed-filter selection, deterministic seeds, reward-rank mismatch, method names, and output naming.
 - The stable reproduction branch `for_GRPO_vLLM` must remain unchanged. These uncommitted changes should be committed on a new branch named `for_GRPO_vLLM_aime`.
+- Confirmed the staged experiment policy from `short_sweep_queue_20260707.md`: validate one-batch checkpoint-producing smoke runs first; start the short formal sweep at threshold `0.0`; compare `-0.05`, `0.0`, and `0.05` over 64 batches before selecting a threshold; then sweep GRPO beta over `0.0003`, `0.001`, and `0.003`; only sweep response length (`4096`, `8192`) if needed. Threshold applies to ordinary policy DTV only, not LOO or fixed filters.
+- Because worker 0 has only 18 GB free, checkpoint-producing smoke runs must be launched one method at a time. Verify and delete each run's exact run directory before starting the next method; do not queue all checkpoint-producing smoke methods together.
 
 ## Execution boundary
 

@@ -49,6 +49,11 @@ export CACHE_ROOT="${REPO}/runs_xuesong/cache/${RUN_NAME}"
 export RUN_SCRIPT=examples/deepscaler/run_deepscaler_disagg_v5p16_1epoch.sh
 export NUM_BATCHES="${NUM_BATCHES:-64}"
 export MAX_STEPS_OVERRIDE="${MAX_STEPS_OVERRIDE:-$NUM_BATCHES}"
+if [[ "$NUM_BATCHES" -le 64 ]]; then
+  CHECKPOINT_INTERVAL="${CHECKPOINT_INTERVAL:-$NUM_BATCHES}"
+else
+  CHECKPOINT_INTERVAL="${CHECKPOINT_INTERVAL:-500}"
+fi
 export TUNIX_EXPERIMENT_SEED="$SEED"
 export TUNIX_REWARD_RANK_NOISE_SEED="${TUNIX_REWARD_RANK_NOISE_SEED:-$SEED}"
 export TUNIX_GRPO_NUM_GENERATIONS=8
@@ -67,6 +72,7 @@ ARGS=(
   agentic_grpo_config.beta=0.001
   agentic_grpo_config.loss_agg_mode=sequence-mean-token-mean
   agentic_grpo_config.degenerate_group_masking=true
+  "rl_training_config.checkpointing_options.save_interval_steps=${CHECKPOINT_INTERVAL}"
   rl_training_config.checkpointing_options.max_to_keep=1
 )
 [[ -z "$VARIANT" ]] || ARGS+=("rl_training_config.dynamic_batch_curation_variant=${VARIANT}")
