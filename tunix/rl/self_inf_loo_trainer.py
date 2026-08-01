@@ -44,11 +44,13 @@ def _stable_top_k_mask(scores: jax.Array, k: int) -> jax.Array:
 
 
 def _capped_mask(
-    scores: jax.Array, min_keep_fraction: float
+    scores: jax.Array,
+    min_keep_fraction: float,
+    dot_threshold: float = 0.0,
 ) -> tuple[jax.Array, ...]:
   population_size = int(scores.shape[0])
   min_keep = max(1, math.ceil(population_size * min_keep_fraction))
-  threshold_mask = jnp.isfinite(scores) & (scores >= 0.0)
+  threshold_mask = jnp.isfinite(scores) & (scores >= dot_threshold)
   top_k_mask = _stable_top_k_mask(scores, min_keep)
   cap_triggered = jnp.sum(threshold_mask) < min_keep
   final_mask = jnp.where(cap_triggered, top_k_mask, threshold_mask)
@@ -57,9 +59,13 @@ def _capped_mask(
 
 
 def _group_capped_mask(
-    grouped_scores: jax.Array, min_keep_fraction: float
+    grouped_scores: jax.Array,
+    min_keep_fraction: float,
+    dot_threshold: float = 0.0,
 ) -> tuple[jax.Array, ...]:
-  return jax.vmap(lambda x: _capped_mask(x, min_keep_fraction))(grouped_scores)
+  return jax.vmap(
+      lambda x: _capped_mask(x, min_keep_fraction, dot_threshold)
+  )(grouped_scores)
 
 
 def _batch_loo_statistics(per_sample_grads) -> dict[str, jax.Array]:
@@ -138,6 +144,7 @@ class SelfInfLooTrainer(rl_trainer.Trainer):
       scope: Literal["batch", "group"] = "batch",
       num_generations: int | None = None,
       min_keep_fraction: float = 0.25,
+      dot_threshold: float = 0.0,
       decisions_path: str | None = None,
       **kwargs,
   ):
@@ -149,6 +156,7 @@ class SelfInfLooTrainer(rl_trainer.Trainer):
     self.scope = scope
     self.num_generations = num_generations
     self.min_keep_fraction = min_keep_fraction
+    self.dot_threshold = dot_threshold
     self.decisions_path = decisions_path
     self._score_loss_fn: Callable[..., Any] | None = None
     self._score_loss_has_aux = False
@@ -215,6 +223,7 @@ class SelfInfLooTrainer(rl_trainer.Trainer):
       masks = _group_capped_mask(
           stats["loo_score"].reshape(num_groups, group_size),
           self.min_keep_fraction,
+          self.dot_threshold,
       )
       mask, threshold_mask, retained_by_cap, cap_triggered = (
           x.reshape((batch_size,)) if x.ndim == 2 else x for x in masks
@@ -234,7 +243,7 @@ class SelfInfLooTrainer(rl_trainer.Trainer):
     else:
       stats = _batch_loo_statistics(score_grads)
       mask, threshold_mask, retained_by_cap, cap_triggered = _capped_mask(
-          stats["loo_score"], self.min_keep_fraction
+          stats["loo_score"], self.min_keep_fraction, self.dot_threshold
       )
       group_size = int(self.num_generations or 0)
       if group_size > 0 and batch_size % group_size == 0:
@@ -321,6 +330,7 @@ class SelfInfLooTrainer(rl_trainer.Trainer):
             "scope": self.scope,
             "num_generations": self.num_generations,
             "min_keep_fraction": self.min_keep_fraction,
+            "dot_threshold": self.dot_threshold,
             "score_objective": self.score_objective,
             **scalars,
             **arrays,

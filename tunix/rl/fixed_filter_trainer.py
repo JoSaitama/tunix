@@ -12,6 +12,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import optax
+from tunix.rl import memory_bounded_curation
 from tunix.rl import trainer as rl_trainer
 
 
@@ -66,23 +67,8 @@ class FixedFilterTrainer(rl_trainer.Trainer):
       raise ValueError("Fixed filtering requires filter_random_values.")
     random_values = jnp.asarray(example.filter_random_values)
 
-    def restore(x):
-      return jnp.expand_dims(x, 0) if isinstance(x, (jax.Array, np.ndarray)) else x
-
-    def sample_loss(model, sample):
-      sample = jax.tree_util.tree_map(restore, sample)
-      return self.loss_fn(model, **sample)
-
-    axes = jax.tree_util.tree_map(
-        lambda x: 0 if isinstance(x, (jax.Array, np.ndarray)) else None, inputs
-    )
     wrt = nnx.LoRAParam if self._lora_enabled else nnx.Param
-    grad_fn = nnx.value_and_grad(
-        sample_loss, argnums=nnx.DiffState(0, wrt), has_aux=self._has_aux
-    )
-    out, grads = jax.vmap(grad_fn, in_axes=(None, axes))(model, inputs)
-    losses, per_sample_aux = out if self._has_aux else (out, None)
-    batch_size = int(jax.tree_util.tree_leaves(grads)[0].shape[0])
+    batch_size = memory_bounded_curation.batch_size(inputs)
     ties, quotas = random_values[:, 0], random_values[:, 1]
     if self.scope == "group":
       group_size = self.num_generations
@@ -105,23 +91,23 @@ class FixedFilterTrainer(rl_trainer.Trainer):
       )
     mask_f = mask.astype(jnp.float32)
     kept = jnp.sum(mask_f)
-    denom = jnp.clip(kept, 1.0)
 
-    def masked_mean(tree):
-      return jax.tree_util.tree_map(
-          lambda x: jnp.sum(
-              x * mask_f.reshape((-1,) + (1,) * (x.ndim - 1)), axis=0
-          ) / denom,
-          tree,
-      )
-
-    final_grads = masked_mean(grads)
+    grad_fn = memory_bounded_curation.make_grad_fn(
+        self.loss_fn, wrt=wrt, has_aux=self._has_aux
+    )
+    final_loss, aux, final_grads = (
+        memory_bounded_curation.masked_value_and_grad(
+            grad_fn,
+            model,
+            inputs,
+            mask,
+            has_aux=self._has_aux,
+        )
+    )
     grad_norm = optax.global_norm(final_grads)
-    final_loss = jnp.sum(losses * mask_f) / denom
     optimizer.update(model, final_grads)
     if not self._has_aux:
       return final_loss, None, grad_norm
-    aux = masked_mean(per_sample_aux)
     if isinstance(aux, dict):
       aux.update({
           "skipped_samples": batch_size - kept,

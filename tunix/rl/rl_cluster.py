@@ -662,6 +662,7 @@ class RLCluster:
           "min_keep_fraction": float(
               os.getenv("TUNIX_DBC_SELF_INF_MIN_KEEP_FRACTION", "0.25")
           ),
+          "dot_threshold": actor_config.self_influence_dot_threshold,
           "decisions_path": os.getenv("TUNIX_DBC_DECISIONS_PATH"),
       }
     elif actor_config.dynamic_batch_curation_variant == "fixed_filter":

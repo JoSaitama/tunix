@@ -13,8 +13,15 @@
 - Validation performed locally without TPU execution: Python byte-compilation, Bash syntax checking, and `git diff --check` passed. Pytest was not run because the Mac system Python does not have pytest installed; the tests must be run in the server environment.
 - Confirmed the port boundary: AIME retains its original distributed vLLM rollout, two-worker orchestration, online reward computation, Agentic queue/coalescing, resharding, checkpoint, and dataset-loading paths. GSM8K is used only as the semantic reference for score gradients, LOO/fixed-filter selection, deterministic seeds, reward-rank mismatch, method names, and output naming.
 - The stable reproduction branch `for_GRPO_vLLM` must remain unchanged. These uncommitted changes should be committed on a new branch named `for_GRPO_vLLM_aime`.
-- Confirmed the staged experiment policy from `short_sweep_queue_20260707.md`: validate one-batch checkpoint-producing smoke runs first; start the short formal sweep at threshold `0.0`; compare `-0.05`, `0.0`, and `0.05` over 64 batches before selecting a threshold; then sweep GRPO beta over `0.0003`, `0.001`, and `0.003`; only sweep response length (`4096`, `8192`) if needed. Threshold applies to ordinary policy DTV only, not LOO or fixed filters.
+- Confirmed the staged experiment policy from `short_sweep_queue_20260707.md`: validate one-batch checkpoint-producing smoke runs first; start the short formal sweep at threshold `0.0`; compare `-0.05`, `0.0`, and `0.05` over 64 batches before selecting a threshold; then sweep GRPO beta over `0.0003`, `0.001`, and `0.003`; only sweep response length (`4096`, `8192`) if needed. Threshold applies to both ordinary and leave-one-out policy DTV, because LOO changes the score reference but retains the score-versus-threshold filter rule. Fixed random/reward filters do not use a DTV score threshold.
+- Corrected the Agentic LOO trainer so `rl_training_config.self_influence_dot_threshold` controls its score boundary instead of hard-coding zero. Its default remains `0.0`, matching the paper and the PPO, DPO, and GSM8K GRPO implementations.
 - Because worker 0 has only 18 GB free, checkpoint-producing smoke runs must be launched one method at a time. Verify and delete each run's exact run directory before starting the next method; do not queue all checkpoint-producing smoke methods together.
+- The first `group_policy` smoke (`grpo_aime_dtv_selfinf_group_policy_seed0_clean_20260801_104749`) did not reach trainer construction, rollout, or score computation. Worker 1 failed during JAX TPU backend initialization because `/dev/vfio/0` returned `Device or resource busy`; worker 0 then timed out at the two-task shutdown barrier and both processes ended with status 134 (`SIGABRT`). Disk space was sufficient and no kernel OOM event was reported. This is a pre-existing TPU device-ownership/environment failure, not evidence of a policy DTV implementation failure.
+- The worker-1 VFIO owners were identified as orphaned PIDs `1706364`, `1706365`, `1706367`, and `1706368` from the earlier `grpo_aime_dtv_group_total_loss_smoke_20260801T071159Z` run. Their command lines use `self_inf_group`, their parent PID is 1, and they predate the failed policy smoke. Deleting run output does not release TPU devices; these exact stale processes must be terminated and `/dev/vfio/0` rechecked before retrying.
+- SIGTERM did not stop the four orphaned worker-1 processes, but an exact-PID SIGKILL released `/dev/vfio/0`; the subsequent GRPO process query and VFIO-holder query were empty. Worker 0 remained at 18 GB free while worker 1 had 60 GB free because TPU VM workers have independent root disks. The failed policy run directory was only 8 KB, so deleting it correctly produced no measurable disk-space change.
+- The second `group_policy` smoke (`grpo_aime_dtv_selfinf_group_policy_seed0_clean_20260801_111403`) exposed source-version skew between workers. Worker 0 accepted `self_inf_group_policy` and proceeded to distributed vLLM initialization, while worker 1 ran an older snapshot whose `RLTrainingConfig` only accepted `self_inf_batch` and `self_inf_group`. Worker 1 exited with `ValueError`, and worker 0 then received `Connection refused` when contacting the worker-1 rollout owner. Worker 1 is intentionally a deployed source snapshot rather than a Git checkout, so every committed worker-0 update must be redeployed with `git archive` and verified by checksums before launch.
+- Commit `5e1859153e0bf7d3001ba9a48c8259edf54f82af` was deployed from worker 0 to worker 1 with `git archive`. Checksums for the core trainer, learner, and launcher files matched, worker 1 recognized all new variants, byte-compilation passed, and no GRPO process or VFIO owner remained. The smoke sequence may resume one method at a time.
+- The synchronized `group_policy` run `grpo_aime_dtv_selfinf_group_policy_seed0_clean_20260801_121422` completed rollout and reached the first policy-DTV train-step compilation. XLA then raised `CompileTimeHbmOom`: the compiled program required 320.13 GB HBM on a 95.74 GB device. The largest allocations came from vmapped per-sample gradient attention at the 8192/9216-token shape, and the current policy trainer constructs both score-gradient and full-update-gradient paths inside one JIT. The later status 134 was distributed shutdown propagation. Repeating the same smoke cannot succeed; a short-length logic smoke and a memory-bounded gradient implementation are required before an 8192-token formal run.
 
 ## Execution boundary
 
@@ -351,3 +358,36 @@ the operator logs into worker 1 and launches worker 0 remotely with
 `REMOTE_WORKER_INDEX=1`; the canonical JAX process-host ordering remains
 worker 0 followed by worker 1. This matches the established ziao1 launch
 direction after the ziao2 login configuration was updated.
+
+## 2026-08-01 memory-bounded policy DTV implementation
+
+The 8192-token `group_policy` smoke compile estimated approximately 320 GiB of
+HBM because the actor train step stacked a full parameter-gradient tree for
+every trajectory with `vmap`. Policy DTV stacked both policy-only score
+gradients and full Policy+KL update gradients in the same compiled step.
+
+Added `tunix/rl/memory_bounded_curation.py` and changed only the new policy DTV,
+policy DTV-LOO, and fixed-filter trainers. The original reproduced baseline and
+total-loss DTV trainers remain unchanged.
+
+The bounded implementation preserves the original mathematics. For each batch
+or prompt group it computes the exact gradient sum in a sequential JAX loop,
+then reevaluates one score gradient at a time to calculate the ordinary score
+`dot(g_i, sum(g) / G)` and the strict LOO score
+`dot(g_i, (sum(g) - g_i) / (G - 1))`. It does not retain a
+`batch_size x parameter_tree` gradient object. After threshold and retention-cap
+selection, it sequentially accumulates the masked full-loss gradients and
+per-sample auxiliary values before the single optimizer update. Fixed random
+and advantage-ranked filters use the same bounded masked-gradient accumulator
+after constructing their unchanged deterministic masks.
+
+This is an exact compute-for-memory trade: score gradients are evaluated twice
+and update gradients once, so wall time can increase. Floating-point reduction
+order changes from a vectorized tree reduction to sequential accumulation, so
+minor roundoff differences are possible near an exact threshold boundary, but
+the loss functions, score formulas, masks, denominator, and optimizer update
+definition are unchanged. Added synthetic numerical tests for batch and group
+ordinary/LOO statistics. Local syntax checks passed. The Mac environment lacks
+JAX, Flax, and pytest, so CPU numerical tests and the 8192-token TPU compile
+smoke must run in the server environment before treating the change as
+validated.

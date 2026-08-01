@@ -29,6 +29,15 @@ class SelfInfLooTrainerTest(absltest.TestCase):
     np.testing.assert_array_equal(mask, [False, True, False, False])
     np.testing.assert_array_equal(retained, mask)
 
+  def test_configurable_threshold_controls_loo_filtering(self):
+    scores = jnp.array([-0.1, 0.0, 0.1, 0.2])
+    mask, threshold, _, triggered = self_inf_loo_trainer._capped_mask(
+        scores, min_keep_fraction=0.25, dot_threshold=0.1
+    )
+    self.assertFalse(bool(triggered))
+    np.testing.assert_array_equal(threshold, [False, False, True, True])
+    np.testing.assert_array_equal(mask, threshold)
+
 
 if __name__ == "__main__":
   absltest.main()

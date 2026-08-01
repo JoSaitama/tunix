@@ -1,0 +1,198 @@
+"""Memory-bounded exact gradients for dynamic trajectory curation."""
+
+from __future__ import annotations
+
+from typing import Any, Callable
+
+from flax import nnx
+import jax
+import jax.numpy as jnp
+import numpy as np
+
+
+def batch_size(inputs: Any) -> int:
+  for leaf in jax.tree_util.tree_leaves(inputs):
+    if isinstance(leaf, (jax.Array, np.ndarray)):
+      return int(leaf.shape[0])
+  raise ValueError("No batched array found in trainer inputs.")
+
+
+def sample_inputs(inputs: Any, index: jax.Array) -> Any:
+  """Selects one example while retaining the loss function's batch axis."""
+  return jax.tree_util.tree_map(
+      lambda x: jax.lax.dynamic_index_in_dim(x, index, keepdims=True)
+      if isinstance(x, (jax.Array, np.ndarray))
+      else x,
+      inputs,
+  )
+
+
+def tree_add(left: Any, right: Any) -> Any:
+  return jax.tree_util.tree_map(lambda x, y: x + y, left, right)
+
+
+def tree_scale(tree: Any, scale: jax.Array) -> Any:
+  return jax.tree_util.tree_map(lambda x: x * scale, tree)
+
+
+def tree_dot(left: Any, right: Any) -> jax.Array:
+  products = jax.tree_util.tree_map(
+      lambda x, y: jnp.sum(x.astype(jnp.float32) * y.astype(jnp.float32)),
+      left,
+      right,
+  )
+  return jax.tree_util.tree_reduce(
+      lambda x, y: x + y, products, initializer=jnp.asarray(0.0)
+  )
+
+
+def make_grad_fn(
+    loss_fn: Callable[..., Any], *, wrt: type, has_aux: bool
+) -> Callable[..., Any]:
+  def call_loss(model, inputs):
+    return loss_fn(model, **inputs)
+
+  return nnx.value_and_grad(
+      call_loss,
+      argnums=nnx.DiffState(0, wrt),
+      has_aux=has_aux,
+  )
+
+
+def gradient_sum(
+    grad_fn: Callable[..., Any],
+    model: nnx.Module,
+    inputs: Any,
+    start: int | jax.Array,
+    count: int,
+) -> Any:
+  """Returns an exact sum without stacking per-example gradient trees."""
+  _, first = grad_fn(model, sample_inputs(inputs, start))
+
+  def add_one(offset, accumulated):
+    _, gradient = grad_fn(model, sample_inputs(inputs, start + offset))
+    return tree_add(accumulated, gradient)
+
+  return jax.lax.fori_loop(1, count, add_one, first)
+
+
+def dtv_statistics(
+    grad_fn: Callable[..., Any],
+    model: nnx.Module,
+    inputs: Any,
+    *,
+    scope: str,
+    group_size: int | None,
+) -> dict[str, jax.Array]:
+  """Computes ordinary and LOO DTV statistics with exact dot products.
+
+  The score gradients are evaluated twice: once to form each reference sum and
+  once to take per-example dot products. This trades compute for bounded HBM.
+  """
+  size = batch_size(inputs)
+  if scope == "group":
+    if group_size is None or group_size <= 1 or size % group_size:
+      raise ValueError(
+          "Group DTV requires a complete group and num_generations > 1; "
+          f"received batch_size={size}, num_generations={group_size}."
+      )
+    reference_size = group_size
+  else:
+    if size <= 1:
+      raise ValueError("Batch DTV requires at least two samples.")
+    reference_size = size
+
+  raw_self = jnp.zeros((size,), dtype=jnp.float32)
+  raw_cross = jnp.zeros((size,), dtype=jnp.float32)
+
+  def process_reference(start, count, state):
+    self_values, cross_values = state
+    total = gradient_sum(grad_fn, model, inputs, start, count)
+
+    def score_one(offset, values):
+      self_acc, cross_acc = values
+      _, gradient = grad_fn(model, sample_inputs(inputs, start + offset))
+      self_term = tree_dot(gradient, gradient)
+      total_term = tree_dot(gradient, total)
+      index = start + offset
+      return (
+          self_acc.at[index].set(self_term),
+          cross_acc.at[index].set(total_term - self_term),
+      )
+
+    return jax.lax.fori_loop(0, count, score_one, (self_values, cross_values))
+
+  if scope == "group":
+    num_groups = size // reference_size
+
+    def process_group(group_index, state):
+      return process_reference(
+          group_index * reference_size, reference_size, state
+      )
+
+    raw_self, raw_cross = jax.lax.fori_loop(
+        0, num_groups, process_group, (raw_self, raw_cross)
+    )
+  else:
+    raw_self, raw_cross = process_reference(
+        0, reference_size, (raw_self, raw_cross)
+    )
+
+  denominator = float(reference_size)
+  return {
+      "raw_self": raw_self,
+      "raw_cross_sum": raw_cross,
+      "standard_self_term": raw_self / denominator,
+      "standard_cross_term": raw_cross / denominator,
+      "standard_score": (raw_self + raw_cross) / denominator,
+      "loo_score": raw_cross / float(reference_size - 1),
+  }
+
+
+def masked_value_and_grad(
+    grad_fn: Callable[..., Any],
+    model: nnx.Module,
+    inputs: Any,
+    mask: jax.Array,
+    *,
+    has_aux: bool,
+) -> tuple[jax.Array, Any | None, Any]:
+  """Computes the masked mean gradient without stacking sample gradients."""
+  size = batch_size(inputs)
+  mask_f = mask.astype(jnp.float32)
+  denominator = jnp.clip(jnp.sum(mask_f), 1.0)
+
+  def evaluate(index):
+    out, gradient = grad_fn(model, sample_inputs(inputs, index))
+    if has_aux:
+      loss, aux = out
+    else:
+      loss, aux = out, None
+    return jnp.squeeze(loss), aux, gradient
+
+  first_loss, first_aux, first_gradient = evaluate(0)
+  loss_sum = first_loss * mask_f[0]
+  gradient_sum_value = tree_scale(first_gradient, mask_f[0])
+  aux_sum = tree_scale(first_aux, mask_f[0]) if has_aux else None
+
+  def add_one(index, state):
+    current_loss, current_aux, current_gradient = evaluate(index)
+    loss_acc, aux_acc, gradient_acc = state
+    weight = mask_f[index]
+    return (
+        loss_acc + current_loss * weight,
+        tree_add(aux_acc, tree_scale(current_aux, weight))
+        if has_aux
+        else None,
+        tree_add(gradient_acc, tree_scale(current_gradient, weight)),
+    )
+
+  loss_sum, aux_sum, gradient_sum_value = jax.lax.fori_loop(
+      1,
+      size,
+      add_one,
+      (loss_sum, aux_sum, gradient_sum_value),
+  )
+  mean_gradient = tree_scale(gradient_sum_value, 1.0 / denominator)
+  mean_aux = tree_scale(aux_sum, 1.0 / denominator) if has_aux else None
+  return loss_sum / denominator, mean_aux, mean_gradient
