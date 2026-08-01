@@ -86,10 +86,17 @@ def _mock_generate(
     mode: rl_cluster_lib.Mode = rl_cluster_lib.Mode.TRAIN,
     micro_batch_size: int | None = None,
     trace_tags: dict[str, Any] | None = None,
+    internal_request_tags: dict[str, Any] | None = None,
     output_logprobs: bool = True,
     tokenizer: Any | None = None,
 ) -> base_rollout.RolloutOutput:
-  del apply_chat_template, mode, micro_batch_size, trace_tags
+  del (
+      apply_chat_template,
+      mode,
+      micro_batch_size,
+      trace_tags,
+      internal_request_tags,
+  )
   assert tokenizer is not None
   batch_size = len(prompts)
   text = [random.choice(_MOCK_RESPONSES) for _ in range(batch_size)]
@@ -883,6 +890,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
       [res_group4] = learner._process_results(group4)
       self.assertIsNone(res_group4.old_per_token_logps)
 
+  @mock.patch.dict(os.environ, {"TUNIX_SKIP_FINAL_CHECKPOINT": "0"})
   def test_checkpointing(self):
     ckpt_dir = tempfile.mkdtemp()
     self.addCleanup(shutil.rmtree, ckpt_dir)

@@ -450,3 +450,10 @@ single-sample JIT. The CPU regression input now includes a non-array config
 sentinel so this production shape is covered. The vLLM restart messages after
 the exception were distributed shutdown recovery and did not indicate resumed
 training.
+
+The broader Agentic CPU suite exposed two stale test assumptions unrelated to
+staged DTV. The checkpoint test inherited the server's optional
+`TUNIX_SKIP_FINAL_CHECKPOINT` environment setting, so it now explicitly enables
+final checkpointing for isolation. The shared mock generator now accepts and
+ignores the production `internal_request_tags` argument used for deterministic
+distributed rollout request IDs. Production training behavior is unchanged.
