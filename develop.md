@@ -95,14 +95,30 @@ test -r pip-freeze-lhf-reference.txt
 bash runs_xuesong/scripts/bootstrap_jason_env.sh
 ```
 
-The bootstrap uses the LHF Python only to create and seed a new Jason-owned
-environment. It filters out editable/file-URL Tunix installs, installs the
-historical dependency snapshot, verifies that it contains pytest, then installs
-the current Jason checkout without dependency resolution in editable mode.
+The first bootstrap implementation attempted to install the historical freeze.
+The Git-pinned TPU vLLM build created an isolated build environment that pulled
+CUDA PyTorch and NVIDIA wheels, exhausting server storage. Do not rebuild the
+historical vLLM stack.
 
-Installation requires package and Git network access. It may take significant
-time because the historical TPU vLLM entry is pinned to a Git commit. Do not
-modify the LHF `.venv`.
+The corrected bootstrap creates a lightweight Jason-owned shim `.venv` without
+pip and writes one `.pth` file containing Jason's checkout followed by the
+historical LHF site-packages directory. JAX, libtpu, vLLM, and the remaining
+dependencies are reused read-only; Tunix always imports from Jason's checkout.
+No package download, dependency copy, or LHF environment modification occurs.
+
+Before rerunning the corrected bootstrap, remove only the failed generated
+Jason environment and purge Jason's pip download cache after verifying sizes:
+
+```bash
+cd /home/jason_chia925_gmail_com/Project/tunix
+du -sh .venv /home/jason_chia925_gmail_com/.cache/pip 2>/dev/null || true
+rm -rf -- /home/jason_chia925_gmail_com/Project/tunix/.venv
+/home/lhf_hongfu_gmail_com/tunix/.venv/bin/python -m pip cache purge
+bash runs_xuesong/scripts/bootstrap_jason_env.sh
+```
+
+The first `rm` target is the failed generated environment only. The pip command
+purges cache files owned by Jason; it does not uninstall LHF packages.
 
 After installation, run once on worker 0:
 
