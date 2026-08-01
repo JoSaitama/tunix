@@ -235,3 +235,91 @@ Future work should proceed in reviewable stages:
 
 Each stage requires focused tests, baseline regression, a one-step smoke, an
 effective configuration record, and a separate Git commit.
+
+## 2026-08-01 TPU ownership diagnosis
+
+The server test failure reports that TPU worker 0 is already owned by PID
+`3528798`. The subsequent JAX test failures are cascading backend
+initialization failures, not evidence that the trainer assertions failed.
+
+Unit tests must run with `JAX_PLATFORMS=cpu`; otherwise importing or creating a
+JAX array on a TPU VM can acquire the TPU and block the later training process.
+
+Use finite read-only inspection commands before terminating anything:
+
+```bash
+TPU_PID=3528798
+ps -o user,pid,ppid,lstart,etime,stat,%cpu,%mem,args -p "$TPU_PID"
+printf 'cwd: '
+readlink -f "/proc/$TPU_PID/cwd"
+printf 'cmdline: '
+tr '\0' ' ' < "/proc/$TPU_PID/cmdline"
+printf '\n'
+PARENT_PID="$(ps -o ppid= -p "$TPU_PID" | tr -d ' ')"
+ps -o user,pid,ppid,lstart,etime,stat,args -p "$PARENT_PID"
+command -v pstree >/dev/null && pstree -aps "$TPU_PID" || true
+pgrep -a -f 'pytest|grpo|deepscaler|vllm|python' || true
+```
+
+Run the same process listing on TPU worker 1 because TPU ownership is local to
+each worker process host.
+
+If and only if the command line confirms that PID `3528798` is the abandoned
+pytest command, stop it gracefully:
+
+```bash
+kill -TERM 3528798
+```
+
+After a single manual recheck, use `kill -KILL 3528798` only if the confirmed
+pytest process ignored SIGTERM. Do not kill an active training or vLLM process.
+
+Future targeted tests must be invoked as:
+
+```bash
+JAX_PLATFORMS=cpu python -m pytest -q \
+  tests/oss_utils_test.py \
+  tests/rl/self_inf_trainer_test.py \
+  tests/rl/rl_cluster_test.py \
+  tests/rl/agentic/agentic_grpo_learner_test.py \
+  tests/cli/grpo_main_test.py
+```
+
+After CPU tests exit, use one fresh process to verify TPU availability:
+
+```bash
+JAX_PLATFORMS=tpu python -c \
+  'import jax; print(jax.devices()); print("TPU_AVAILABLE")'
+```
+
+This availability check itself briefly acquires the TPU and must exit before a
+training launch.
+
+## 2026-08-01 dual-worker smoke deployment and output layout
+
+Worker 0 is the only Git working tree and launch host. Worker 1 receives a
+committed source snapshot and runs it as the TPU VM service account. Worker 1
+reuses `/home/eve/tunix/.venv`, `/home/eve/models`, and
+`/home/eve/tunix-hf-data` through compatibility symlinks. Model and dataset
+files are not copied between workers.
+
+New runs use repository-local output roots by default:
+
+```text
+runs_xuesong/runs/<run-name>/checkpoints
+runs_xuesong/logs/<run-name>/workers
+runs_xuesong/logs/<run-name>/tensorboard
+runs_xuesong/cache/<run-name>
+```
+
+These generated directories are ignored by Git. A detached launcher should
+write its combined output to
+`runs_xuesong/logs/<run-name>/launcher.out` and its PID to the same directory.
+
+The first baseline smoke reached model loading, distributed JAX setup, GRPO
+training initialization, and rollout dispatch. It then reported repeated
+`lost its connection to the rollout owner` warnings. This is not a launch
+summary error: it means the rollout owner on worker 1 restarted or exited.
+Diagnose the finite worker-1 `remote.log` tail and both process states before
+changing model or training settings. Do not relaunch while either worker still
+has a Python training process.

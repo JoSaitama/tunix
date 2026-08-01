@@ -11,6 +11,9 @@
 .vscode
 .envrc
 pip-freeze-lhf-reference.txt
+/runs_xuesong/runs/
+/runs_xuesong/logs/
+/runs_xuesong/cache/
 
 # virtualenv/venv directories
 /.venv/

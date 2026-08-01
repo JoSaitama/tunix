@@ -43,7 +43,7 @@ esac
 timestamp="${RUN_TIMESTAMP:-$(date -u +%Y%m%dT%H%M%SZ)}"
 RUN_NAME="${RUN_NAME:-grpo_aime_${METHOD}_seed${SEED}_${NUM_BATCHES}batch_${timestamp}}"
 REPO="${REPO:-/home/jason_chia925_gmail_com/Project/tunix}"
-RUN_ROOT="${RUN_ROOT:-/home/jason_chia925_gmail_com/tunix-runs/smoke/${RUN_NAME}}"
+RUN_ROOT="${RUN_ROOT:-${REPO}/runs_xuesong/runs/${RUN_NAME}}"
 MAX_STEPS_OVERRIDE="${MAX_STEPS_OVERRIDE:-${NUM_BATCHES}}"
 if [[ "${NUM_BATCHES}" -le 64 ]]; then
   default_checkpoint_interval="${NUM_BATCHES}"
