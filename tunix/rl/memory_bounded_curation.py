@@ -68,12 +68,13 @@ def gradient_sum(
 ) -> Any:
   """Returns an exact sum without stacking per-example gradient trees."""
   _, first = grad_fn(model, sample_inputs(inputs, start))
-
-  def add_one(offset, accumulated):
+  accumulated = first
+  # Keep NNX graph extraction at the train step's trace level. A lax loop would
+  # close over ``model`` from a different trace level, which NNX rejects.
+  for offset in range(1, count):
     _, gradient = grad_fn(model, sample_inputs(inputs, start + offset))
-    return tree_add(accumulated, gradient)
-
-  return jax.lax.fori_loop(1, count, add_one, first)
+    accumulated = tree_add(accumulated, gradient)
+  return accumulated
 
 
 def dtv_statistics(
@@ -105,37 +106,29 @@ def dtv_statistics(
   raw_self = jnp.zeros((size,), dtype=jnp.float32)
   raw_cross = jnp.zeros((size,), dtype=jnp.float32)
 
-  def process_reference(start, count, state):
-    self_values, cross_values = state
+  def process_reference(start, count, self_values, cross_values):
     total = gradient_sum(grad_fn, model, inputs, start, count)
-
-    def score_one(offset, values):
-      self_acc, cross_acc = values
+    for offset in range(count):
       _, gradient = grad_fn(model, sample_inputs(inputs, start + offset))
       self_term = tree_dot(gradient, gradient)
       total_term = tree_dot(gradient, total)
       index = start + offset
-      return (
-          self_acc.at[index].set(self_term),
-          cross_acc.at[index].set(total_term - self_term),
-      )
-
-    return jax.lax.fori_loop(0, count, score_one, (self_values, cross_values))
+      self_values = self_values.at[index].set(self_term)
+      cross_values = cross_values.at[index].set(total_term - self_term)
+    return self_values, cross_values
 
   if scope == "group":
     num_groups = size // reference_size
-
-    def process_group(group_index, state):
-      return process_reference(
-          group_index * reference_size, reference_size, state
+    for group_index in range(num_groups):
+      raw_self, raw_cross = process_reference(
+          group_index * reference_size,
+          reference_size,
+          raw_self,
+          raw_cross,
       )
-
-    raw_self, raw_cross = jax.lax.fori_loop(
-        0, num_groups, process_group, (raw_self, raw_cross)
-    )
   else:
     raw_self, raw_cross = process_reference(
-        0, reference_size, (raw_self, raw_cross)
+        0, reference_size, raw_self, raw_cross
     )
 
   denominator = float(reference_size)
@@ -175,24 +168,15 @@ def masked_value_and_grad(
   gradient_sum_value = tree_scale(first_gradient, mask_f[0])
   aux_sum = tree_scale(first_aux, mask_f[0]) if has_aux else None
 
-  def add_one(index, state):
+  for index in range(1, size):
     current_loss, current_aux, current_gradient = evaluate(index)
-    loss_acc, aux_acc, gradient_acc = state
     weight = mask_f[index]
-    return (
-        loss_acc + current_loss * weight,
-        tree_add(aux_acc, tree_scale(current_aux, weight))
-        if has_aux
-        else None,
-        tree_add(gradient_acc, tree_scale(current_gradient, weight)),
+    loss_sum = loss_sum + current_loss * weight
+    if has_aux:
+      aux_sum = tree_add(aux_sum, tree_scale(current_aux, weight))
+    gradient_sum_value = tree_add(
+        gradient_sum_value, tree_scale(current_gradient, weight)
     )
-
-  loss_sum, aux_sum, gradient_sum_value = jax.lax.fori_loop(
-      1,
-      size,
-      add_one,
-      (loss_sum, aux_sum, gradient_sum_value),
-  )
   mean_gradient = tree_scale(gradient_sum_value, 1.0 / denominator)
   mean_aux = tree_scale(aux_sum, 1.0 / denominator) if has_aux else None
   return loss_sum / denominator, mean_aux, mean_gradient

@@ -142,6 +142,7 @@ echo "  COMMAND=${cmd_string}"
 
 run_worker() {
   local logfile="$1"
+  echo "=== WORKER 0 LOG: $(hostname) ==="
   cd "${REPO}"
   source "${VENV}/bin/activate"
   mkdir -p "${LOG_DIR}" "${TB_DIR}" "${CKPT_DIR}" "${TMP_DIR}"
@@ -168,7 +169,10 @@ run_worker() {
     export TUNIX_DISABLE_TRAJECTORY_LOGGING
   fi
   status=0
-  bash -lc "${cmd_string}" > "${logfile}" 2>&1 || status=$?
+  set +e
+  bash -lc "${cmd_string}" 2>&1 | tee "${logfile}"
+  status=${PIPESTATUS[0]}
+  set -e
   echo "HOST=$(hostname) STATUS=${status}"
   return "${status}"
 }
@@ -178,6 +182,7 @@ run_remote() {
   local remote_script
   remote_script=$(cat <<EOF
 set -euo pipefail
+echo "=== WORKER 1 LOG: \$(hostname) ==="
 cd ${REPO}
 source ${VENV}/bin/activate
 mkdir -p ${LOG_DIR} ${TB_DIR} ${CKPT_DIR} ${TMP_DIR}
@@ -208,7 +213,10 @@ if [[ -n ${TUNIX_DISABLE_TRAJECTORY_LOGGING@Q} ]]; then
   export TUNIX_DISABLE_TRAJECTORY_LOGGING=${TUNIX_DISABLE_TRAJECTORY_LOGGING@Q}
 fi
 status=0
-bash -lc ${cmd_string@Q} > ${logfile@Q} 2>&1 || status=\$?
+set +e
+bash -lc ${cmd_string@Q} 2>&1 | tee ${logfile@Q}
+status=\${PIPESTATUS[0]}
+set -e
 echo HOST=\$(hostname) STATUS=\${status}
 exit \${status}
 EOF
@@ -226,7 +234,9 @@ remote_status_log="${LOG_DIR}/remote.status"
 
 rm -f "${remote_status_log}"
 
-run_remote "${remote_log}" > "${remote_status_log}" 2>&1 &
+run_remote "${remote_log}" 2>&1 |
+  tee /dev/stderr |
+  sed -n '/HOST=.*STATUS=/p' > "${remote_status_log}" &
 remote_pid=$!
 
 sleep 2

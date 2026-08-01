@@ -391,3 +391,18 @@ ordinary/LOO statistics. Local syntax checks passed. The Mac environment lacks
 JAX, Flax, and pytest, so CPU numerical tests and the 8192-token TPU compile
 smoke must run in the server environment before treating the change as
 validated.
+
+The first bounded `group_policy` TPU smoke reached the actor train step but
+aborted with `Cannot extract graph node from different trace level`. The cause
+was calling an NNX gradient transform from a `jax.lax.fori_loop` that closed
+over the model from the outer `nnx.jit` trace. Replaced those lax loops with
+static Python loops over the known actor microbatch/group sizes. All gradient
+calls now remain at the train step's NNX trace level; accumulation is still
+sequential and does not stack per-sample gradient trees. Added an outer
+`nnx.jit` scalar-model regression test specifically for this failure mode.
+
+The dual-worker launcher now streams both worker commands through `tee`.
+Worker-local copies remain in `workers/local.log` and `workers/remote.log`,
+while the suite's per-run `nohup.log` receives the complete combined output
+with worker headers. `remote.status` retains only the final remote host status,
+avoiding a third full log copy on worker 0.
