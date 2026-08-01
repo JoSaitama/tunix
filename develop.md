@@ -323,3 +323,14 @@ summary error: it means the rollout owner on worker 1 restarted or exited.
 Diagnose the finite worker-1 `remote.log` tail and both process states before
 changing model or training settings. Do not relaunch while either worker still
 has a Python training process.
+
+## 2026-08-01 operational handoff
+
+Added `start.md` as a self-contained handoff for preparing another two-worker
+TPU VM. It documents repository cloning, committed snapshot deployment,
+per-worker environment/model/dataset compatibility paths, finite disk and
+process checks, healthAgent OOM recovery, journal cleanup, repository-local
+experiment outputs, and detached smoke launches. The ziao2 procedure assumes
+the operator logs into worker 1 and launches worker 0 remotely with
+`REMOTE_WORKER_INDEX=0`; the canonical JAX process-host ordering remains
+worker 0 followed by worker 1.
