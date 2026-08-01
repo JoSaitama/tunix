@@ -10,8 +10,10 @@
 .idea
 .vscode
 .envrc
+pip-freeze-lhf-reference.txt
 
 # virtualenv/venv directories
+/.venv/
 /venv/
 /bin/
 /include/

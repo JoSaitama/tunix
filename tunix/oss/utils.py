@@ -64,8 +64,31 @@ def kaggle_pipeline(model_id: str, model_download_path: str):
   return kagglehub.model_download(model_id)
 
 
+def _has_local_hf_weights(model_download_path: str | None) -> bool:
+  """Returns whether a directory contains a loadable HF safetensors model."""
+  if not model_download_path or not os.path.isdir(model_download_path):
+    return False
+  if not os.path.isfile(os.path.join(model_download_path, 'config.json')):
+    return False
+  return any(
+      entry.is_file()
+      and (
+          entry.name.endswith('.safetensors')
+          or entry.name.endswith('.safetensors.index.json')
+      )
+      for entry in os.scandir(model_download_path)
+  )
+
+
 def hf_pipeline(model_id: str, model_download_path: str):
   """Download model from HuggingFace."""
+  if _has_local_hf_weights(model_download_path):
+    logging.info(
+        'Using existing local Hugging Face model without downloading: %s',
+        model_download_path,
+    )
+    return model_download_path
+
   token = os.environ.get('HF_TOKEN')
   all_files = hf.list_repo_files(model_id, token=token)
   filtered_files = [f for f in all_files if not f.startswith('original/')]

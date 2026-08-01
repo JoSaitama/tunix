@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REPO="${REPO:-/home/eve/tunix}"
+REPO="${REPO:-/home/jason_chia925_gmail_com/Project/tunix}"
 VENV="${VENV:-$REPO/.venv}"
 TPU_NAME="${TPU_NAME:-ziao-v5p16-flex7d-1-node}"
 ZONE="${ZONE:-us-east5-a}"
@@ -11,22 +11,52 @@ RUN_NAME="${RUN_NAME:-official-like}"
 RUN_SCRIPT="${RUN_SCRIPT:-examples/deepscaler/run_deepscaler_disagg_v5p16.sh}"
 ROLLOUT_ENGINE="${ROLLOUT_ENGINE:-vllm}"
 MESH_MODE="${MESH_MODE:-disagg}"
-TRAIN_DATA_PATH="${TRAIN_DATA_PATH:-/home/eve/tunix-hf-data/deepscaler_train.json}"
-EVAL_DATA_PATH="${EVAL_DATA_PATH:-/home/eve/tunix-hf-data/aime_eval.parquet}"
+TRAIN_DATA_PATH="${TRAIN_DATA_PATH:-/home/lhf_hongfu_gmail_com/tunix-hf-data/deepscaler_train.json}"
+EVAL_DATA_PATH="${EVAL_DATA_PATH:-/home/lhf_hongfu_gmail_com/tunix-hf-data/aime_eval.parquet}"
 MODEL_ID="${MODEL_ID:-deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B}"
+MODEL_PATH="${MODEL_PATH:-/home/lhf_hongfu_gmail_com/models/deepseek-r1-distill-qwen-1.5b}"
+TOKENIZER_PATH="${TOKENIZER_PATH:-${MODEL_PATH}}"
 HF_TOKEN_VALUE="${HF_TOKEN_VALUE:-dummy}"
 MAX_STEPS_OVERRIDE="${MAX_STEPS_OVERRIDE:-}"
+NUM_BATCHES="${NUM_BATCHES:-}"
 ROLLOUT_VLLM_INIT_WITH_RANDOM_WEIGHTS="${ROLLOUT_VLLM_INIT_WITH_RANDOM_WEIGHTS:-}"
 TUNIX_SKIP_FINAL_CHECKPOINT="${TUNIX_SKIP_FINAL_CHECKPOINT:-}"
 TUNIX_DISABLE_TRAJECTORY_LOGGING="${TUNIX_DISABLE_TRAJECTORY_LOGGING:-}"
+
+RUN_ROOT="${RUN_ROOT:-/home/jason_chia925_gmail_com/tunix-runs/${RUN_NAME}}"
+CACHE_ROOT="${CACHE_ROOT:-/home/jason_chia925_gmail_com/tunix-cache/${RUN_NAME}}"
+LOG_DIR="${RUN_ROOT}/logs"
+TB_DIR="${RUN_ROOT}/tensorboard"
+CKPT_DIR="${RUN_ROOT}/checkpoints"
+TMP_DIR="${CACHE_ROOT}/tmp"
+
+for required_file in \
+  "${TRAIN_DATA_PATH}" \
+  "${EVAL_DATA_PATH}" \
+  "${MODEL_PATH}/config.json" \
+  "${TOKENIZER_PATH}/tokenizer.json"; do
+  if [[ ! -r "${required_file}" ]]; then
+    echo "Required read-only input is not readable: ${required_file}" >&2
+    exit 1
+  fi
+done
+if ! compgen -G "${MODEL_PATH}/*.safetensors" >/dev/null && \
+   ! compgen -G "${MODEL_PATH}/*.safetensors.index.json" >/dev/null; then
+  echo "No safetensors weights found under MODEL_PATH=${MODEL_PATH}." >&2
+  exit 1
+fi
+if [[ ! -x "${VENV}/bin/python" ]]; then
+  echo "Python environment is missing: ${VENV}/bin/python" >&2
+  exit 1
+fi
 
 mapfile -t endpoint_ips < <(
   gcloud alpha compute tpus tpu-vm describe "${TPU_NAME}" \
     --zone="${ZONE}" \
     --format='value(networkEndpoints[].ipAddress)' | tr ';' '\n'
 )
-if [[ "${#endpoint_ips[@]}" -lt 2 ]]; then
-  echo "Expected at least two TPU worker IPs for ${TPU_NAME}." >&2
+if [[ "${#endpoint_ips[@]}" -ne 2 ]]; then
+  echo "Expected exactly two TPU worker IPs for ${TPU_NAME}; found ${#endpoint_ips[@]}." >&2
   exit 1
 fi
 
@@ -34,19 +64,19 @@ LOCAL_HOST="${LOCAL_HOST:-${endpoint_ips[0]}}"
 REMOTE_HOST="${REMOTE_HOST:-${endpoint_ips[${REMOTE_WORKER_INDEX}]}}"
 PROCESS_HOSTS="${PROCESS_HOSTS:-$(IFS=,; echo "${endpoint_ips[*]}")}"
 
-RUN_ROOT="/tmp/${RUN_NAME}"
-LOG_DIR="${RUN_ROOT}/logs"
-TB_DIR="${RUN_ROOT}/tensorboard"
-CKPT_DIR="${RUN_ROOT}/checkpoints"
-
-mkdir -p "${LOG_DIR}" "${TB_DIR}" "${CKPT_DIR}"
+mkdir -p "${LOG_DIR}" "${TB_DIR}" "${CKPT_DIR}" "${TMP_DIR}"
 
 base_cmd=(
   bash "${RUN_SCRIPT}"
   "data_config.train_data_path=${TRAIN_DATA_PATH}"
   "data_config.eval_data_path=${EVAL_DATA_PATH}"
   "model_config.model_id=${MODEL_ID}"
-  "tokenizer_config.tokenizer_path=${MODEL_ID}"
+  "model_config.model_download_path=${MODEL_PATH}"
+  "actor_model_config.model_download_path=${MODEL_PATH}"
+  "reference_model_config.model_download_path=${MODEL_PATH}"
+  "rollout_model_config.model_download_path=${MODEL_PATH}"
+  "tokenizer_config.tokenizer_path=${TOKENIZER_PATH}"
+  "vllm_config.model_version=${MODEL_PATH}"
   "rollout_engine=${ROLLOUT_ENGINE}"
   "rl_training_config.metrics_logging_options.log_dir=${TB_DIR}"
   "rl_training_config.checkpoint_root_directory=${CKPT_DIR}"
@@ -87,15 +117,34 @@ done
 
 cmd_string="$(printf '%q ' "${base_cmd[@]}")"
 
+echo "Resolved dual-worker launch:"
+echo "  REPO=${REPO}"
+echo "  VENV=${VENV}"
+echo "  TPU=${TPU_NAME} (${ZONE})"
+echo "  RUN_SCRIPT=${RUN_SCRIPT}"
+echo "  RUN_ROOT=${RUN_ROOT}"
+echo "  MODEL_PATH=${MODEL_PATH}"
+echo "  TRAIN_DATA_PATH=${TRAIN_DATA_PATH}"
+echo "  EVAL_DATA_PATH=${EVAL_DATA_PATH}"
+echo "  NUM_BATCHES=${NUM_BATCHES:-<launcher-default>}"
+echo "  COMMAND=${cmd_string}"
+
 run_worker() {
   local logfile="$1"
   cd "${REPO}"
   source "${VENV}/bin/activate"
-  mkdir -p "${LOG_DIR}" "${TB_DIR}" "${CKPT_DIR}"
+  mkdir -p "${LOG_DIR}" "${TB_DIR}" "${CKPT_DIR}" "${TMP_DIR}"
   export HF_TOKEN="${HF_TOKEN_VALUE}"
+  export HF_HOME="${CACHE_ROOT}/huggingface"
+  export XDG_CACHE_HOME="${CACHE_ROOT}/xdg"
+  export TMPDIR="${TMP_DIR}"
+  export PYTHONDONTWRITEBYTECODE=1
   export TUNIX_INIT_JAX_DISTRIBUTED=1
   export TUNIX_PROCESS_HOSTS="${PROCESS_HOSTS}"
   export SKIP_JAX_PRECOMPILE=true
+  if [[ -n "${NUM_BATCHES}" ]]; then
+    export num_batches="${NUM_BATCHES}"
+  fi
   if [[ -n "${TUNIX_SKIP_FINAL_CHECKPOINT}" ]]; then
     export TUNIX_SKIP_FINAL_CHECKPOINT
   fi
@@ -115,11 +164,18 @@ run_remote() {
 set -euo pipefail
 cd ${REPO}
 source ${VENV}/bin/activate
-mkdir -p ${LOG_DIR} ${TB_DIR} ${CKPT_DIR}
+mkdir -p ${LOG_DIR} ${TB_DIR} ${CKPT_DIR} ${TMP_DIR}
 export HF_TOKEN=${HF_TOKEN_VALUE}
+export HF_HOME=${CACHE_ROOT}/huggingface
+export XDG_CACHE_HOME=${CACHE_ROOT}/xdg
+export TMPDIR=${TMP_DIR}
+export PYTHONDONTWRITEBYTECODE=1
 export TUNIX_INIT_JAX_DISTRIBUTED=1
 export TUNIX_PROCESS_HOSTS=${PROCESS_HOSTS}
 export SKIP_JAX_PRECOMPILE=true
+if [[ -n ${NUM_BATCHES@Q} ]]; then
+  export num_batches=${NUM_BATCHES@Q}
+fi
 if [[ -n ${TUNIX_SKIP_FINAL_CHECKPOINT@Q} ]]; then
   export TUNIX_SKIP_FINAL_CHECKPOINT=${TUNIX_SKIP_FINAL_CHECKPOINT@Q}
 fi
