@@ -457,3 +457,11 @@ staged DTV. The checkpoint test inherited the server's optional
 final checkpointing for isolation. The shared mock generator now accepts and
 ignores the production `internal_request_tags` argument used for deterministic
 distributed rollout request IDs. Production training behavior is unchanged.
+
+The isolated checkpoint test still restored RL `global_steps=0`. This exposed a
+real final-checkpoint metadata regression: close-time saving forced model and
+optimizer state but omitted custom metadata, and the RL metadata callback still
+used the obsolete pre-increment `global_steps + 1` convention. Final checkpoint
+saves now include custom metadata, and actor/critic callbacks record the current
+completed global step because checkpoints are emitted on close after the RL
+loop increments it. Model and optimizer checkpoint contents are unchanged.

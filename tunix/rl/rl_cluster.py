@@ -602,11 +602,11 @@ class RLCluster:
         self._critic_trainer = rl_trainer.Trainer(
             model=self.critic,
             optimizer=self.cluster_config.training_config.critic_optimizer,
-            training_config=critic_config,
-            custom_checkpoint_metadata_fn=lambda: {
-                "global_step": self.global_steps + 1,
-                "role": Role.CRITIC.value,
-            },  # offset by 1 since global_step is incremented after the training loop in rl_learner. # pylint: disable=line-too-long
+          training_config=critic_config,
+          custom_checkpoint_metadata_fn=lambda: {
+              "global_step": self.global_steps,
+              "role": Role.CRITIC.value,
+          },
             metrics_logger=self._rl_metrics_logger,
             perf_tracer=self._perf,
             perf_tracer_v2=self._perf_v2,
@@ -686,9 +686,9 @@ class RLCluster:
           optimizer=self.cluster_config.training_config.actor_optimizer,
           training_config=actor_config,
           custom_checkpoint_metadata_fn=lambda: {
-              "global_step": self.global_steps + 1,
+              "global_step": self.global_steps,
               "role": Role.ACTOR.value,
-          },  # offset by 1 since global_step is incremented after the training loop in rl_learner. # pylint: disable=line-too-long
+          },
           metrics_logger=self._rl_metrics_logger,
           perf_tracer=self._perf,
           perf_tracer_v2=self._perf_v2,
