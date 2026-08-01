@@ -120,21 +120,32 @@ bash runs_xuesong/scripts/bootstrap_jason_env.sh
 The first `rm` target is the failed generated environment only. The pip command
 purges cache files owned by Jason; it does not uninstall LHF packages.
 
-After installation, run once on worker 0:
+After installation, verify imports on worker 0 without initializing the TPU:
 
 ```bash
 source .venv/bin/activate
 python -c 'import jax, tunix; print(jax.__version__); print(tunix.__file__)'
-python -c 'import jax; print(jax.devices())'
-python -m pytest -q \
-  tests/oss_utils_test.py \
-  tests/rl/self_inf_trainer_test.py \
-  tests/rl/rl_cluster_test.py \
-  tests/rl/agentic/agentic_grpo_learner_test.py \
-  tests/cli/grpo_main_test.py
+bash runs_xuesong/scripts/run_aime_reproduction_tests.sh
 ```
 
-Repeat only the import-origin and device checks on worker 1.
+The test wrapper forces `JAX_PLATFORMS=cpu`; unit tests must not acquire TPU
+devices. Repeat only the import-origin check on worker 1.
+
+### TPU-in-use test failure diagnosis
+
+An initial test invocation did not force CPU. JAX discovered the TPU backend,
+which was already owned by PID `3528798`. The result was 17 passing tests and
+69 repeated failures/errors with the same root exception:
+
+```text
+ABORTED: The TPU is already in use by process with pid 3528798
+```
+
+This does not indicate 69 code or environment failures. It confirms that JAX,
+pytest, and the repository imported successfully before device acquisition.
+Inspect the process once with `ps -fp 3528798`; do not terminate it without
+confirming ownership and purpose. CPU unit tests can run while the TPU is busy.
+A distributed smoke must wait until the allocated TPU slice is genuinely free.
 
 ## Reproduction commands
 
