@@ -465,3 +465,46 @@ used the obsolete pre-increment `global_steps + 1` convention. Final checkpoint
 saves now include custom metadata, and actor/critic callbacks record the current
 completed global step because checkpoints are emitted on close after the RL
 loop increments it. Model and optimizer checkpoint contents are unchanged.
+
+## 2026-08-01 reproducible CPU gate before a dual-worker TPU smoke
+
+The server CPU gate must use two independent pytest processes. The general
+suite initializes the JAX CPU backend with four devices, while
+`AgenticGrpoLearnerTest.setUpClass()` must call `chex.set_n_cpu_devices(2)`
+before any backend initialization. Combining them in one pytest process causes
+a test-setup error even when the implementation is correct. Optional
+SGLang-JAX tests are excluded because the AIME experiments use vLLM and the
+server environment intentionally does not install `sgl_jax`.
+
+Run the general gate on worker 0:
+
+```bash
+timeout --signal=TERM --kill-after=10s 600s \
+  env JAX_PLATFORMS=cpu \
+  ./.venv/bin/python -m pytest -q -x \
+    -k 'not sglang_jax' \
+    tests/cli/recipes/deepscaler_data_test.py \
+    tests/rl/memory_bounded_curation_test.py \
+    tests/rl/fixed_filter_trainer_test.py \
+    tests/rl/self_inf_loo_trainer_test.py \
+    tests/rl/self_inf_trainer_test.py \
+    tests/rl/rl_cluster_test.py \
+    tests/cli/grpo_main_test.py
+```
+
+Then run the Agentic gate in a fresh process on worker 0:
+
+```bash
+timeout --signal=TERM --kill-after=10s 300s \
+  env JAX_PLATFORMS=cpu \
+  ./.venv/bin/python -m pytest -q -x \
+    tests/rl/agentic/agentic_grpo_learner_test.py::AgenticGrpoLearnerTest::test_checkpointing \
+    tests/rl/agentic/agentic_grpo_learner_test.py::AgenticGrpoLearnerTest::test_customized_agent_env
+```
+
+Both commands must return zero before source deployment to worker 1. This CPU
+gate validates routing, dataset filtering, staged trainer APIs, small-model
+numerics, vLLM cluster construction, Agentic integration, and checkpoint
+metadata. It does not replace the 8192-token dual-worker TPU smoke, which is
+still required to validate SPMD sharding, TPU compilation/HBM, distributed
+rollout, and shutdown behavior.
