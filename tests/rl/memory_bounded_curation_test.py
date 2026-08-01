@@ -86,11 +86,7 @@ class MemoryBoundedCurationTest(absltest.TestCase):
     trainer.with_gen_model_input_fn(lambda x: {"feature": x})
     train_step, _ = trainer.jit_train_and_eval_step(cache_nnx_graph=True)
 
-    loss, aux, grad_norm = train_step(
-        model,
-        trainer.optimizer,
-        jnp.asarray([4.0, -1.0]),
-    )
+    loss, aux, grad_norm = train_step(jnp.asarray([4.0, -1.0]))
 
     self.assertAlmostEqual(float(loss), 4.0)
     self.assertIsNotNone(aux)

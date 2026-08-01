@@ -431,3 +431,11 @@ empty-answer counts, raises on missing required columns or an empty retained
 dataset, and does not synthesize answers from `solution`. Added recipe tests for
 empty fields, no solution recovery, missing columns, and an entirely invalid
 dataset. The original JSON remains read-only and unchanged.
+
+The first staged-JIT CPU regression test called the returned bound train step
+with the old unbound `_train_step(model, optimizer, inputs)` signature. The
+production training loop correctly calls the bound staged function with only
+`train_example`. Updated the regression test to use that production signature.
+CPU tests are a fast gate for Python, NNX/JIT API, filtering, and small-model
+numerical behavior; they do not validate TPU SPMD sharding, 8192-token compile
+memory, or dual-host distributed execution, which remain TPU smoke-test gates.
