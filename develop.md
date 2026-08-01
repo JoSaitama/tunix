@@ -1,5 +1,19 @@
 # AIME GRPO vLLM Development Log
 
+## 2026-08-01 — GSM8K policy-method port for Agentic AIME/vLLM
+
+- Added policy-score/full-update ordinary DTV and leave-one-out DTV trainers while preserving the Agentic singleton-batch restoration, static input axes, gradient norm return, and full-loss update path.
+- Added the GSM8K fixed-filter implementation for `random_batch`, `random_group`, `reward_batch`, and `reward_group`. The reward method ranks the already computed advantages and does not recompute rewards or advantages after filtering.
+- Added deterministic TRAIN-only reward-rank mismatch. It reverses reward assignments inside selected prompt groups before advantage computation, while evaluation rewards remain clean.
+- Extended Agentic `TrainExample` with fixed-filter random values and rewards, and derived stable random values from experiment seed, expected step, and prompt-group identity so asynchronous completion order does not control selection.
+- Added RL trainer routing for policy DTV, policy LOO DTV, and fixed filtering. The existing `self_inf_batch` and `self_inf_group` total-loss variants remain unchanged and distinct.
+- Added `runs_xuesong/scripts/run_aime_seeded_full.sh` and `run_aime_reward_rank_noise_suite.sh`. Run checkpoints are stored under `runs_xuesong/runs/<RUN_NAME>` and logs under `runs_xuesong/logs/<RUN_NAME>` using the same run name.
+- Extended the dual-worker launcher to pass the experiment, mismatch, fixed-filter, LOO, and decision-log environment variables to worker 1 explicitly.
+- Added focused reward-rank mismatch and fixed-filter selection tests.
+- Validation performed locally without TPU execution: Python byte-compilation, Bash syntax checking, and `git diff --check` passed. Pytest was not run because the Mac system Python does not have pytest installed; the tests must be run in the server environment.
+- Confirmed the port boundary: AIME retains its original distributed vLLM rollout, two-worker orchestration, online reward computation, Agentic queue/coalescing, resharding, checkpoint, and dataset-loading paths. GSM8K is used only as the semantic reference for score gradients, LOO/fixed-filter selection, deterministic seeds, reward-rank mismatch, method names, and output naming.
+- The stable reproduction branch `for_GRPO_vLLM` must remain unchanged. These uncommitted changes should be committed on a new branch named `for_GRPO_vLLM_aime`.
+
 ## Execution boundary
 
 - Source changes are made in the Mac checkout, then committed and pushed.
@@ -332,5 +346,6 @@ per-worker environment/model/dataset compatibility paths, finite disk and
 process checks, healthAgent OOM recovery, journal cleanup, repository-local
 experiment outputs, and detached smoke launches. The ziao2 procedure assumes
 the operator logs into worker 1 and launches worker 0 remotely with
-`REMOTE_WORKER_INDEX=0`; the canonical JAX process-host ordering remains
-worker 0 followed by worker 1.
+`REMOTE_WORKER_INDEX=1`; the canonical JAX process-host ordering remains
+worker 0 followed by worker 1. This matches the established ziao1 launch
+direction after the ziao2 login configuration was updated.

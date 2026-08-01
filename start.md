@@ -17,12 +17,12 @@ remote host:       worker 1
 REMOTE_WORKER_INDEX=1
 ```
 
-The planned topology for the new ziao2 node is reversed:
+The planned topology for the new ziao2 node matches ziao1:
 
 ```text
-direct/login host: worker 1
-remote host:       worker 0
-REMOTE_WORKER_INDEX=0
+direct/login host: worker 0
+remote host:       worker 1
+REMOTE_WORKER_INDEX=1
 ```
 
 The wrapper may be launched from either worker. `REMOTE_WORKER_INDEX` must be
@@ -53,10 +53,10 @@ export TPU_NAME='<ziao2 TPU VM name>'
 export ZONE='<ziao2 zone>'
 export BRANCH='for_GRPO_vLLM'
 export REPO='/home/jason_chia925_gmail_com/Project/tunix'
-export REMOTE_WORKER_INDEX=0
+export REMOTE_WORKER_INDEX=1
 ```
 
-For the reversed ziao2 topology, the current host must be worker 1:
+For the ziao2 topology, the current host must be worker 0:
 
 ```bash
 hostname
@@ -70,23 +70,23 @@ gcloud alpha compute tpus tpu-vm describe "$TPU_NAME" \
 Expected properties:
 
 ```text
-hostname ends in -w-1
+hostname ends in -w-0
 state: READY
 exactly two network endpoints
 acceleratorType: v5p-16
 ```
 
-Confirm that the direct worker can reach worker 0:
+Confirm that the direct worker can reach worker 1:
 
 ```bash
 gcloud alpha compute tpus tpu-vm ssh "$TPU_NAME" \
   --zone="$ZONE" \
-  --worker=0 \
+  --worker=1 \
   --internal-ip \
   --command='hostname; whoami; id; sudo -n true && echo SUDO_OK'
 ```
 
-Do not continue unless the output host ends in `-w-0` and passwordless sudo is
+Do not continue unless the output host ends in `-w-1` and passwordless sudo is
 available on the remote deployment account.
 
 ## 3. Clone the canonical repository on the direct worker
@@ -143,7 +143,7 @@ find /home -maxdepth 6 -type f \
   -print 2>/dev/null | sort
 ```
 
-Run the same command on worker 0 from the direct worker:
+Run the same command on worker 1 from the direct worker:
 
 ```bash
 gcloud alpha compute tpus tpu-vm ssh "$TPU_NAME" \
@@ -231,7 +231,7 @@ test -r /home/lhf_hongfu_gmail_com/tunix-hf-data/aime_eval.parquet &&
 echo ASSETS_READY
 ```
 
-## 6. Deploy the same committed source to remote worker 0
+## 6. Deploy the same committed source to remote worker 1
 
 Create the remote compatibility repository as the remote SSH account:
 
@@ -268,7 +268,7 @@ gcloud alpha compute tpus tpu-vm ssh "$TPU_NAME" \
 
 Create the remote `.venv`, model, and dataset compatibility links using the
 worker-0 physical paths discovered in section 4. Do not copy model weights if
-worker 0 already has them.
+worker 1 already has them.
 
 Compare source checksums:
 
@@ -372,7 +372,7 @@ pgrep -a -x python3 || true
 pgrep -a -f 'grpo_main|deepscaler|vllm' || true
 ```
 
-On remote worker 0:
+On remote worker 1:
 
 ```bash
 gcloud alpha compute tpus tpu-vm ssh "$TPU_NAME" \
@@ -391,10 +391,10 @@ The local `gcloud.py ... ssh` process is only the SSH client and does not own
 the TPU. Do not launch if an old JAX, vLLM, GRPO, pytest, or training process is
 present. Do not run a one-worker JAX TPU availability test.
 
-## 9. Baseline one-batch smoke from direct worker 1
+## 9. Baseline one-batch smoke from direct worker 0
 
-This is the reversed ziao2 launch. It runs locally on worker 1 and asks the
-wrapper to start worker 0 remotely.
+This ziao2 launch runs locally on worker 0 and asks the wrapper to start worker
+1 remotely, matching the established ziao1 direction.
 
 ```bash
 cd "$REPO"

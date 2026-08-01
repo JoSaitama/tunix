@@ -16,7 +16,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Any, Callable, Literal
 
 from flax import nnx
 import jax
@@ -42,6 +42,15 @@ class SelfInfTrainer(rl_trainer.Trainer):
     self.scope = scope
     self.num_generations = num_generations
     self.dot_threshold = dot_threshold
+    self._score_loss_fn: Callable[..., Any] | None = None
+    self._score_loss_has_aux = False
+
+  def _with_score_loss_fn(
+      self, score_loss_fn: Callable[..., Any], *, has_aux: bool
+  ) -> None:
+    """Configures a score-only loss without changing the update loss."""
+    self._score_loss_fn = score_loss_fn
+    self._score_loss_has_aux = has_aux
 
   def with_num_generations(self, num_generations: int) -> None:
     self.num_generations = num_generations
@@ -95,24 +104,46 @@ class SelfInfTrainer(rl_trainer.Trainer):
       per_sample_loss = out
       per_sample_aux = None
 
+    score_grads = per_sample_grads
+    if self._score_loss_fn is not None:
+
+      def per_sample_score_loss_fn(model, inputs):
+        inputs = jax.tree_util.tree_map(_restore_batch_dim, inputs)
+        if isinstance(inputs, dict):
+          return self._score_loss_fn(model, **inputs)
+        return self._score_loss_fn(model, inputs)
+
+      score_grad_fn = nnx.value_and_grad(
+          per_sample_score_loss_fn,
+          argnums=nnx.DiffState(0, wrt),
+          has_aux=self._score_loss_has_aux,
+      )
+      vmapped_score_grad_fn = jax.vmap(
+          score_grad_fn, in_axes=(None, inputs_in_axes)
+      )
+      if self._score_loss_has_aux:
+        (_, _), score_grads = vmapped_score_grad_fn(model, inputs)
+      else:
+        _, score_grads = vmapped_score_grad_fn(model, inputs)
+
     leaves = jax.tree_util.tree_leaves(per_sample_grads)
     if not leaves:
       raise ValueError("No gradients found for self-influence curation.")
     batch_size = int(leaves[0].shape[0])
 
-    def _scores_batch_scope():
+    def _scores_batch_scope(gradient_tree):
       mean_grads = jax.tree_util.tree_map(
-          lambda g: jnp.mean(g, axis=0), per_sample_grads
+          lambda g: jnp.mean(g, axis=0), gradient_tree
       )
 
       def leaf_score(g, m):
         reduce_axes = tuple(range(1, g.ndim))
         return jnp.sum(g * m, axis=reduce_axes)
 
-      scores = jax.tree_util.tree_map(leaf_score, per_sample_grads, mean_grads)
+      scores = jax.tree_util.tree_map(leaf_score, gradient_tree, mean_grads)
       return jax.tree_util.tree_reduce(lambda a, b: a + b, scores)
 
-    def _scores_group_scope():
+    def _scores_group_scope(gradient_tree):
       self._validate_group_config(batch_size)
       group_size = int(self.num_generations)
       num_groups = batch_size // group_size
@@ -123,14 +154,14 @@ class SelfInfTrainer(rl_trainer.Trainer):
         reduce_axes = tuple(range(2, g2.ndim))
         return jnp.sum(g2 * mean_g[:, None, ...], axis=reduce_axes)
 
-      scores = jax.tree_util.tree_map(leaf_score, per_sample_grads)
+      scores = jax.tree_util.tree_map(leaf_score, gradient_tree)
       scores = jax.tree_util.tree_reduce(lambda a, b: a + b, scores)
       return scores.reshape((batch_size,))
 
     if self.scope == "group":
-      scores = _scores_group_scope()
+      scores = _scores_group_scope(score_grads)
     else:
-      scores = _scores_batch_scope()
+      scores = _scores_batch_scope(score_grads)
 
     mask = scores >= self.dot_threshold
     mask_f = mask.astype(jnp.float32)

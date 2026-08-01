@@ -46,6 +46,9 @@ from tunix.perf import trace as perf_trace
 from tunix.perf.experimental import constants as perf_constants
 from tunix.perf.experimental import tracer as perf_tracer_v2
 from tunix.rl import reshard
+from tunix.rl import fixed_filter_trainer
+from tunix.rl import self_inf_loo_policy_trainer
+from tunix.rl import self_inf_policy_trainer
 from tunix.rl import self_inf_trainer
 from tunix.rl import trainer as rl_trainer
 from tunix.rl import utils as rl_utils
@@ -157,7 +160,16 @@ class RLTrainingConfig(peft_trainer.TrainingConfig):
           self.mini_batch_size // self.train_micro_batch_size
       )
 
-    valid_variants = {None, "self_inf_batch", "self_inf_group"}
+    valid_variants = {
+        None,
+        "self_inf_batch",
+        "self_inf_group",
+        "self_inf_batch_policy",
+        "self_inf_group_policy",
+        "self_inf_batch_loo_policy",
+        "self_inf_group_loo_policy",
+        "fixed_filter",
+    }
     if self.dynamic_batch_curation_variant not in valid_variants:
       raise ValueError(
           "dynamic_batch_curation_variant must be one of "
@@ -624,7 +636,44 @@ class RLCluster:
           "scope": "group",
           "dot_threshold": actor_config.self_influence_dot_threshold,
       }
-    if actor_trainer_cls is self_inf_trainer.SelfInfTrainer:
+    elif actor_config.dynamic_batch_curation_variant in (
+        "self_inf_batch_policy", "self_inf_group_policy"
+    ):
+      actor_trainer_cls = self_inf_policy_trainer.PolicySelfInfTrainer
+      actor_trainer_kwargs = {
+          "scope": (
+              "group"
+              if "group" in actor_config.dynamic_batch_curation_variant
+              else "batch"
+          ),
+          "dot_threshold": actor_config.self_influence_dot_threshold,
+      }
+    elif actor_config.dynamic_batch_curation_variant in (
+        "self_inf_batch_loo_policy", "self_inf_group_loo_policy"
+    ):
+      actor_trainer_cls = self_inf_loo_policy_trainer.PolicySelfInfLooTrainer
+      actor_trainer_kwargs = {
+          "scope": (
+              "group"
+              if "group" in actor_config.dynamic_batch_curation_variant
+              else "batch"
+          ),
+          "num_generations": int(os.getenv("TUNIX_GRPO_NUM_GENERATIONS", "8")),
+          "min_keep_fraction": float(
+              os.getenv("TUNIX_DBC_SELF_INF_MIN_KEEP_FRACTION", "0.25")
+          ),
+          "decisions_path": os.getenv("TUNIX_DBC_DECISIONS_PATH"),
+      }
+    elif actor_config.dynamic_batch_curation_variant == "fixed_filter":
+      actor_trainer_cls = fixed_filter_trainer.FixedFilterTrainer
+      actor_trainer_kwargs = {
+          "method": os.environ["TUNIX_FIXED_FILTER_METHOD"],
+          "scope": os.environ["TUNIX_FIXED_FILTER_SCOPE"],
+          "filter_ratio": float(os.environ["TUNIX_FIXED_FILTER_RATIO"]),
+          "num_generations": int(os.getenv("TUNIX_GRPO_NUM_GENERATIONS", "8")),
+          "decisions_path": os.getenv("TUNIX_DBC_DECISIONS_PATH"),
+      }
+    if issubclass(actor_trainer_cls, self_inf_trainer.SelfInfTrainer):
       logging.info(
           "Using SelfInfTrainer for actor updates (scope=%s, dot_threshold=%s).",
           actor_trainer_kwargs["scope"],

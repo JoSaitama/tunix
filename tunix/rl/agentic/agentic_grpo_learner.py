@@ -30,6 +30,7 @@ The data flow is designed around an asynchronous producer-consumer pattern:
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 import os
 from typing import Any, Dict, List, Sequence, Type, TypeVar
 
@@ -42,6 +43,9 @@ from tunix.perf.experimental import constants as perf_constants
 from tunix.rl import common
 from tunix.rl import function_registry
 from tunix.rl import rl_cluster as rl_cluster_lib
+from tunix.rl import fixed_filter_trainer
+from tunix.rl import reward_rank_noise
+from tunix.rl import self_inf_loo_trainer
 from tunix.rl import self_inf_trainer
 from tunix.rl import utils as rl_utils
 from tunix.rl.agentic import agentic_rl_learner
@@ -240,6 +244,18 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
         loss_fn,
         has_aux=True,
     )
+    if hasattr(self.rl_cluster.actor_trainer, "with_policy_score_loss_fn"):
+      policy_only_config = dataclasses.replace(self.algo_config, beta=0.0)
+      score_loss_fn = lambda model, train_example, algo_config: policy_loss_fn(
+          model,
+          train_example,
+          algo_config=policy_only_config,
+          pad_id=self.rl_cluster.rollout.pad_id(),
+          eos_id=self.rl_cluster.rollout.eos_id(),
+      )
+      self.rl_cluster.actor_trainer.with_policy_score_loss_fn(
+          score_loss_fn, has_aux=True
+      )
     self.rl_cluster.actor_trainer.with_gen_model_input_fn(
         lambda x: {
             "train_example": x,
@@ -253,32 +269,47 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
         "pg_clipfrac": np.mean,
         "ppo_kl": np.mean,
     }
-    if isinstance(self.rl_cluster.actor_trainer, self_inf_trainer.SelfInfTrainer):
+    if isinstance(
+        self.rl_cluster.actor_trainer,
+        (
+            self_inf_trainer.SelfInfTrainer,
+            self_inf_loo_trainer.SelfInfLooTrainer,
+        ),
+    ):
       variant = (
           self.rl_cluster.cluster_config.training_config
           .dynamic_batch_curation_variant
       )
-      if variant == "self_inf_group":
+      if "group" in variant:
         if self.algo_config.num_generations <= 1:
           raise ValueError(
               "self_inf_group requires agentic_grpo_config.num_generations > 1."
           )
-        self.rl_cluster.actor_trainer.with_num_generations(
-            self.algo_config.num_generations
-        )
+        if hasattr(self.rl_cluster.actor_trainer, "with_num_generations"):
+          self.rl_cluster.actor_trainer.with_num_generations(
+              self.algo_config.num_generations
+          )
       logging.info(
           "Enabled self-influence actor trainer (variant=%s, scope=%s, "
           "num_generations=%s, dot_threshold=%s).",
           variant,
           self.rl_cluster.actor_trainer.scope,
           self.rl_cluster.actor_trainer.num_generations,
-          self.rl_cluster.actor_trainer.dot_threshold,
+          getattr(self.rl_cluster.actor_trainer, "dot_threshold", None),
       )
       rl_metrics_to_log.update({
           "skipped_samples": np.mean,
           "self_inf_dot_mean": np.mean,
           "self_inf_dot_std": np.mean,
           "self_inf_kept_fraction": np.mean,
+      })
+    if isinstance(
+        self.rl_cluster.actor_trainer, fixed_filter_trainer.FixedFilterTrainer
+    ):
+      rl_metrics_to_log.update({
+          "skipped_samples": np.mean,
+          "fixed_filter_kept_fraction": np.mean,
+          "fixed_filter_target_count": np.mean,
       })
     self.rl_cluster.actor_trainer.with_rl_metrics_to_log(rl_metrics_to_log)
     self.rl_cluster.actor_trainer.with_tqdm_metrics_to_display([
@@ -500,6 +531,38 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
           expected_step=expected_step,
       )
 
+      noise_config = reward_rank_noise.config_from_env()
+      if mode == rl_cluster_lib.Mode.TRAIN and noise_config.enabled:
+        audit = reward_rank_noise.apply_reward_rank_noise(
+            rewards=np.asarray(rewards),
+            prompts=original_inputs["prompts"],
+            num_generations=self.algo_config.num_generations,
+            config=noise_config,
+        )
+        rewards = jnp.asarray(audit.corrupted_rewards)
+        self.rl_cluster.buffer_metrics_async(
+            {
+                "noise/configured_fraction": (noise_config.fraction, np.mean),
+                "noise/selected_group_fraction": (
+                    float(np.mean(audit.selected_groups)), np.mean
+                ),
+                "noise/effective_group_fraction": (
+                    float(np.mean(audit.effective_groups)), np.mean
+                ),
+                "noise/changed_completion_fraction": (
+                    float(np.mean(audit.changed_completions)), np.mean
+                ),
+                "noise/reward_assignment_abs_delta": (
+                    float(np.mean(np.abs(
+                        audit.corrupted_rewards - audit.clean_rewards
+                    ))),
+                    np.mean,
+                ),
+            },
+            mode=mode,
+            step=expected_step,
+        )
+
       advantage_estimator = function_registry.get_advantage_estimator(
           self.algo_config.advantage_estimator
       )
@@ -517,6 +580,19 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
         completion_mask = jnp.zeros_like(completion_mask)
 
     policy_versions = np.array(policy_versions_list, dtype=np.int32)
+    seed = int(os.getenv("TUNIX_EXPERIMENT_SEED", "0"))
+    identity = str(
+        group_id if group_id is not None else original_inputs["prompts"][0]
+    )
+    random_seed = int.from_bytes(
+        hashlib.sha256(
+            f"fixed-filter-v1\0{seed}\0{expected_step}\0{identity}".encode()
+        ).digest()[:8],
+        "big",
+    )
+    filter_random_values = np.random.default_rng(random_seed).random(
+        (self.algo_config.num_generations, 2)
+    )
 
     # Log completion lengths, rewards and env time.
     agg_completion_mask = completion_mask.sum(axis=-1)
@@ -583,6 +659,8 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
         completion_mask=completion_mask,
         ref_per_token_logps=ref_per_token_logps,
         advantages=advantages,
+        rewards=rewards,
+        filter_random_values=filter_random_values,
         old_per_token_logps=old_per_token_logps,
         policy_version=policy_versions,
     )
