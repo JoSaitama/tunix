@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import functools
 from typing import Any, Callable
 
 from flax import nnx
@@ -17,6 +18,10 @@ from tunix.rl import self_inf_trainer
 
 class PolicySelfInfTrainer(self_inf_trainer.SelfInfTrainer):
   """Scores ordinary DTV with policy gradients and updates total gradients."""
+
+  def clear_jit_cache(self):
+    super().clear_jit_cache()
+    self._staged_policy_train_step = None
 
   def with_policy_score_loss_fn(
       self, score_loss_fn: Callable[..., Any], *, has_aux: bool = False
@@ -71,3 +76,86 @@ class PolicySelfInfTrainer(self_inf_trainer.SelfInfTrainer):
           "self_inf_kept_fraction": kept / float(batch_size),
       })
     return final_loss, final_aux, grad_norm
+
+  def jit_train_and_eval_step(
+      self, skip_jit: bool = False, cache_nnx_graph: bool = False
+  ):
+    """Builds bounded single-sample JITs with Python orchestration."""
+    if skip_jit:
+      return super().jit_train_and_eval_step(True, cache_nnx_graph)
+    if getattr(self, "_staged_policy_train_step", None) is not None:
+      return self._staged_policy_train_step, self._jitted_eval_step_fn
+
+    # Let the base class shard optimizer state and construct the normal eval
+    # step. Merely wrapping _train_step does not compile or execute it.
+    _, eval_step = super().jit_train_and_eval_step(False, cache_nnx_graph)
+    self._jitted_eval_step_fn = eval_step
+    wrt = nnx.LoRAParam if self._lora_enabled else nnx.Param
+
+    def score_sample(model, sample):
+      grad_fn = memory_bounded_curation.make_grad_fn(
+          self._score_loss_fn,
+          wrt=wrt,
+          has_aux=self._score_loss_has_aux,
+      )
+      _, gradient = grad_fn(model, sample)
+      return gradient
+
+    def update_sample(model, sample):
+      grad_fn = memory_bounded_curation.make_grad_fn(
+          self.loss_fn, wrt=wrt, has_aux=self._has_aux
+      )
+      return grad_fn(model, sample)
+
+    def apply_update(model, optimizer, gradients):
+      grad_norm = optax.global_norm(gradients)
+      optimizer.update(model, gradients)
+      return grad_norm
+
+    score_step = nnx.jit(score_sample)
+    update_step = nnx.jit(update_sample)
+    apply_step = nnx.jit(apply_update, donate_argnames=("optimizer",))
+    if cache_nnx_graph:
+      score_step = nnx.cached_partial(score_step, self.model)
+      update_step = nnx.cached_partial(update_step, self.model)
+      apply_step = nnx.cached_partial(
+          apply_step, self.model, self.optimizer
+      )
+    else:
+      score_step = functools.partial(score_step, self.model)
+      update_step = functools.partial(update_step, self.model)
+      apply_step = functools.partial(apply_step, self.model, self.optimizer)
+
+    def staged_train_step(raw_inputs):
+      inputs = self.gen_model_input_fn(raw_inputs)
+      stats = memory_bounded_curation.staged_dtv_statistics(
+          score_step,
+          inputs,
+          scope=self.scope,
+          group_size=self.num_generations,
+      )
+      scores = stats["standard_score"]
+      mask = scores >= self.dot_threshold
+      final_loss, final_aux, final_grads = (
+          memory_bounded_curation.staged_masked_value_and_grad(
+              update_step,
+              inputs,
+              mask,
+              has_aux=self._has_aux,
+          )
+      )
+      grad_norm = apply_step(final_grads)
+      if self._has_aux and isinstance(final_aux, dict):
+        mask_f = mask.astype(jnp.float32)
+        kept = jnp.sum(mask_f)
+        size = memory_bounded_curation.batch_size(inputs)
+        final_aux.update({
+            "skipped_samples": jnp.asarray(size) - kept,
+            "self_inf_dot_mean": jnp.mean(scores),
+            "self_inf_dot_std": jnp.std(scores),
+            "self_inf_kept_fraction": kept / float(size),
+        })
+      return final_loss, final_aux, grad_norm
+
+    self._staged_policy_train_step = staged_train_step
+    return staged_train_step, eval_step

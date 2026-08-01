@@ -18,10 +18,36 @@ Returns a raw grain.MapDataset ready for post_init_dataset().
 Each element has keys: "prompts", "question", "answer".
 """
 
+from absl import logging
 import datasets as datasets_lib
 import fsspec
 import grain
 import pandas as pd
+
+
+def _filter_training_rows(train_df: pd.DataFrame) -> pd.DataFrame:
+  """Deterministically removes rows that cannot be math-rewarded."""
+  required = {"problem", "answer"}
+  missing = sorted(required - set(train_df.columns))
+  if missing:
+    raise ValueError(f"DeepScaleR training data is missing columns: {missing}")
+
+  problem_present = train_df["problem"].fillna("").astype(str).str.strip().ne("")
+  answer_present = train_df["answer"].fillna("").astype(str).str.strip().ne("")
+  empty_problem = int((~problem_present).sum())
+  empty_answer = int((problem_present & ~answer_present).sum())
+  retained = train_df.loc[problem_present & answer_present].reset_index(drop=True)
+  logging.info(
+      "DeepScaleR train filtering: input=%d retained=%d "
+      "empty_problem=%d empty_answer=%d",
+      len(train_df),
+      len(retained),
+      empty_problem,
+      empty_answer,
+  )
+  if retained.empty:
+    raise ValueError("DeepScaleR training data has no non-empty problem/answer rows.")
+  return retained
 
 
 def create_dataset(
@@ -64,6 +90,7 @@ def create_dataset(
 
   with fsspec.open(train_data_path) as f:
     train_df = pd.read_json(f)
+  train_df = _filter_training_rows(train_df)
   with fsspec.open(eval_data_path, "rb") as f:
     eval_df = pd.read_parquet(f)
 

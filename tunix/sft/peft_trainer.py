@@ -628,13 +628,15 @@ class PeftTrainer:
         skip_jit, cache_nnx_graph
     )
     if not skip_jit:
-      cache_size = train_step.func.jitted_fn._cache_size()  # pytype: disable=attribute-error
-      logging.log_if(
-          logging.INFO,
-          f"Compiled train_step cache size: {cache_size}",
-          condition=cache_size not in self._jit_cache,
-      )
-      self._jit_cache.add(cache_size)
+      jitted_fn = getattr(getattr(train_step, "func", None), "jitted_fn", None)
+      if jitted_fn is not None:
+        cache_size = jitted_fn._cache_size()  # pytype: disable=attribute-error
+        logging.log_if(
+            logging.INFO,
+            f"Compiled train_step cache size: {cache_size}",
+            condition=cache_size not in self._jit_cache,
+        )
+        self._jit_cache.add(cache_size)
 
     if eval_ds:
       self._run_eval(eval_ds, eval_step)

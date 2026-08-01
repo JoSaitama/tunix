@@ -406,3 +406,28 @@ Worker-local copies remain in `workers/local.log` and `workers/remote.log`,
 while the suite's per-run `nohup.log` receives the complete combined output
 with worker headers. `remote.status` retains only the final remote host status,
 avoiding a third full log copy on worker 0.
+
+## 2026-08-01 staged policy DTV compilation and dataset validation
+
+The static-loop 8192-token smoke remained in first-step tracing/compilation for
+approximately one hour while both process hosts stayed alive. Worker 0 consumed
+nearly one CPU core continuously and held the TPU, but the run produced no
+post-rollout log or exit code. Static unrolling is therefore not an acceptable
+final compilation strategy even though it avoids the NNX nested-trace error.
+
+Policy DTV and Policy DTV-LOO now override trainer JIT construction with three
+separate reusable programs: a one-sample policy-only score gradient, a
+one-sample full Policy+KL update gradient, and optimizer apply. Python-level
+orchestration invokes the two gradient programs sequentially, accumulates exact
+batch/group ordinary or LOO statistics, applies the unchanged mask/cap rules,
+and calls optimizer apply once. Each gradient program compiles for one 8192
+trajectory rather than tracing all score and update reverse passes into one
+large HLO module. The base trainer's JIT cache logging now tolerates this
+composite staged train step.
+
+The DeepScaleR loader now deterministically removes rows with empty `problem`
+or `answer` fields before shuffling. It logs input, retained, empty-problem, and
+empty-answer counts, raises on missing required columns or an empty retained
+dataset, and does not synthesize answers from `solution`. Added recipe tests for
+empty fields, no solution recovery, missing columns, and an entirely invalid
+dataset. The original JSON remains read-only and unchanged.

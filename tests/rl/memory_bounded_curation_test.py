@@ -68,7 +68,7 @@ class MemoryBoundedCurationTest(absltest.TestCase):
     np.testing.assert_allclose(stats["standard_score"], [0.0, 0.0, 5.0, 7.5])
     np.testing.assert_allclose(stats["loo_score"], [-1.0, -1.0, 6.0, 6.0])
 
-  def test_policy_trainer_runs_under_outer_nnx_jit(self):
+  def test_policy_trainer_uses_staged_jits(self):
     model = _ScalarModel()
     trainer = self_inf_policy_trainer.PolicySelfInfTrainer(
         model=model,
@@ -84,7 +84,7 @@ class MemoryBoundedCurationTest(absltest.TestCase):
     trainer.with_loss_fn(_update_loss, has_aux=True)
     trainer.with_policy_score_loss_fn(_score_loss)
     trainer.with_gen_model_input_fn(lambda x: {"feature": x})
-    train_step = nnx.jit(trainer._train_step)
+    train_step, _ = trainer.jit_train_and_eval_step(cache_nnx_graph=True)
 
     loss, aux, grad_norm = train_step(
         model,

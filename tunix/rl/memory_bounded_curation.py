@@ -46,6 +46,11 @@ def tree_dot(left: Any, right: Any) -> jax.Array:
   )
 
 
+_staged_tree_add = jax.jit(tree_add)
+_staged_tree_scale = jax.jit(tree_scale)
+_staged_tree_dot = jax.jit(tree_dot)
+
+
 def make_grad_fn(
     loss_fn: Callable[..., Any], *, wrt: type, has_aux: bool
 ) -> Callable[..., Any]:
@@ -180,3 +185,90 @@ def masked_value_and_grad(
   mean_gradient = tree_scale(gradient_sum_value, 1.0 / denominator)
   mean_aux = tree_scale(aux_sum, 1.0 / denominator) if has_aux else None
   return loss_sum / denominator, mean_aux, mean_gradient
+
+
+def staged_dtv_statistics(
+    score_step: Callable[[Any], Any],
+    inputs: Any,
+    *,
+    scope: str,
+    group_size: int | None,
+) -> dict[str, jax.Array]:
+  """Computes exact DTV statistics across separately compiled score calls."""
+  size = batch_size(inputs)
+  if scope == "group":
+    if group_size is None or group_size <= 1 or size % group_size:
+      raise ValueError(
+          "Group DTV requires complete groups and num_generations > 1."
+      )
+    reference_size = group_size
+  else:
+    if size <= 1:
+      raise ValueError("Batch DTV requires at least two samples.")
+    reference_size = size
+
+  raw_self_values = []
+  raw_cross_values = []
+  starts = range(0, size, reference_size) if scope == "group" else (0,)
+  for start in starts:
+    total = None
+    for offset in range(reference_size):
+      gradient = score_step(sample_inputs(inputs, start + offset))
+      total = gradient if total is None else _staged_tree_add(total, gradient)
+    for offset in range(reference_size):
+      gradient = score_step(sample_inputs(inputs, start + offset))
+      self_term = _staged_tree_dot(gradient, gradient)
+      raw_self_values.append(self_term)
+      raw_cross_values.append(_staged_tree_dot(gradient, total) - self_term)
+
+  raw_self = jnp.stack(raw_self_values)
+  raw_cross = jnp.stack(raw_cross_values)
+  denominator = float(reference_size)
+  return {
+      "raw_self": raw_self,
+      "raw_cross_sum": raw_cross,
+      "standard_self_term": raw_self / denominator,
+      "standard_cross_term": raw_cross / denominator,
+      "standard_score": (raw_self + raw_cross) / denominator,
+      "loo_score": raw_cross / float(reference_size - 1),
+  }
+
+
+def staged_masked_value_and_grad(
+    update_step: Callable[[Any], tuple[Any, Any]],
+    inputs: Any,
+    mask: jax.Array,
+    *,
+    has_aux: bool,
+) -> tuple[jax.Array, Any | None, Any]:
+  """Accumulates separately compiled update gradients using an exact mask."""
+  size = batch_size(inputs)
+  mask_f = mask.astype(jnp.float32)
+  denominator = jnp.clip(jnp.sum(mask_f), 1.0)
+  loss_sum = None
+  aux_sum = None
+  gradient_sum_value = None
+  for index in range(size):
+    out, gradient = update_step(sample_inputs(inputs, index))
+    if has_aux:
+      loss, aux = out
+    else:
+      loss, aux = out, None
+    weight = mask_f[index]
+    weighted_loss = jnp.squeeze(loss) * weight
+    weighted_gradient = _staged_tree_scale(gradient, weight)
+    loss_sum = weighted_loss if loss_sum is None else loss_sum + weighted_loss
+    gradient_sum_value = (
+        weighted_gradient
+        if gradient_sum_value is None
+        else _staged_tree_add(gradient_sum_value, weighted_gradient)
+    )
+    if has_aux:
+      weighted_aux = _staged_tree_scale(aux, weight)
+      aux_sum = weighted_aux if aux_sum is None else tree_add(aux_sum, weighted_aux)
+  mean_aux = _staged_tree_scale(aux_sum, 1.0 / denominator) if has_aux else None
+  return (
+      loss_sum / denominator,
+      mean_aux,
+      _staged_tree_scale(gradient_sum_value, 1.0 / denominator),
+  )
