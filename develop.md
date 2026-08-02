@@ -600,3 +600,12 @@ syntax compilation and `git diff --check` passed. Full JAX tests must run in
 the server environment because the Mac repository does not contain the TPU
 project's Python dependency environment. A dual-worker 8192-token TPU smoke is
 still required after the CPU gate to validate compilation and HBM behavior.
+
+The first broad CPU gate after deployment collected the optional
+`sglang_jax` cases in `rl_cluster_test.py` and failed because this vLLM
+environment does not install the `sgl_jax` package. This is unrelated to the
+masked aggregate implementation: its targeted gate completed with 13 passing
+tests. The reproducible AIME/vLLM gate excludes only tests whose node ID
+contains `sglang_jax`; vLLM cluster tests remain enabled. Installing a second
+rollout engine solely to run irrelevant tests would change the established
+environment and is not required for this experiment.
