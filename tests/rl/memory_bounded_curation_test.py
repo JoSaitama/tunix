@@ -1,7 +1,9 @@
 """Tests for memory-bounded dynamic trajectory curation primitives."""
 
 from absl.testing import absltest
+from flax import struct
 from flax import nnx
+import jax
 import jax.numpy as jnp
 import numpy as np
 import optax
@@ -24,15 +26,23 @@ class _ScalarModel(nnx.Module):
     return self.weight[...] * feature
 
 
-def _update_loss(model, feature, algo_config=None):
+@struct.dataclass
+class _SyntheticTrainExample:
+  feature: jnp.ndarray
+  completion_mask: jnp.ndarray
+
+
+def _update_loss(model, train_example, algo_config=None):
   del algo_config
-  loss = jnp.sum(model(feature))
+  values = model(train_example.feature)
+  active = jnp.any(train_example.completion_mask != 0, axis=-1)
+  loss = jnp.sum(values * active) / jnp.clip(jnp.sum(active), min=1)
   return loss, {"base_loss": loss}
 
 
-def _score_loss(model, feature, algo_config=None):
+def _score_loss(model, train_example, algo_config=None):
   del algo_config
-  return jnp.sum(model(feature))
+  return jnp.sum(model(train_example.feature))
 
 
 class MemoryBoundedCurationTest(absltest.TestCase):
@@ -86,7 +96,13 @@ class MemoryBoundedCurationTest(absltest.TestCase):
     trainer.with_loss_fn(_update_loss, has_aux=True)
     trainer.with_policy_score_loss_fn(_score_loss)
     trainer.with_gen_model_input_fn(
-        lambda x: {"feature": x, "algo_config": object()}
+        lambda x: {
+            "train_example": _SyntheticTrainExample(
+                feature=x,
+                completion_mask=jnp.ones((x.shape[0], 1), dtype=jnp.int32),
+            ),
+            "algo_config": object(),
+        }
     )
     train_step, _ = trainer.jit_train_and_eval_step(cache_nnx_graph=True)
 
@@ -95,6 +111,45 @@ class MemoryBoundedCurationTest(absltest.TestCase):
     self.assertAlmostEqual(float(loss), 4.0)
     self.assertIsNotNone(aux)
     self.assertGreater(float(grad_norm), 0.0)
+
+  def test_masked_aggregate_gradient_matches_explicit_retained_mean(self):
+    model = _ScalarModel()
+    inputs = {
+        "train_example": _SyntheticTrainExample(
+            feature=jnp.asarray([2.0, -5.0, 7.0]),
+            completion_mask=jnp.ones((3, 2), dtype=jnp.int32),
+        )
+    }
+    mask = jnp.asarray([True, False, True])
+    grad_fn = memory_bounded_curation.make_masked_aggregate_grad_fn(
+        _update_loss, wrt=nnx.Param, has_aux=True
+    )
+
+    (loss, aux), gradient = grad_fn(model, inputs, mask)
+    gradient_value = jax.tree_util.tree_leaves(gradient)[0]
+
+    self.assertAlmostEqual(float(loss), 4.5)
+    self.assertAlmostEqual(float(aux["base_loss"]), 4.5)
+    self.assertAlmostEqual(float(gradient_value), 4.5)
+
+  def test_masked_aggregate_preserves_preexisting_zero_completion_rows(self):
+    model = _ScalarModel()
+    inputs = {
+        "train_example": _SyntheticTrainExample(
+            feature=jnp.asarray([2.0, 100.0, 7.0]),
+            completion_mask=jnp.asarray([[1, 1], [0, 0], [1, 1]]),
+        )
+    }
+    mask = jnp.asarray([True, True, True])
+    grad_fn = memory_bounded_curation.make_masked_aggregate_grad_fn(
+        _update_loss, wrt=nnx.Param, has_aux=True
+    )
+
+    (loss, _), gradient = grad_fn(model, inputs, mask)
+    gradient_value = jax.tree_util.tree_leaves(gradient)[0]
+
+    self.assertAlmostEqual(float(loss), 4.5)
+    self.assertAlmostEqual(float(gradient_value), 4.5)
 
 
 if __name__ == "__main__":

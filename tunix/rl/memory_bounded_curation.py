@@ -64,6 +64,55 @@ def make_grad_fn(
   )
 
 
+def apply_trajectory_mask(inputs: Any, mask: jax.Array) -> Any:
+  """Applies a trajectory mask before the configured loss reduction.
+
+  Agentic GRPO represents valid response tokens with
+  ``TrainExample.completion_mask``. Zeroing every response token for a rejected
+  trajectory makes the original batched GRPO loss exclude that trajectory from
+  policy, KL, entropy, and metric reductions without changing any retained
+  trajectory data.
+  """
+  if not isinstance(inputs, dict) or "train_example" not in inputs:
+    raise ValueError(
+        "Masked aggregate updates require inputs['train_example']."
+    )
+  train_example = inputs["train_example"]
+  completion_mask = getattr(train_example, "completion_mask", None)
+  if completion_mask is None:
+    raise ValueError(
+        "Masked aggregate updates require TrainExample.completion_mask."
+    )
+  if completion_mask.shape[0] != mask.shape[0]:
+    raise ValueError(
+        "Trajectory mask and completion mask batch dimensions differ: "
+        f"{mask.shape[0]} != {completion_mask.shape[0]}."
+    )
+  row_mask = mask.astype(completion_mask.dtype).reshape(
+      (mask.shape[0],) + (1,) * (completion_mask.ndim - 1)
+  )
+  masked_example = train_example.replace(
+      completion_mask=completion_mask * row_mask
+  )
+  return {**inputs, "train_example": masked_example}
+
+
+def make_masked_aggregate_grad_fn(
+    loss_fn: Callable[..., Any], *, wrt: type, has_aux: bool
+) -> Callable[..., Any]:
+  """Builds one gradient call for a masked aggregate batched loss."""
+
+  def call_loss(model, inputs, mask):
+    masked_inputs = apply_trajectory_mask(inputs, mask)
+    return loss_fn(model, **masked_inputs)
+
+  return nnx.value_and_grad(
+      call_loss,
+      argnums=nnx.DiffState(0, wrt),
+      has_aux=has_aux,
+  )
+
+
 def gradient_sum(
     grad_fn: Callable[..., Any],
     model: nnx.Module,

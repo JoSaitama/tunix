@@ -91,18 +91,14 @@ class PolicySelfInfLooTrainer(self_inf_loo_trainer.SelfInfLooTrainer):
       groups_with_cap = cap_triggered.astype(jnp.float32)
       groups_all_negative = (jnp.sum(threshold_mask) == 0).astype(jnp.float32)
 
-    update_grad_fn = memory_bounded_curation.make_grad_fn(
+    update_grad_fn = memory_bounded_curation.make_masked_aggregate_grad_fn(
         self.loss_fn, wrt=wrt, has_aux=self._has_aux
     )
-    final_loss, final_aux, final_grads = (
-        memory_bounded_curation.masked_value_and_grad(
-            update_grad_fn,
-            model,
-            inputs,
-            mask,
-            has_aux=self._has_aux,
-        )
-    )
+    out, final_grads = update_grad_fn(model, inputs, mask)
+    if self._has_aux:
+      final_loss, final_aux = out
+    else:
+      final_loss, final_aux = out, None
     grad_norm = optax.global_norm(final_grads)
     optimizer.update(model, final_grads)
 
@@ -166,11 +162,11 @@ class PolicySelfInfLooTrainer(self_inf_loo_trainer.SelfInfLooTrainer):
       _, gradient = grad_fn(model, sample)
       return gradient
 
-    def update_sample(model, sample):
-      grad_fn = memory_bounded_curation.make_grad_fn(
+    def update_batch(model, batch_inputs, trajectory_mask):
+      grad_fn = memory_bounded_curation.make_masked_aggregate_grad_fn(
           self.loss_fn, wrt=wrt, has_aux=self._has_aux
       )
-      return grad_fn(model, sample)
+      return grad_fn(model, batch_inputs, trajectory_mask)
 
     def apply_update(model, optimizer, gradients):
       grad_norm = optax.global_norm(gradients)
@@ -178,7 +174,7 @@ class PolicySelfInfLooTrainer(self_inf_loo_trainer.SelfInfLooTrainer):
       return grad_norm
 
     score_step = nnx.jit(score_sample)
-    update_step = nnx.jit(update_sample)
+    update_step = nnx.jit(update_batch)
     apply_step = nnx.jit(apply_update, donate_argnames=("optimizer",))
     if cache_nnx_graph:
       score_step = nnx.cached_partial(score_step, self.model)
@@ -241,14 +237,11 @@ class PolicySelfInfLooTrainer(self_inf_loo_trainer.SelfInfLooTrainer):
         groups_with_cap = cap_triggered.astype(jnp.float32)
         groups_all_negative = (jnp.sum(threshold_mask) == 0).astype(jnp.float32)
 
-      final_loss, final_aux, final_grads = (
-          memory_bounded_curation.staged_masked_value_and_grad(
-              update_step,
-              inputs,
-              mask,
-              has_aux=self._has_aux,
-          )
-      )
+      out, final_grads = update_step(inputs, mask)
+      if self._has_aux:
+        final_loss, final_aux = out
+      else:
+        final_loss, final_aux = out, None
       grad_norm = apply_step(final_grads)
       if self._has_aux and isinstance(final_aux, dict):
         mask_f = mask.astype(jnp.float32)

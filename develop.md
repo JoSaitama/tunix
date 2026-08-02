@@ -563,3 +563,40 @@ a trajectory and therefore changes experiment semantics; it is not suitable
 for the strict comparison. The highest-value future optimization is reducing
 the repeated staged Policy-DTV gradient cost while preserving its exact score
 and update definitions, rather than prioritizing rollout tuning.
+
+## 2026-08-02 masked aggregate Policy-DTV update
+
+Policy-DTV and Policy-DTV-LOO now retain the existing exact policy-only score
+stage, threshold, retention-cap behavior, and batch/group boundaries, but no
+longer compute a separate full Policy+KL update gradient for every trajectory.
+After the DTV mask is finalized, rejected rows are zeroed in the Agentic
+`TrainExample.completion_mask`. The original batched GRPO loss then performs
+one aggregate forward/backward pass. This mask applies consistently to policy
+loss, KL loss, entropy, and their native reductions without changing retained
+trajectory tensors.
+
+For the formal AIME configuration, which uses
+`sequence-mean-token-mean`, the new update gradient is mathematically equal to
+the mean of the retained non-empty per-trajectory full-loss gradients. Existing
+all-zero completion rows remain excluded by the native GRPO denominator. The
+old staged implementation could count such zero-loss rows in its external mask
+denominator; the new path therefore restores baseline GRPO semantics for those
+already-degenerate rows. Other configured aggregation modes deliberately use
+their native batched GRPO normalization rather than imposing an external
+trajectory mean.
+
+The score phase is intentionally unchanged and still evaluates policy-only
+per-trajectory gradients twice: once to construct each batch/group reference
+gradient sum and once to compute self and cross dot products. The optimization
+therefore reduces the update phase from up to one full-loss backward pass per
+trajectory to one full-batch backward pass. It does not change the DTV or LOO
+formula, policy-only score objective, threshold, selected mask, optimizer, vLLM
+rollout, two-worker topology, sequence limits, or experiment naming.
+
+Added CPU regression coverage for the staged policy trainer, equality between
+the masked aggregate gradient and the explicit retained mean on a synthetic
+example, and preservation of pre-existing zero completion rows. Local Python
+syntax compilation and `git diff --check` passed. Full JAX tests must run in
+the server environment because the Mac repository does not contain the TPU
+project's Python dependency environment. A dual-worker 8192-token TPU smoke is
+still required after the CPU gate to validate compilation and HBM behavior.
