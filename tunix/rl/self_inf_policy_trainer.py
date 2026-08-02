@@ -118,14 +118,25 @@ class PolicySelfInfTrainer(self_inf_trainer.SelfInfTrainer):
               model, group_inputs
           )
 
-        def mean_group_loss(model, group_inputs):
+        # The TPU environment's Flax predates nnx.jvp. Convert the stateful
+        # module to a pure GraphDef + State representation so standard JAX
+        # autodiff can operate only on the selected trainable parameter state.
+        graphdef, trainable_state, other_state = nnx.split(model, wrt, ...)
+
+        def losses_from_state(current_state, group_inputs):
+          current_model = nnx.merge(
+              graphdef, current_state, other_state
+          )
+          return group_losses(current_model, group_inputs)
+
+        def mean_group_loss(current_state, group_inputs):
           # A fixed denominator preserves zero-gradient degenerate rows in the
           # exact DTV group mean rather than renormalizing over active rows.
-          return jnp.sum(group_losses(model, group_inputs)) / float(group_size)
+          return jnp.sum(
+              losses_from_state(current_state, group_inputs)
+          ) / float(group_size)
 
-        mean_grad_fn = nnx.grad(
-            mean_group_loss, argnums=nnx.DiffState(0, wrt)
-        )
+        mean_grad_fn = jax.grad(mean_group_loss)
         scores = []
         for group_index in range(size // group_size):
           start = group_index * group_size
@@ -137,15 +148,15 @@ class PolicySelfInfTrainer(self_inf_trainer.SelfInfTrainer):
               else x,
               batch_inputs,
           )
-          mean_gradient = mean_grad_fn(model, group_inputs)
+          mean_gradient = mean_grad_fn(trainable_state, group_inputs)
           mean_gradient = jax.tree_util.tree_map(
               jax.lax.stop_gradient, mean_gradient
           )
-          _, group_scores = nnx.jvp(
-              lambda current_model: group_losses(
-                  current_model, group_inputs
+          _, group_scores = jax.jvp(
+              lambda current_state: losses_from_state(
+                  current_state, group_inputs
               ),
-              (model,),
+              (trainable_state,),
               (mean_gradient,),
           )
           scores.append(group_scores)

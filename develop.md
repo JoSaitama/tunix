@@ -848,3 +848,9 @@ evaluated separately.
   policy component of the original GRPO loss with `beta=0` for both GRPO and
   GSPO-token modes. The existing staged trainer test exercises the new group
   JVP path and masked update.
+- The server Flax version does not expose `nnx.jvp`. Replaced that API call
+  with a version-compatible functional path: `nnx.split(model, wrt, ...)`
+  isolates the selected trainable State, `jax.grad` computes the exact group
+  mean direction, `jax.jvp` computes the directional derivatives, and
+  `nnx.merge` reconstructs the temporary model. No dependency upgrade is
+  required, and the mathematical score is unchanged.
