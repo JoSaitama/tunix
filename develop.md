@@ -854,3 +854,25 @@ evaluated separately.
   mean direction, `jax.jvp` computes the directional derivatives, and
   `nnx.merge` reconstructs the temporary model. No dependency upgrade is
   required, and the mathematical score is unchanged.
+
+## 2026-08-02: Restore exact vmap as the default group Policy-DTV backend
+
+- The matched 8192-token, 16-prompt gates completed successfully for both
+  ordinary group Policy-DTV and group Policy-DTV-LOO. The gate represents one
+  reduced global update: 16 prompts, eight generations per prompt, 128 total
+  trajectories, and eight actor calls at train microbatch size two.
+- Ordinary JVP scoring took 295.39 seconds for the first actor call and about
+  45.35 seconds per steady actor call. Exact LOO vmap scoring took 173.52
+  seconds for the first call and about 21.8 seconds per steady call. The JVP
+  path reduced gradient-tree memory pressure but lost TPU vectorization and
+  was approximately 2.1 times slower in steady state.
+- Restored lean-loss exact vmap as the default ordinary Policy-DTV score
+  backend. This uses the same vectorized per-trajectory gradients already
+  validated by the exact LOO gate and preserves the standard DTV equation.
+- Retained the exact functional JVP implementation as an explicit HBM fallback
+  selected with `TUNIX_POLICY_DTV_SCORE_BACKEND=jvp`. The default is `vmap`.
+  The dual-worker launcher forwards this setting to both workers. Added CPU
+  regression coverage for both backends.
+- Total-loss DTV remains unchanged and will be measured with the same
+  16-prompt, 8192-token, no-checkpoint gate for a directly comparable timing
+  baseline.

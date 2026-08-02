@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import functools
+import os
 from typing import Any, Callable
 
 from flax import nnx
@@ -89,9 +90,17 @@ class PolicySelfInfTrainer(self_inf_trainer.SelfInfTrainer):
     _, eval_step = super().jit_train_and_eval_step(False, cache_nnx_graph)
     self._jitted_eval_step_fn = eval_step
     wrt = nnx.LoRAParam if self._lora_enabled else nnx.Param
+    score_backend = os.environ.get(
+        "TUNIX_POLICY_DTV_SCORE_BACKEND", "vmap"
+    ).strip().lower()
+    if score_backend not in ("vmap", "jvp"):
+      raise ValueError(
+          "TUNIX_POLICY_DTV_SCORE_BACKEND must be 'vmap' or 'jvp'; "
+          f"received {score_backend!r}."
+      )
 
     def score_batch(model, batch_inputs):
-      if self.scope == "group":
+      if self.scope == "group" and score_backend == "jvp":
         size = memory_bounded_curation.batch_size(batch_inputs)
         group_size = self.num_generations
         if group_size is None or group_size <= 1 or size % group_size:

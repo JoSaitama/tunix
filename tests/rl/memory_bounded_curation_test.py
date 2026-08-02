@@ -1,5 +1,7 @@
 """Tests for memory-bounded dynamic trajectory curation primitives."""
 
+from unittest import mock
+
 from absl.testing import absltest
 from flax import struct
 from flax import nnx
@@ -100,7 +102,7 @@ class MemoryBoundedCurationTest(absltest.TestCase):
     for key in expected:
       np.testing.assert_allclose(actual[key], expected[key], rtol=1e-6)
 
-  def test_policy_trainer_uses_staged_jits(self):
+  def _run_policy_trainer(self):
     model = _ScalarModel()
     trainer = self_inf_policy_trainer.PolicySelfInfTrainer(
         model=model,
@@ -131,6 +133,15 @@ class MemoryBoundedCurationTest(absltest.TestCase):
     self.assertAlmostEqual(float(loss), 4.0)
     self.assertIsNotNone(aux)
     self.assertGreater(float(grad_norm), 0.0)
+
+  def test_policy_trainer_defaults_to_vmapped_scores(self):
+    self._run_policy_trainer()
+
+  def test_policy_trainer_keeps_jvp_fallback(self):
+    with mock.patch.dict(
+        "os.environ", {"TUNIX_POLICY_DTV_SCORE_BACKEND": "jvp"}
+    ):
+      self._run_policy_trainer()
 
   def test_masked_aggregate_gradient_matches_explicit_retained_mean(self):
     model = _ScalarModel()
