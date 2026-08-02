@@ -91,6 +91,67 @@ class PolicySelfInfTrainer(self_inf_trainer.SelfInfTrainer):
     wrt = nnx.LoRAParam if self._lora_enabled else nnx.Param
 
     def score_batch(model, batch_inputs):
+      if self.scope == "group":
+        size = memory_bounded_curation.batch_size(batch_inputs)
+        group_size = self.num_generations
+        if group_size is None or group_size <= 1 or size % group_size:
+          raise ValueError(
+              "Group Policy-DTV requires complete generation groups."
+          )
+
+        def sample_loss(model, sample_inputs):
+          sample_inputs = jax.tree_util.tree_map(
+              lambda x: jnp.expand_dims(x, axis=0)
+              if isinstance(x, (jax.Array, np.ndarray))
+              else x,
+              sample_inputs,
+          )
+          out = self._score_loss_fn(model, **sample_inputs)
+          return out[0] if self._score_loss_has_aux else out
+
+        def input_axis(x):
+          return 0 if isinstance(x, (jax.Array, np.ndarray)) else None
+
+        def group_losses(model, group_inputs):
+          axes = jax.tree_util.tree_map(input_axis, group_inputs)
+          return jax.vmap(sample_loss, in_axes=(None, axes))(
+              model, group_inputs
+          )
+
+        def mean_group_loss(model, group_inputs):
+          # A fixed denominator preserves zero-gradient degenerate rows in the
+          # exact DTV group mean rather than renormalizing over active rows.
+          return jnp.sum(group_losses(model, group_inputs)) / float(group_size)
+
+        mean_grad_fn = nnx.grad(
+            mean_group_loss, argnums=nnx.DiffState(0, wrt)
+        )
+        scores = []
+        for group_index in range(size // group_size):
+          start = group_index * group_size
+          group_inputs = jax.tree_util.tree_map(
+              lambda x: jax.lax.dynamic_slice_in_dim(
+                  x, start, group_size, axis=0
+              )
+              if isinstance(x, (jax.Array, np.ndarray))
+              else x,
+              batch_inputs,
+          )
+          mean_gradient = mean_grad_fn(model, group_inputs)
+          mean_gradient = jax.tree_util.tree_map(
+              jax.lax.stop_gradient, mean_gradient
+          )
+          _, group_scores = nnx.jvp(
+              lambda current_model: group_losses(
+                  current_model, group_inputs
+              ),
+              (model,),
+              (mean_gradient,),
+          )
+          scores.append(group_scores)
+        standard_score = jnp.concatenate(scores, axis=0)
+        return {"standard_score": standard_score}
+
       grad_fn = memory_bounded_curation.make_grad_fn(
           self._score_loss_fn,
           wrt=wrt,

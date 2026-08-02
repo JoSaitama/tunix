@@ -15,6 +15,7 @@
 """Tests for agentic_grpo_learner."""
 
 import asyncio
+import dataclasses
 import functools
 import os
 import queue
@@ -566,6 +567,23 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
     )
     chex.assert_shape(loss, ())
     self.assertIn("kl", aux)
+
+    policy_only_config = dataclasses.replace(algo_config, beta=0.0)
+    full_policy_loss, _ = policy_loss_fn(
+        model=MockModel(rngs=nnx.Rngs(0)),
+        train_example=train_example,
+        algo_config=policy_only_config,
+        pad_id=0,
+        eos_id=2,
+    )
+    lean_policy_loss = agentic_grpo_learner.grpo_policy_score_loss_fn(
+        model=MockModel(rngs=nnx.Rngs(0)),
+        train_example=train_example,
+        algo_config=policy_only_config,
+        pad_id=0,
+        eos_id=2,
+    )
+    chex.assert_trees_all_close(full_policy_loss, lean_policy_loss)
 
   @parameterized.named_parameters(
       dict(testcase_name="unmasked", apply_masking=False),

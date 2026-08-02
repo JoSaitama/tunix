@@ -676,6 +676,100 @@ per-sample loss. The policy and LOO score vmaps now apply the same restoration,
 and the synthetic score loss regression rejects inputs without the required
 two-dimensional completion mask.
 
+The batch-axis-corrected reduced gate
+`grpo_aime_dtv_selfinf_group_policy_seed0_clean_20260802_021914` completed
+successfully at the formal 8192-token limits. The isolated vmapped policy-score
+program compiled and ran without HBM OOM, the masked aggregate full-loss update
+completed with train loss `0.003309`, and global step 0 finished in 287.36
+seconds. The single actor call, including first compilation, took 154.68
+seconds. Final checkpointing was intentionally skipped. Both local and remote
+program statuses were zero. The SSH transport returned one after the remote
+program had emitted its explicit zero status; the corrected launcher properly
+treated the remote program status as authoritative.
+
+This one-call gate proves correctness and HBM feasibility but cannot separate
+compile time from steady execution time. The final runtime gate should use two
+global batches with `batch_size=2`, `mini_batch_size=2`, and no checkpoint. Its
+second actor-call duration is the steady per-microbatch estimate needed to
+project the 64 actor calls in each formal `batch_size=128` global step. No
+additional full-size smoke is required before that estimate.
+
+The successful implementation currently uses an isolated vmapped tree of exact
+per-trajectory policy gradients; it does not yet use the proposed aggregate
+gradient plus JVP identity. Because the same vmapped tree already computes both
+`raw_self = ||g_i||^2` and cross terms, ordinary and LOO policy DTV have the
+same dominant score-stage HBM shape and nearly the same compute cost in this
+implementation. LOO adds only small score normalization and retention-cap mask
+operations. The JVP optimization would make ordinary DTV cheaper, but exact LOO
+would still need its self-gradient norm term.
+
+The six-minute gate used a deliberately reduced global `batch_size=2`, not the
+formal `batch_size=128`. It generated 16 trajectories and executed one actor
+call; a formal global batch generates 1,024 trajectories and executes 64 actor
+calls of the same compiled shape. The observed 154.68-second actor call includes
+first compilation and must not be multiplied by 64. A second call in the same
+process is required to measure steady execution time `X`; formal actor time per
+global batch is approximately the one-time compile plus `63 * X`, with rollout
+and synchronization added separately.
+
+## 2026-08-02 policy-only versus total-loss DTV decision
+
+For the paper's literal question of whether a trajectory opposes the model's
+actual GRPO update, total-loss DTV is the canonical formulation. If the update
+gradient is `g_total = g_policy + beta * g_KL`, then scoring alignment with
+`g_total` directly measures alignment with the optimizer direction and allows
+the same per-trajectory gradients to be reused for the masked update. This is
+both conceptually direct and computationally efficient.
+
+Policy-only DTV instead asks whether a trajectory opposes the reward-driven
+policy component while deliberately excluding the KL regularizer from data
+valuation. Applying that mask to a full Policy+KL update is a valid two-objective
+design and can prevent the regularizer from being interpreted as trajectory
+quality, but it is an ablation/hypothesis rather than an inherently more correct
+DTV definition. Because scoring and updating use different objectives, exact
+implementation requires additional gradient work and cannot reuse the original
+total-loss DTV gradient tree. With formal beta `0.001`, total-loss and
+policy-only rankings may be close, but this must be measured rather than
+assumed.
+
+The recommended experiment hierarchy is therefore baseline and original
+total-loss DTV as primary reproduction methods; random/reward filters as fixed
+controls; and policy-only DTV/LOO as optional ablations only if their additional
+cost is scientifically justified. Engineering should not delay the primary
+formal experiment suite solely to make policy-only DTV fast.
+
+Repeated incomplete exits are a separate distributed lifecycle defect. A local
+exception terminates the driver, but vLLM multiprocessing children, the remote
+rollout service, gcloud/SSH transport, and shell logging pipelines do not share
+one reliably terminated process group. Graceful shutdown can therefore report
+a status while leaving a VFIO owner behind. The launcher needs bounded cleanup
+traps on both hosts: signal known process groups with TERM, wait for a fixed
+grace period, escalate only remaining members with KILL, and verify
+`/dev/vfio/0` before returning. This does not indicate a DTV mathematical
+problem.
+
+The prior PPO and GSM8K results establish policy-only DTV as the primary
+research hypothesis rather than merely an optional ablation. Its selection
+objective intentionally measures alignment with reward-driven policy
+improvement, while the retained trajectories are updated with the full
+Policy+KL objective. KL gradients generally change direction as well as
+magnitude, but they represent reference-policy regularization rather than
+trajectory reward quality; including them in valuation can favor samples that
+preserve the reference policy instead of samples that improve the policy
+objective. Total-loss DTV remains the reproduction baseline and control.
+
+For ordinary policy DTV, the exact score does not require materializing every
+per-trajectory gradient. For a group mean policy gradient `g_bar`,
+`score_i = <grad(loss_i), g_bar>` is the directional derivative of `loss_i`
+along `g_bar`. It can be computed with one aggregate policy-gradient pass per
+reference batch/group plus a JVP that returns per-trajectory directional
+derivatives, followed by the existing single masked aggregate full-loss
+update. This preserves the exact standard DTV formula while avoiding both the
+slow two-pass singleton gradients and the HBM-heavy vmapped gradient tree.
+Exact LOO additionally requires each `||grad(loss_i)||^2` self term, so it does
+not receive the same simplification without retaining/sequentially recomputing
+per-sample gradients or introducing an explicitly approximate estimator.
+
 Directly piping `git archive` into `gcloud ... ssh` is unsafe when gcloud
 retries a broken SSH connection. A retry resumes consumption of the local pipe
 instead of replaying the tar stream from byte zero, so the remote extractor
@@ -684,3 +778,73 @@ tree. Dual-worker deployment must therefore create a persistent compressed
 archive on worker 0, copy that file to worker 1, verify its SHA-256 checksum,
 and only then extract it. This makes both transport retries and source
 verification deterministic.
+
+The two-step vmapped-score timing gate completed successfully. The first actor
+call took 154.40 seconds including compilation; the second steady actor call
+took 21.82 seconds. Global steps took 293.86 and 136.29 seconds respectively,
+so the latter global duration must not be confused with actor compute. At 64
+actor calls per formal 128-prompt global batch, the steady actor component is
+approximately 23.3 minutes, and a 64-batch short run is roughly a one-day job
+before final checkpoint overhead. The vmapped score is about 4.4 times faster
+than the prior 96.5-second steady staged implementation, but exact JVP remains
+worth implementing for ordinary policy DTV.
+
+An exact JVP implementation does not change ordinary DTV scores: it computes
+the same directional derivative `<grad(loss_i), g_bar>`. The reference
+direction must be stop-gradient/frozen so no Hessian term enters, and group
+scope must use each prompt group's own mean direction. Expected differences
+from the vmapped reference are limited to floating-point reduction order. JVP
+does not provide the exact LOO self norm, so LOO retains the validated vmapped
+path. The working vmapped implementation is now the numerical oracle for CPU
+tests comparing JVP scores, masks, and masked updates before a TPU gate.
+
+The approximately 25-hour projection refers to one method, one seed, and the
+64-global-batch short run. It is not a full pass over the 40,309-example
+training set. If the final run uses approximately 312 global batches, linear
+scaling from the current 21.82-second vmapped actor call gives roughly 121
+hours, or five days, per method and seed before uncertainty from rollout
+overlap, checkpoints, and system variation.
+
+Group methods are the immediate priority. Ordinary group Policy-DTV will use
+the exact JVP path. Exact group Policy-DTV-LOO retains the validated isolated
+vmap because its `||g_i||^2` diagonal Gram term cannot be obtained from the
+single mean-gradient directional derivative. The vmap already computes all
+group self and cross terms in one compiled reverse-mode program and is likely
+the strongest conventional exact baseline. Possible additional exact work is
+limited to compiler/rematerialization/sharding tuning or carefully chunked
+gradient-tree reductions, which trade HBM against dispatch and are not
+guaranteed faster. Random-projection/Hutchinson self-norm estimates, last-layer
+gradients, or gradient sketches may be faster but change LOO into explicitly
+approximate methods and require separate names and validation.
+
+Batch methods remain implemented and testable but are deferred, not removed.
+Ordinary batch Policy-DTV can later use the same exact JVP identity with one
+batch reference direction. Exact batch LOO retains the same self-norm obstacle
+as group LOO and can reuse the isolated vmap while its runtime and semantics are
+evaluated separately.
+## 2026-08-02: Group Policy-DTV score optimization
+
+- Kept the original AIME distributed vLLM rollout, dual-worker execution,
+  Agentic queue, 8192-token configuration, and masked aggregate Policy+KL
+  update unchanged.
+- Added a lean GRPO policy-score loss. It preserves the original PPO/GSPO
+  importance-ratio clipping, dual clipping, advantage handling, old-policy
+  log-probability handling, completion mask, and configured loss aggregation.
+  It omits reference KL, entropy, logits, and logging-only metrics from the
+  score graph. The update loss remains the full Policy+KL objective.
+- Changed only `group_policy` scoring to the exact directional-derivative
+  formulation. For each prompt group, the implementation computes the mean
+  policy gradient with a fixed `num_generations` denominator and evaluates all
+  trajectory scores with an NNX JVP along that stop-gradient direction. This
+  is mathematically identical to `dot(grad(L_i), mean_j grad(L_j))`; it is not
+  an approximation and does not change the threshold or mask semantics.
+- Kept `group_loo_policy` on the exact isolated-gradient vmap because exact LOO
+  additionally requires each trajectory's squared gradient norm. It now uses
+  the same lean score loss, while preserving the original LOO score, retention
+  cap, threshold, diagnostics, and masked aggregate update.
+- Left total-loss DTV and batch method routing unchanged. Batch Policy-DTV can
+  be optimized separately after the group methods are validated.
+- Added a regression comparison between the lean policy-score loss and the
+  policy component of the original GRPO loss with `beta=0` for both GRPO and
+  GSPO-token modes. The existing staged trainer test exercises the new group
+  JVP path and masked update.

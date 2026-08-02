@@ -246,15 +246,19 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
     )
     if hasattr(self.rl_cluster.actor_trainer, "with_policy_score_loss_fn"):
       policy_only_config = dataclasses.replace(self.algo_config, beta=0.0)
-      score_loss_fn = lambda model, train_example, algo_config=None: policy_loss_fn(
-          model,
+      score_loss_fn = (
+          lambda model,
           train_example,
-          algo_config=policy_only_config,
-          pad_id=self.rl_cluster.rollout.pad_id(),
-          eos_id=self.rl_cluster.rollout.eos_id(),
+          algo_config=None: grpo_policy_score_loss_fn(
+              model,
+              train_example,
+              algo_config=policy_only_config,
+              pad_id=self.rl_cluster.rollout.pad_id(),
+              eos_id=self.rl_cluster.rollout.eos_id(),
+          )
       )
       self.rl_cluster.actor_trainer.with_policy_score_loss_fn(
-          score_loss_fn, has_aux=True
+          score_loss_fn, has_aux=False
       )
     self.rl_cluster.actor_trainer.with_gen_model_input_fn(
         lambda x: {
@@ -826,6 +830,86 @@ def grpo_loss_fn(
   aux["entropy"] = entropy_loss
 
   return loss, aux
+
+
+def grpo_policy_score_loss_fn(
+    model,
+    train_example,
+    algo_config,
+    pad_id,
+    eos_id,
+):
+  """Returns only the policy objective used by Policy-DTV scoring.
+
+  This is mathematically identical to the policy-gradient part of
+  ``grpo_loss_fn``. It deliberately omits reference KL, entropy, logits, and
+  logging-only statistics so the score transform traces the smallest possible
+  graph. The retained-trajectory update continues to use ``grpo_loss_fn``.
+  """
+  epsilon = algo_config.epsilon
+  epsilon_high = getattr(algo_config, "epsilon_high", epsilon)
+  epsilon_c = getattr(algo_config, "epsilon_c", 3.0)
+  loss_algo = algo_config.loss_algo
+  completion_mask = train_example.completion_mask
+
+  graphdef, state = nnx.split(model)
+  per_token_logps = common.compute_per_token_logps(
+      graphdef,
+      state,
+      prompt_tokens=train_example.prompt_ids,
+      completion_tokens=train_example.completion_ids,
+      pad_id=pad_id,
+      eos_id=eos_id,
+      stop_gradient=False,
+      return_logits=False,
+  )
+  per_token_logps = jnp.astype(per_token_logps, jnp.float32)
+  advantages = jnp.astype(train_example.advantages, jnp.float32)
+  if advantages.ndim != 1:
+    raise ValueError(
+        "Expected advantages to be a 1D array, but got shape"
+        f" {advantages.shape}"
+    )
+
+  if train_example.old_per_token_logps is None:
+    old_per_token_logps = jax.lax.stop_gradient(per_token_logps)
+  else:
+    old_per_token_logps = jnp.astype(
+        train_example.old_per_token_logps, jnp.float32
+    )
+
+  log_ratio = jnp.clip(
+      per_token_logps - old_per_token_logps, min=-20.0, max=20.0
+  )
+  if loss_algo == "gspo-token":
+    sequence_log_ratio = (log_ratio * completion_mask).sum(
+        axis=-1
+    ) / jnp.clip(completion_mask.sum(axis=-1), min=1)
+    log_ratio = (
+        per_token_logps
+        - jax.lax.stop_gradient(per_token_logps)
+        + jnp.expand_dims(
+            jax.lax.stop_gradient(sequence_log_ratio), axis=-1
+        )
+    )
+    log_ratio = jnp.clip(log_ratio, max=10.0)
+
+  importance_ratio = jnp.exp(log_ratio)
+  advantages = advantages[:, None]
+  pg_loss_1 = -advantages * importance_ratio
+  pg_loss_2 = -advantages * jnp.clip(
+      importance_ratio, 1 - epsilon, 1 + epsilon_high
+  )
+  per_token_loss = jnp.maximum(pg_loss_1, pg_loss_2).astype(jnp.float32)
+  dual_clip_loss = -epsilon_c * advantages
+  per_token_loss = jnp.where(
+      advantages < 0.0,
+      jnp.minimum(dual_clip_loss, per_token_loss),
+      per_token_loss,
+  )
+  return common.aggregate_loss(
+      per_token_loss, completion_mask, algo_config.loss_agg_mode
+  )
 
 
 @function_registry.register_advantage_estimator("agentic_grpo")
