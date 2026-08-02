@@ -508,3 +508,58 @@ numerics, vLLM cluster construction, Agentic integration, and checkpoint
 metadata. It does not replace the 8192-token dual-worker TPU smoke, which is
 still required to validate SPMD sharding, TPU compilation/HBM, distributed
 rollout, and shutdown behavior.
+
+## 2026-08-02 successful group-policy smoke and launcher status correction
+
+The `group_policy`, seed-0, clean smoke named
+`grpo_aime_dtv_selfinf_group_policy_seed0_clean_20260801_151731` successfully
+completed one global update. Both worker programs emitted status zero, train
+step 1 reported loss `-0.044901`, and the actor checkpoint at step 1 was fully
+committed with custom metadata `global_step=1`. The suite nevertheless recorded
+exit code 1. This was a launcher false failure, not a training failure.
+
+`run_worker` re-enabled Bash `errexit` inside a normal shell function. Shell
+options set in a function affect its caller, so a later nonzero `wait` for the
+background gcloud/SSH logging pipeline terminated the launcher before it could
+capture the transport status and prefer the explicit remote program status.
+The local worker function now runs in a subshell. Background wait status is
+captured through an `if` condition that is safe under `errexit`, and the
+explicit `HOST=... STATUS=...` value remains authoritative when available.
+The SSH status is only a fallback if the remote program never emitted a status.
+Added a shell-backed Python regression test for both the false-failure case and
+the missing-program-status fallback. Bash syntax checks, `git diff --check`,
+and both regression cases passed locally.
+
+The smoke log also identifies the performance bottleneck. The full global step
+took 6531.50 seconds. Its 64 actor microbatch calls reported a summed 6349.02
+seconds and averaged 99.20 seconds each, accounting for approximately 97.2% of
+the global-step time. Rollout began near 15:19 and drained near 15:31 while the
+first training microbatches were already running; it was therefore mostly
+overlapped and is not the dominant end-to-end limit. The final synchronous
+checkpoint wrote about 3.3 GiB of model state and 19.9 GiB of optimizer state in
+87.91 seconds, approximately 1.3% of the global-step time.
+
+The dominant cost is the exact memory-bounded Policy-DTV implementation. Each
+training microbatch contains two prompt groups, or sixteen trajectories. To
+avoid the previous 320 GiB compile-time HBM requirement, it sequentially
+computes per-trajectory policy-only gradients for the group sum, reevaluates
+score information, and computes retained full Policy+KL update gradients. This
+preserves the DTV formulas but trades substantial repeated model computation
+and host dispatch for bounded HBM. The stable approximately 96.5-second time of
+later microbatches, after compilation and after rollout drained, confirms that
+this staged gradient work rather than logging or vLLM is the primary formal-run
+bottleneck.
+
+For strict reproduction, retain batch size 128, eight generations, 8192-token
+limits, train microbatch size 2, off-policy steps 0, concurrency 1024, vLLM
+maximum sequences 768, HBM utilization 0.4, and the original checkpoint
+schedule. Quiet reward logging changes no reward, advantage, mask, or optimizer
+math. vLLM scheduler/HBM tuning retains the intended sample count and sampling
+distribution but can change request batching and is not guaranteed bitwise
+identical on TPU. Raising train microbatch size from 2 to 4 retains the effective
+batch and mathematical aggregate update but changes floating-point reduction
+order and HBM demand. Enabling off-policy overlap changes which policy generated
+a trajectory and therefore changes experiment semantics; it is not suitable
+for the strict comparison. The highest-value future optimization is reducing
+the repeated staged Policy-DTV gradient cost while preserving its exact score
+and update definitions, rather than prioritizing rollout tuning.

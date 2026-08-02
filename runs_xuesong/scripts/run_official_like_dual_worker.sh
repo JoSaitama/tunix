@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+launcher_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=dual_worker_status.sh
+source "${launcher_dir}/dual_worker_status.sh"
+
 REPO="${REPO:-/home/jason_chia925_gmail_com/Project/tunix}"
 VENV="${VENV:-$REPO/.venv}"
 TPU_NAME="${TPU_NAME:-ziao-v5p16-flex7d-1-node}"
@@ -140,7 +144,7 @@ echo "  EVAL_DATA_PATH=${EVAL_DATA_PATH}"
 echo "  NUM_BATCHES=${NUM_BATCHES:-<launcher-default>}"
 echo "  COMMAND=${cmd_string}"
 
-run_worker() {
+run_worker() (
   local logfile="$1"
   echo "=== WORKER 0 LOG: $(hostname) ==="
   cd "${REPO}"
@@ -175,7 +179,7 @@ run_worker() {
   set -e
   echo "HOST=$(hostname) STATUS=${status}"
   return "${status}"
-}
+)
 
 run_remote() {
   local logfile="$1"
@@ -241,17 +245,14 @@ remote_pid=$!
 
 sleep 2
 
-set +e
-run_worker "${local_log}"
-local_status=$?
-wait "${remote_pid}"
-remote_ssh_status=$?
-set -e
-
-remote_status=$(sed -n 's/.*STATUS=\([0-9][0-9]*\).*/\1/p' "${remote_status_log}" | tail -n 1)
-if [[ -z "${remote_status}" ]]; then
-  remote_status="${remote_ssh_status}"
+if run_worker "${local_log}"; then
+  local_status=0
+else
+  local_status=$?
 fi
+tunix_wait_and_capture_status remote_ssh_status "${remote_pid}"
+tunix_resolve_remote_status \
+  remote_status "${remote_status_log}" "${remote_ssh_status}"
 
 echo "LOCAL_STATUS=${local_status}"
 echo "REMOTE_SSH_STATUS=${remote_ssh_status}"
