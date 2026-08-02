@@ -10,7 +10,9 @@ import functools
 from typing import Any, Callable
 
 from flax import nnx
+import jax
 import jax.numpy as jnp
+import numpy as np
 import optax
 from tunix.rl import memory_bounded_curation
 from tunix.rl import self_inf_loo_trainer
@@ -153,14 +155,25 @@ class PolicySelfInfLooTrainer(self_inf_loo_trainer.SelfInfLooTrainer):
     self._jitted_eval_step_fn = eval_step
     wrt = nnx.LoRAParam if self._lora_enabled else nnx.Param
 
-    def score_sample(model, sample):
+    def score_batch(model, batch_inputs):
       grad_fn = memory_bounded_curation.make_grad_fn(
           self._score_loss_fn,
           wrt=wrt,
           has_aux=self._score_loss_has_aux,
       )
-      _, gradient = grad_fn(model, sample)
-      return gradient
+
+      def input_axis(x):
+        return 0 if isinstance(x, (jax.Array, np.ndarray)) else None
+
+      input_axes = jax.tree_util.tree_map(input_axis, batch_inputs)
+      _, gradients = jax.vmap(
+          grad_fn, in_axes=(None, input_axes)
+      )(model, batch_inputs)
+      return memory_bounded_curation.statistics_from_gradient_tree(
+          gradients,
+          scope=self.scope,
+          group_size=self.num_generations,
+      )
 
     def update_batch(model, batch_inputs, trajectory_mask):
       grad_fn = memory_bounded_curation.make_masked_aggregate_grad_fn(
@@ -173,7 +186,7 @@ class PolicySelfInfLooTrainer(self_inf_loo_trainer.SelfInfLooTrainer):
       optimizer.update(model, gradients)
       return grad_norm
 
-    score_step = nnx.jit(score_sample)
+    score_step = nnx.jit(score_batch)
     update_step = nnx.jit(update_batch)
     apply_step = nnx.jit(apply_update, donate_argnames=("optimizer",))
     if cache_nnx_graph:
@@ -191,12 +204,7 @@ class PolicySelfInfLooTrainer(self_inf_loo_trainer.SelfInfLooTrainer):
       inputs = self.gen_model_input_fn(raw_inputs)
       inputs = dict(inputs)
       inputs.pop("algo_config", None)
-      stats = memory_bounded_curation.staged_dtv_statistics(
-          score_step,
-          inputs,
-          scope=self.scope,
-          group_size=self.num_generations,
-      )
+      stats = score_step(inputs)
       batch_size = memory_bounded_curation.batch_size(inputs)
       scores = stats["loo_score"]
       if self.scope == "group":

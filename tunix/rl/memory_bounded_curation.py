@@ -113,6 +113,79 @@ def make_masked_aggregate_grad_fn(
   )
 
 
+def statistics_from_gradient_tree(
+    gradients: Any,
+    *,
+    scope: str,
+    group_size: int | None,
+) -> dict[str, jax.Array]:
+  """Computes exact standard and LOO scores from vmapped gradients."""
+  leaves = jax.tree_util.tree_leaves(gradients)
+  if not leaves:
+    raise ValueError("No gradients found for DTV statistics.")
+  size = int(leaves[0].shape[0])
+  if scope == "group":
+    if group_size is None or group_size <= 1 or size % group_size:
+      raise ValueError(
+          "Group DTV requires complete groups and num_generations > 1."
+      )
+    reference_size = int(group_size)
+    num_groups = size // reference_size
+
+    def reference_sum(x):
+      grouped = x.reshape((num_groups, reference_size) + x.shape[1:])
+      return jnp.sum(grouped, axis=1, keepdims=True)
+
+    def broadcast_sum(x):
+      return jnp.broadcast_to(
+          reference_sum(x),
+          (num_groups, reference_size) + x.shape[1:],
+      ).reshape(x.shape)
+
+    totals = jax.tree_util.tree_map(broadcast_sum, gradients)
+  else:
+    if size <= 1:
+      raise ValueError("Batch DTV requires at least two samples.")
+    reference_size = size
+    totals = jax.tree_util.tree_map(
+        lambda x: jnp.broadcast_to(jnp.sum(x, axis=0), x.shape), gradients
+    )
+
+  def per_sample_dot(left, right):
+    reduce_axes = tuple(range(1, left.ndim))
+    return jnp.sum(
+        left.astype(jnp.float32) * right.astype(jnp.float32),
+        axis=reduce_axes,
+    )
+
+  raw_self_tree = jax.tree_util.tree_map(
+      per_sample_dot, gradients, gradients
+  )
+  raw_total_tree = jax.tree_util.tree_map(
+      per_sample_dot, gradients, totals
+  )
+  raw_self = jax.tree_util.tree_reduce(
+      lambda x, y: x + y,
+      raw_self_tree,
+      initializer=jnp.zeros((size,), dtype=jnp.float32),
+  )
+  raw_total = jax.tree_util.tree_reduce(
+      lambda x, y: x + y,
+      raw_total_tree,
+      initializer=jnp.zeros((size,), dtype=jnp.float32),
+  )
+  raw_cross = raw_total - raw_self
+  denominator = float(reference_size)
+  return {
+      "raw_self": raw_self,
+      "raw_cross_sum": raw_cross,
+      "standard_self_term": raw_self / denominator,
+      "standard_cross_term": raw_cross / denominator,
+      "standard_score": raw_total / denominator,
+      "loo_score": raw_cross / float(reference_size - 1),
+  }
+
+
 def gradient_sum(
     grad_fn: Callable[..., Any],
     model: nnx.Module,

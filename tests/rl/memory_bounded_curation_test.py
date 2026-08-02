@@ -80,6 +80,24 @@ class MemoryBoundedCurationTest(absltest.TestCase):
     np.testing.assert_allclose(stats["standard_score"], [0.0, 0.0, 5.0, 7.5])
     np.testing.assert_allclose(stats["loo_score"], [-1.0, -1.0, 6.0, 6.0])
 
+  def test_vmapped_statistics_match_memory_bounded_statistics(self):
+    gradients = {
+        "weight": jnp.asarray([[1.0, 2.0], [-3.0, 1.0], [2.0, -4.0], [1.0, 1.0]])
+    }
+    expected = memory_bounded_curation.dtv_statistics(
+        _synthetic_grad_fn,
+        None,
+        {"gradient": gradients["weight"]},
+        scope="group",
+        group_size=2,
+    )
+    actual = memory_bounded_curation.statistics_from_gradient_tree(
+        gradients, scope="group", group_size=2
+    )
+
+    for key in expected:
+      np.testing.assert_allclose(actual[key], expected[key], rtol=1e-6)
+
   def test_policy_trainer_uses_staged_jits(self):
     model = _ScalarModel()
     trainer = self_inf_policy_trainer.PolicySelfInfTrainer(

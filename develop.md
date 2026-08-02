@@ -609,3 +609,53 @@ tests. The reproducible AIME/vLLM gate excludes only tests whose node ID
 contains `sglang_jax`; vLLM cluster tests remain enabled. Installing a second
 rollout engine solely to run irrelevant tests would change the established
 environment and is not required for this experiment.
+
+The worker-0 disk audit after the successful pre-optimization group-policy
+smoke found 3.8 GiB free. The completed run occupied 14 GiB: 2.6 GiB of actor
+model parameters and 12 GiB of optimizer state. Its logs occupied less than
+1 MiB and its run cache only 12 KiB, so checkpoint state, especially the
+optimizer, explains the observed disk decrease. `/tmp/models` contains a
+separate 3.4 GiB model copy but is retained for the next reproduction smoke to
+avoid changing the established vLLM launch environment. The apparent 474 GB
+`/var/log/lastlog` value is a sparse logical file size; `/var/log` consumes only
+1.7 GiB of allocated blocks and `lastlog` must not be deleted based on the
+logical size. No material deleted-open experiment files were found.
+
+The first masked-aggregate `group_policy` smoke began at 2026-08-02 01:29 UTC.
+After its first compile-heavy actor call took 194.0 seconds, steady calls first
+settled near 68.2 seconds, with several temporary 78-85 second calls while
+rollout activity was still overlapping. The previous exact staged update had
+settled near 96.5 seconds per actor call, so replacing per-trajectory full-loss
+update gradients with one aggregate backward reduced steady actor-call time by
+approximately 29 percent. It does not make Policy-DTV comparable to baseline or
+original total-loss DTV because the exact policy-score phase still performs two
+per-trajectory gradient passes.
+
+`NUM_BATCHES=1` is one full global AIME batch, not one prompt or one actor
+microbatch. With `batch_size=128`, eight generations per prompt, and the
+established actor microbatching, it produces 1,024 trajectories and 64 actor
+train calls. At 68.2 seconds per steady call, the actor portion alone is about
+73 minutes, before startup, remaining rollout overlap, and checkpoint close.
+The quoted historical total-loss smoke command also used checkpoint interval
+999 and `TUNIX_SKIP_FINAL_CHECKPOINT=1`, whereas the current smoke saves a
+step-1 checkpoint; this removes roughly the observed 88-second checkpoint cost
+from the historical wall time but cannot explain a large compute difference.
+Historical wall time must be established from its complete worker log rather
+than inferred from the detached launcher command.
+
+Because the 64-call full-global-batch smoke is too slow for iteration, the
+next optimization replaces the two sequential singleton policy-gradient score
+passes with one isolated vmapped policy-only score JIT. The JIT constructs the
+same per-trajectory gradient tree, computes the exact batch/group standard and
+LOO self/cross statistics inside the compiled program, and returns only the
+small statistics arrays. The full Policy+KL update remains the separate masked
+aggregate backward introduced above. No score, threshold, cap, mask, loss, or
+optimizer formula changes.
+
+The required fast TPU gate uses `batch_size=2`, eight generations, the formal
+8192-token limits, one global step, and no checkpoint. Two prompts produce one
+complete 16-trajectory actor microbatch, so this gate exercises the same score
+and update compilation shape used by each formal actor call while avoiding the
+other 63 repeated calls and the 14-GiB checkpoint. If this representative JIT
+does not fit HBM, formal training must not be launched; if it fits, its measured
+post-compile actor time provides the basis for the formal runtime estimate.
