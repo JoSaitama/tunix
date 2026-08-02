@@ -659,3 +659,28 @@ and update compilation shape used by each formal actor call while avoiding the
 other 63 repeated calls and the 14-GiB checkpoint. If this representative JIT
 does not fit HBM, formal training must not be launched; if it fits, its measured
 post-compile actor time provides the basis for the formal runtime estimate.
+
+The first reduced gate exited before rollout or compilation because overriding
+only `batch_size=2` left `rl_training_config.mini_batch_size=128`, violating the
+learner's full-batch divisibility check. This is a gate-configuration error, not
+a vmapped-score, HBM, or distributed-worker failure. The corrected gate sets
+both values to 2 while retaining `train_micro_batch_size=2`; it therefore still
+executes exactly one 2-prompt, 16-trajectory actor call.
+
+The corrected reduced gate then exited before XLA compilation with
+`axis 1 is out of bounds for array of dimension 1`; it did not report HBM OOM.
+The new score-only vmap had sliced each trajectory to rank-one token arrays but
+had not restored the singleton batch dimension required by the Agentic GRPO
+loss. Original total-loss DTV explicitly performs this restoration before its
+per-sample loss. The policy and LOO score vmaps now apply the same restoration,
+and the synthetic score loss regression rejects inputs without the required
+two-dimensional completion mask.
+
+Directly piping `git archive` into `gcloud ... ssh` is unsafe when gcloud
+retries a broken SSH connection. A retry resumes consumption of the local pipe
+instead of replaying the tar stream from byte zero, so the remote extractor
+receives a truncated non-tar suffix and can leave a partially updated source
+tree. Dual-worker deployment must therefore create a persistent compressed
+archive on worker 0, copy that file to worker 1, verify its SHA-256 checksum,
+and only then extract it. This makes both transport retries and source
+verification deterministic.

@@ -42,6 +42,8 @@ def _update_loss(model, train_example, algo_config=None):
 
 def _score_loss(model, train_example, algo_config=None):
   del algo_config
+  if train_example.completion_mask.ndim != 2:
+    raise ValueError("Score loss requires a restored batch dimension.")
   return jnp.sum(model(train_example.feature))
 
 

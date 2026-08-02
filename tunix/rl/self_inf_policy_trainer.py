@@ -97,12 +97,21 @@ class PolicySelfInfTrainer(self_inf_trainer.SelfInfTrainer):
           has_aux=self._score_loss_has_aux,
       )
 
+      def score_sample(model, sample_inputs):
+        sample_inputs = jax.tree_util.tree_map(
+            lambda x: jnp.expand_dims(x, axis=0)
+            if isinstance(x, (jax.Array, np.ndarray))
+            else x,
+            sample_inputs,
+        )
+        return grad_fn(model, sample_inputs)
+
       def input_axis(x):
         return 0 if isinstance(x, (jax.Array, np.ndarray)) else None
 
       input_axes = jax.tree_util.tree_map(input_axis, batch_inputs)
       _, gradients = jax.vmap(
-          grad_fn, in_axes=(None, input_axes)
+          score_sample, in_axes=(None, input_axes)
       )(model, batch_inputs)
       return memory_bounded_curation.statistics_from_gradient_tree(
           gradients,
