@@ -113,6 +113,11 @@ tfds_download: True
 # number of batches used per epoch.
 num_batches: 0
 
+# When true, dataset preparation must produce exactly num_batches complete
+# batches after field and prompt-length filtering. Partial final batches are
+# rejected instead of silently shortening the run.
+require_complete_num_batches: false
+
 ############################### Optimizer ###############################
 # Optimizer config
 optimizer_config: &base_optimizer_config

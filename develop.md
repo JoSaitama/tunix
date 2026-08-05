@@ -1898,3 +1898,34 @@ No source code was changed in this planning analysis.
   and model/data layout. The deployed commit ID is recorded in
   `.deployed_git_head` and representative tracked-file checksums are compared
   before launch.
+
+## 2026-08-05: node-ziao1 preflight result
+
+- Worker 0 and Worker 1 produced identical SHA-256 hashes for all seven sampled
+  implementation and launcher files, including weighted accumulation, trainer,
+  ordinary/LOO policy trainers, Agentic learner, seeded wrapper, and dual-worker
+  launcher. The deployment is consistent.
+- Worker 0 had 33 GiB free and Worker 1 had 46 GiB free before the compact gate.
+- Neither worker reported an owner for `/dev/vfio/0`, and Worker 1 reported no
+  matching training process. The two Worker-0 matches were an old inactive tmux
+  command line and a `tail -F` log follower; neither process owns the TPU device.
+- node-ziao1 is therefore available for the compact dual-worker `group_policy`
+  TPU integration gate.
+
+## 2026-08-05: strict complete-batch CLI schema integration fix
+
+- The first compact `group_policy` TPU gate exited on both workers before JAX,
+  TPU, vLLM, model, or dataset initialization. The complete error was
+  `ValueError: Key require_complete_num_batches was passed at the command line
+  but isn't in config.`
+- Root cause: strict complete-batch handling was implemented in dataset
+  preparation and wired through `grpo_main.py`, but its default schema entry was
+  omitted from `tunix/cli/base_agentic_config.yaml`. Unit tests called the data
+  helper directly and therefore did not cover the production CLI parser.
+- Added `require_complete_num_batches: false` to the production base Agentic
+  configuration. The seeded AIME wrapper continues to override it to `true`.
+- Added a regression test that constructs `GrpoPipeline` from the actual
+  production base Agentic YAML with the same CLI override used by the launcher.
+- The failed attempt did not allocate TPU HBM or write a checkpoint. After the
+  focused CPU CLI gate passes and Worker 1 is redeployed, the same compact TPU
+  gate may be retried without changing experimental semantics.

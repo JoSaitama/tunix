@@ -206,6 +206,17 @@ train_fraction: 1.0
 
 class DispatchTest(absltest.TestCase):
 
+  def test_base_agentic_config_accepts_complete_batch_cli_override(self):
+    config_path = _REPO_ROOT / "tunix" / "cli" / "base_agentic_config.yaml"
+    with mock.patch.dict(os.environ, {"HF_TOKEN": "fake"}):
+      pipeline = grpo_main.GrpoPipeline([
+          "",
+          str(config_path),
+          "require_complete_num_batches=true",
+      ])
+
+    self.assertTrue(pipeline.config["require_complete_num_batches"])
+
   def test_agentic_nullable_string_can_be_overridden_from_cli(self):
     extra = """
 training_mode: "agentic_grpo"
