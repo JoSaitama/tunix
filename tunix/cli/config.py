@@ -427,10 +427,10 @@ class HyperParameters:
     kwargs = {}
     for param in sig.parameters.values():
       param_name = param.name
-      if param_name in config:
-        kwargs[param_name] = config[param_name]
-      elif learning_rate is not None and param_name == "learning_rate":
+      if learning_rate is not None and param_name == "learning_rate":
         kwargs[param_name] = learning_rate
+      elif param_name in config:
+        kwargs[param_name] = config[param_name]
       elif param.default is param.empty:
         # Safely get a name or representation for the callable
         func_name = getattr(func, "__name__", repr(func))

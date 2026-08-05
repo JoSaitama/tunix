@@ -529,6 +529,32 @@ class PeftTrainerTest(parameterized.TestCase):
     ]
     self.assertEqual(periodic_steps, [1, 2])
 
+  @mock.patch.dict(os.environ, {"TUNIX_SKIP_FINAL_CHECKPOINT": "1"})
+  def test_periodic_checkpoint_uses_exact_configured_step_interval(self):
+    config = peft_trainer.TrainingConfig(
+        eval_every_n_steps=100,
+        max_steps=5,
+        gradient_accumulation_steps=1,
+        checkpointing_options=ocp.CheckpointManagerOptions(
+            save_interval_steps=2
+        ),
+    )
+    model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
+    trainer = peft_trainer.PeftTrainer(model, optax.sgd(1e-3), config)
+    trainer = trainer.with_gen_model_input_fn(dummy_gen_model_input_fn)
+    trainer.checkpoint_manager = mock.create_autospec(
+        checkpoint_manager.CheckpointManager, instance=True
+    )
+
+    trainer.train(dummy_datasets(batch_size=2, repeat=5))
+
+    periodic_steps = [
+        call.args[0]
+        for call in trainer.checkpoint_manager.save.call_args_list
+        if not call.kwargs.get("force", False)
+    ]
+    self.assertEqual(periodic_steps, [2, 4])
+
   @parameterized.named_parameters(
       dict(
           testcase_name='without_grad_accu',

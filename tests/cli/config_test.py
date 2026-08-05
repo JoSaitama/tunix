@@ -22,6 +22,7 @@ from absl.testing import absltest
 from absl.testing import parameterized
 from flax import nnx
 import jax
+import jax.numpy as jnp
 import optax
 from tunix.cli import config
 from tunix.sft import peft_trainer
@@ -257,6 +258,30 @@ class ConfigTest(parameterized.TestCase):
     )
     self.assertIsNotNone(lr_schedule)
     self.assertTrue(callable(lr_schedule), "lr_schedule should be callable")
+
+  def test_create_optimizer_prefers_schedule_over_scalar_learning_rate(self):
+    hp = self.initialize_config([
+        "optimizer_config.opt_type=adamw",
+        "optimizer_config.learning_rate=0.123",
+        "optimizer_config.schedule_type=cosine_decay_schedule",
+        "optimizer_config.init_value=0.001",
+        "optimizer_config.decay_steps=4",
+    ])
+    optimizer = hp.create_optimizer("optimizer_config")
+    params = {"x": jnp.asarray(1.0)}
+    grads = {"x": jnp.asarray(1.0)}
+    state = optimizer.init(params)
+
+    for _ in range(2):
+      _, state = optimizer.update(grads, state, params)
+
+    learning_rate = peft_trainer._find_nested_hyperparam(
+        state, "learning_rate"
+    )
+    expected = optax.cosine_decay_schedule(0.001, decay_steps=4)(1)
+    self.assertIsNotNone(learning_rate)
+    self.assertAlmostEqual(float(learning_rate), float(expected), places=9)
+    self.assertNotAlmostEqual(float(learning_rate), 0.123, places=6)
 
   # --- Tests for create_mesh ---
   @parameterized.named_parameters(

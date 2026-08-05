@@ -63,6 +63,34 @@ export TUNIX_TRAINING_SUMMARY_PATH="${LOG_ROOT}/training_summary.json"
 mkdir -p "$RUN_ROOT" "$LOG_ROOT" "$CACHE_ROOT"
 exec > >(tee "${LOG_ROOT}/nohup.log") 2>&1
 
+SUMMARY_MINI_BATCH_SIZE=128
+SUMMARY_TRAIN_MICRO_BATCH_SIZE=2
+for override in "$@"; do
+  case "$override" in
+    rl_training_config.mini_batch_size=*)
+      SUMMARY_MINI_BATCH_SIZE="${override#*=}"
+      ;;
+    rl_training_config.train_micro_batch_size=*)
+      SUMMARY_TRAIN_MICRO_BATCH_SIZE="${override#*=}"
+      ;;
+  esac
+done
+[[ "$SUMMARY_MINI_BATCH_SIZE" =~ ^[1-9][0-9]*$ ]] || {
+  echo "invalid effective mini_batch_size: $SUMMARY_MINI_BATCH_SIZE" >&2
+  exit 2
+}
+[[ "$SUMMARY_TRAIN_MICRO_BATCH_SIZE" =~ ^[1-9][0-9]*$ ]] || {
+  echo "invalid effective train_micro_batch_size: $SUMMARY_TRAIN_MICRO_BATCH_SIZE" >&2
+  exit 2
+}
+(( SUMMARY_MINI_BATCH_SIZE % SUMMARY_TRAIN_MICRO_BATCH_SIZE == 0 )) || {
+  echo "mini_batch_size must be divisible by train_micro_batch_size" >&2
+  exit 2
+}
+SUMMARY_GRADIENT_ACCUMULATION=$((
+  SUMMARY_MINI_BATCH_SIZE / SUMMARY_TRAIN_MICRO_BATCH_SIZE
+))
+
 ARGS=(
   "model_config.rng_seed=${SEED}"
   "data_config.seed=$((42 + SEED))"
@@ -97,7 +125,7 @@ RUN_ROOT=${RUN_ROOT}
 LOG_ROOT=${LOG_ROOT}
 NUM_BATCHES=${NUM_BATCHES}
 MAX_STEPS=${MAX_STEPS_OVERRIDE}
-GRADIENT_ACCUMULATION=64
+GRADIENT_ACCUMULATION=${SUMMARY_GRADIENT_ACCUMULATION}
 NUM_GENERATIONS=8
 MAX_RESPONSE_LENGTH=8192
 BETA=0.001

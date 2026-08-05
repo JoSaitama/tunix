@@ -811,14 +811,15 @@ class PeftTrainer:
           self._train_steps += 1
           self._write_train_metrics()
 
-          self.checkpoint_manager.save(
-              self._train_steps,
-              self.model,
-              self.optimizer,
-              save_only_lora_params=self._lora_enabled,
-              force=False,
-              custom_metadata=self.custom_checkpoint_metadata(),
-          )
+          if self._periodic_checkpoint_due(self._train_steps):
+            self.checkpoint_manager.save(
+                self._train_steps,
+                self.model,
+                self.optimizer,
+                save_only_lora_params=self._lora_enabled,
+                force=False,
+                custom_metadata=self.custom_checkpoint_metadata(),
+            )
 
           if (
               eval_ds
@@ -855,6 +856,16 @@ class PeftTrainer:
           force=True,
           custom_metadata=self.custom_checkpoint_metadata(),
       )
+
+  def _periodic_checkpoint_due(self, step: int) -> bool:
+    """Returns whether an exact step-based checkpoint boundary was reached."""
+    options = self.config.checkpointing_options
+    if options is None:
+      return True
+    interval = getattr(options, "save_interval_steps", None)
+    if interval is None:
+      return True
+    return interval > 0 and step % interval == 0
 
   @property
   def train_steps(self) -> int:

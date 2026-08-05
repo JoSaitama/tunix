@@ -1992,3 +1992,77 @@ No source code was changed in this planning analysis.
   gradient/model dtype (BF16 in the formal run), while its scalar effective
   count remains FP32. This avoids adding a persistent model-sized FP32 gradient
   buffer and therefore avoids an unnecessary HBM increase.
+- Server commit `16f1665c76c0100a90d722520c5d86c4d57efffd` passed the complete
+  focused weighted-accumulation CPU gate: four tests passed in 7.83 seconds and
+  the process status was zero. This covers BF16 parameters, injected scheduled
+  AdamW, JIT tracing, the non-emitting accumulation branch, the emitting update
+  branch, FP32 optimizer updates/state, and a persistent BF16 gradient sum.
+- The remaining SWIG import deprecation warnings are unchanged and non-blocking.
+  Worker 1 may now receive the exact runtime files from this commit and the
+  compact dual-worker `group_policy` TPU gate may be retried.
+
+## 2026-08-05: successful group-policy TPU gate audit and remaining blockers
+
+- The compact dual-worker `group_policy` gate completed successfully on both
+  workers. Worker 0 and Worker 1 returned status zero; global step, actor train
+  step, and checkpoint step were one, while actor iterator step was eight. This
+  proves that the `16/16/2` configuration executed eight microbatches and emitted
+  one real weighted optimizer update after distributed vLLM rollout at the
+  8,192-token limit.
+- Both workers selected the same 16 prompts from 40,300 tokenizer-valid rows.
+  Across 16 prompts and eight generations there were 128 trajectories. The eight
+  decision records retained 119 trajectories by finite threshold-zero DTV score
+  and 63 trajectories in the final effective mask. Seven all-zero-advantage
+  groups (56 trajectories) were removed by degenerate-group masking, and nine
+  additional finite negative-score trajectories were removed by DTV. The final
+  per-microbatch effective counts were `15, 15, 7, 15, 8, 3, 0, 0`, summing to
+  63. No score was nonfinite.
+- An all-true threshold mask means only that every finite score in that one
+  16-trajectory microbatch was greater than or equal to zero. Zero scores pass
+  the threshold. It does not imply that all trajectories contribute to the
+  update: the final mask additionally removes trajectories belonging to
+  degenerate all-zero-advantage groups.
+- The final runtime learning-rate state was `9.999999974752427e-07`, the FP32
+  representation of `1e-6`. The printed top-level `optimizer_config` value
+  `1e-5` belongs to the unused generic/non-Agentic optimizer configuration. The
+  formal actor is constructed from
+  `rl_training_config.actor_optimizer_config`.
+- A remaining critical issue was found during this audit: although the actor
+  config says `schedule_type=cosine_decay_schedule`, `init_value=1e-6`, and
+  `decay_steps=1`, it also contains `learning_rate=1e-6`. In
+  `HyperParameters._extract_kwargs`, a config-provided `learning_rate` currently
+  takes precedence over the schedule object passed by `_create_learning_rate`.
+  Therefore the optimizer receives the scalar `1e-6`, not the constructed
+  cosine schedule. A one-update gate cannot expose this because both have value
+  `1e-6` at schedule index zero. This must be fixed and covered by a multi-update
+  CPU optimizer-construction test before formal training or the remaining TPU
+  gates.
+- Despite `TUNIX_SKIP_FINAL_CHECKPOINT=1` and save interval 999, Orbax saved step
+  one because the trainer calls `CheckpointManager.save` at every completed
+  accumulation boundary and Orbax saves the first checkpoint when none exists.
+  The environment flag skipped only the later forced final-save path. This gate
+  consequently validated real distributed checkpoint serialization, but the
+  behavior does not meet the intended formal policy of retaining only interval
+  64 and final checkpoints. Exact interval gating must be corrected before the
+  formal 314-step runs to avoid an unnecessary large step-one checkpoint.
+
+## 2026-08-05: learning-rate, exact-checkpoint, and summary corrections
+
+- Optimizer construction now gives the schedule object returned by
+  `_create_learning_rate` precedence over a scalar `learning_rate` field in the
+  same optimizer dictionary. Scalar learning rates remain unchanged when no
+  schedule is configured. A regression test constructs AdamW from a config that
+  deliberately contains both a conflicting scalar and cosine schedule, performs
+  two updates, and asserts that the authoritative injected optimizer state equals
+  cosine step one rather than the scalar.
+- Periodic checkpoint calls are now made only when the completed optimizer step
+  is exactly divisible by `save_interval_steps`. Configurations without an
+  explicit step interval retain their previous manager-driven behavior. A CPU
+  test asserts that interval two produces only periodic steps two and four, not
+  the Orbax implicit first checkpoint. Formal interval 64 will therefore attempt
+  steps 64, 128, 192, and 256; the independent final-save path writes step 314.
+  With `max_to_keep=1`, only the latest local checkpoint remains after each
+  finalized save unless step 64 is externally archived before step 128.
+- The seeded launcher now derives `GRADIENT_ACCUMULATION` in `run_summary.env`
+  from the effective mini-batch and train-microbatch overrides. Compact
+  `16/2` gates record eight, while formal `128/2` jobs record 64.
