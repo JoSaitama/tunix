@@ -1984,3 +1984,11 @@ No source code was changed in this planning analysis.
 - A post-failure process audit still found Worker-0 PID 4162255 holding
   `/dev/vfio/0`; the old tmux command and `tail -F` remained harmless. The failed
   gate must be force-terminated before any CPU or TPU retry.
+- The first BF16 JIT regression run then exposed the corresponding outer
+  conditional mismatch: the emitting AdamW branch returned FP32 parameter
+  updates while the accumulating branch returned BF16 zero updates. The
+  accumulating branch now returns FP32 zero optimizer updates, matching AdamW.
+  The persistent gradient accumulator intentionally remains in the incoming
+  gradient/model dtype (BF16 in the formal run), while its scalar effective
+  count remains FP32. This avoids adding a persistent model-sized FP32 gradient
+  buffer and therefore avoids an unnecessary HBM increase.

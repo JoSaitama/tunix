@@ -53,7 +53,9 @@ def weighted_multisteps(
     if effective_count is None:
       raise ValueError("weighted_multisteps requires effective_count.")
     count = jnp.asarray(effective_count, dtype=jnp.float32)
-    gradient_sum = jax.tree.map(lambda x: x * count, updates)
+    gradient_sum = jax.tree.map(
+        lambda x: x * count.astype(x.dtype), updates
+    )
     accumulated = jax.tree.map(
         lambda x, y: x + y, state.acc_gradient_sum, gradient_sum
     )
@@ -92,7 +94,12 @@ def weighted_multisteps(
 
     def accumulate(_):
       return (
-          jax.tree.map(jnp.zeros_like, updates),
+          jax.tree.map(
+              lambda x: jnp.zeros_like(
+                  _promote_optimizer_float_value(x)
+              ),
+              updates,
+          ),
           WeightedMultiStepsState(
               mini_step=state.mini_step + 1,
               gradient_step=state.gradient_step,

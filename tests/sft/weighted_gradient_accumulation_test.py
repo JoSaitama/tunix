@@ -104,6 +104,8 @@ class WeightedGradientAccumulationTest(absltest.TestCase):
 
     first_updates, state = update_once(state)
     np.testing.assert_allclose(first_updates["x"], 0.0)
+    self.assertEqual(first_updates["x"].dtype, jnp.float32)
+    self.assertEqual(state.acc_gradient_sum["x"].dtype, jnp.bfloat16)
     second_updates, state = update_once(state)
 
     self.assertTrue(np.all(np.isfinite(second_updates["x"])))
