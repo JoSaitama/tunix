@@ -1872,3 +1872,29 @@ No source code was changed in this planning analysis.
   scores, optimizer failure, checkpoint corruption, or a distributed-vLLM
   error. The CPU validation phase is therefore complete; the next validation
   boundary is the deliberately small TPU integration gate.
+
+## 2026-08-05: Two-host TPU integration validation procedure
+
+- A v5p-16 TPU VM consists of two workers that jointly execute one distributed
+  method. Worker 0 launches and coordinates Worker 1; the two workers cannot be
+  used as independent eight-chip experiments.
+- The first integration job should run `group_policy` alone on node-ziao1. It is
+  the representative exact policy-gradient selection path. After it succeeds,
+  a second v5p-16 node may run one remaining method concurrently while node-ziao1
+  runs the other, completing baseline and `group_loo_policy` validation in
+  parallel.
+- The compact gate overrides the formal `128/128/2` batch, mini-batch, and train
+  microbatch sizes with `16/16/2`. It therefore executes eight microbatches and
+  one real optimizer update. It preserves dual-worker distributed vLLM, eight
+  generations per prompt, 8,192-token response limits, beta 0.001, clean data,
+  threshold zero, the exact-vmap DTV implementation, and strict complete-batch
+  dataset selection.
+- The gate disables final checkpoint output and trajectory logging to minimize
+  disk use. Checkpoint serialization and resume semantics are covered by the
+  completed CPU tests; formal jobs retain periodic checkpoints.
+- Worker 1 is a deployment tree rather than a Git checkout. Synchronization
+  therefore uses a compressed `git archive` transferred with direct rsync and
+  extracted in place, preserving the worker-local virtual-environment symlink
+  and model/data layout. The deployed commit ID is recorded in
+  `.deployed_git_head` and representative tracked-file checksums are compared
+  before launch.
