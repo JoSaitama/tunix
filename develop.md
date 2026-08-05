@@ -1842,3 +1842,33 @@ No source code was changed in this planning analysis.
   available, avoiding the deprecation warning introduced by direct `.value`
   access. Warnings emitted inside the pinned third-party `qwix` package are
   unchanged and non-blocking.
+
+## 2026-08-05: Final CPU-gate warning audit
+
+- The three remaining isolated server gates completed successfully: weighted
+  accumulation/LR `3 passed`, vLLM routing/CLI `45 passed` with three optional
+  sglang-jax tests deselected, and Agentic loss/checkpointing `11 passed` with
+  25 unrelated tests deselected. All three process statuses were zero.
+- `SwigPyPacked`, `SwigPyObject`, and `swigvarlink` warnings originate during
+  imports of pinned compiled dependencies and are non-blocking.
+- The `tpu_info` Python-3.13 enum warning is forward-looking; the server uses
+  Python 3.11 and no behavior changes in the present environment.
+- The `pxla.thread_resources` messages are JAX API deprecations in existing
+  sharding or test code. They do not indicate incorrect current mesh behavior.
+- The `os.fork()` warning is emitted by a CPU unit test that initializes the
+  vLLM routing object after JAX threads exist. That test completed, and the
+  production launcher uses separate distributed processes rather than this
+  in-process pytest pattern.
+- The sampler `_init_cache` warnings exercise the legacy test sampler, not the
+  formal distributed-vLLM rollout path.
+- The integer-to-boolean scatter warning is a future JAX compatibility issue in
+  a mask-focused test. It is accepted by the pinned JAX version and the relevant
+  mask assertion passed; it should be repaired before a future JAX upgrade but
+  is not a blocker for the pinned experiment.
+- The `Mean of empty slice` warnings arise in synthetic on/off-policy tests whose
+  fixtures intentionally leave some metric series empty. They do not represent
+  nonfinite training loss or gradients, and all affected assertions passed.
+- No warning reports TPU HBM exhaustion, a failed collective, nonfinite DTV
+  scores, optimizer failure, checkpoint corruption, or a distributed-vLLM
+  error. The CPU validation phase is therefore complete; the next validation
+  boundary is the deliberately small TPU integration gate.
