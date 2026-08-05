@@ -1929,3 +1929,58 @@ No source code was changed in this planning analysis.
 - The failed attempt did not allocate TPU HBM or write a checkpoint. After the
   focused CPU CLI gate passes and Worker 1 is redeployed, the same compact TPU
   gate may be retried without changing experimental semantics.
+
+## 2026-08-05: Worker-1 targeted deployment fallback
+
+- A subsequent Worker-0-to-Worker-1 rsync of the full 28 MiB Git archive timed
+  out after transferring 32 KiB. This is consistent with earlier broken-pipe
+  failures for bulk SSH/SCP streams between these TPU VM workers.
+- Repeated full-archive transfers are unnecessary for this commit. The previous
+  deployment had verified identical hashes for all runtime implementation files;
+  the strict-schema fix changes only
+  `tunix/cli/base_agentic_config.yaml` at runtime. Its regression test and
+  `develop.md` do not participate in training.
+- The reliable fallback is for Worker 1 to fetch that one file from the public
+  GitHub repository at the exact Worker-0 commit SHA, install it atomically, and
+  compare its SHA-256 with Worker 0. This preserves exact-version deployment
+  without relying on an unstable bulk inter-worker stream.
+
+## 2026-08-05: BF16 weighted-optimizer state dtype integration fix
+
+- The second compact `group_policy` gate passed strict dataset preparation on
+  both workers. Each worker deterministically selected the same 16 rows from
+  40,300 valid rows; nine rows exceeded the 1,024-token prompt limit. The
+  manifest remainder of 12 describes the unused full valid pool modulo 16 and
+  does not indicate a partial selected gate batch.
+- Rollout completed, but the first optimizer update failed in
+  `weighted_multisteps`. The BF16 model caused Optax to initialize Adam moments
+  and injected hyperparameters as BF16, while the first real Adam update
+  promoted those leaves to FP32. The apply and skip branches of a JAX conditional
+  consequently returned different dtypes, which XLA rejects.
+- The launcher remained visible because a peer distributed process/vLLM
+  keepalive can remain waiting after the primary training process fails. This is
+  a cleanup/status-propagation symptom, not continued successful training.
+- Weighted accumulation now promotes FP16/BF16 floating optimizer-state leaves
+  to FP32 during initialization. The inner optimizer is initialized from an FP32
+  parameter template before a defensive state-tree promotion, so scalar AdamW
+  hyperparameters are not first quantized through BF16. This matches the dtype
+  produced by the first real Adam update, makes every conditional branch
+  type-stable, and does not
+  change the effective-count numerator/denominator, DTV score, selection mask,
+  schedule count, or optimizer formula. Steady-state Adam storage was already
+  FP32 after the first update, so this does not add steady-state HBM usage.
+- Added a JIT regression test using BF16 parameters, injected scheduled AdamW,
+  an accumulation branch, and an emitting branch. This specifically exercises
+  the TPU failure mode that the previous FP32 eager unit tests missed.
+- This failure is new to the five-stage semantics correction, specifically the
+  custom effective-count weighted accumulator. Earlier reproduced jobs used
+  Optax's standard `MultiSteps` or the untouched legacy total-loss path; they
+  did not execute the new conditional that preserves Adam/LR state when an
+  entire accumulation window has zero effective trajectories. The change was
+  required to make unequal retained counts aggregate as one full-batch retained
+  mean, but its first BF16 integration exposed the missing dtype normalization.
+  It is unrelated to the policy-only DTV score formula, LOO subtraction, vLLM,
+  or the 8,192-token rollout length.
+- A post-failure process audit still found Worker-0 PID 4162255 holding
+  `/dev/vfio/0`; the old tmux command and `tail -F` remained harmless. The failed
+  gate must be force-terminated before any CPU or TPU retry.

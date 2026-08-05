@@ -1,6 +1,7 @@
 """Tests for effective-count weighted gradient accumulation."""
 
 from absl.testing import absltest
+import jax
 import jax.numpy as jnp
 import numpy as np
 import optax
@@ -76,6 +77,37 @@ class WeightedGradientAccumulationTest(absltest.TestCase):
     )
     self.assertIsNotNone(logged_lr)
     np.testing.assert_allclose(logged_lr, schedule(0), rtol=1e-6)
+
+  def test_jitted_bfloat16_injected_adam_has_stable_state_dtypes(self):
+    params = {"x": jnp.asarray([1.0, -1.0], dtype=jnp.bfloat16)}
+    schedule = optax.cosine_decay_schedule(1.0e-3, decay_steps=10)
+    inner = optax.inject_hyperparams(optax.adamw)(
+        learning_rate=schedule,
+        b1=0.9,
+        b2=0.99,
+        weight_decay=0.01,
+    )
+    transform = weighted_gradient_accumulation.weighted_multisteps(inner, 2)
+    state = transform.init(params)
+    b1 = peft_trainer._find_nested_hyperparam(state, "b1")
+    self.assertIsNotNone(b1)
+    np.testing.assert_allclose(b1, 0.9, rtol=1e-6)
+
+    @jax.jit
+    def update_once(current_state):
+      return transform.update(
+          {"x": jnp.asarray([0.25, -0.5], dtype=jnp.bfloat16)},
+          current_state,
+          params,
+          effective_count=jnp.asarray(2.0),
+      )
+
+    first_updates, state = update_once(state)
+    np.testing.assert_allclose(first_updates["x"], 0.0)
+    second_updates, state = update_once(state)
+
+    self.assertTrue(np.all(np.isfinite(second_updates["x"])))
+    np.testing.assert_allclose(state.gradient_step, 1)
 
 
 if __name__ == "__main__":

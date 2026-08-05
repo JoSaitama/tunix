@@ -17,6 +17,14 @@ class WeightedMultiStepsState(NamedTuple):
   acc_effective_count: jax.Array
 
 
+def _promote_optimizer_float_value(value):
+  """Promotes low-precision floating leaves used by optimizer state."""
+  if hasattr(value, "dtype") and jnp.issubdtype(value.dtype, jnp.inexact):
+    if value.dtype in (jnp.bfloat16, jnp.float16):
+      return value.astype(jnp.float32)
+  return value
+
+
 def weighted_multisteps(
     inner: optax.GradientTransformation,
     every_k_schedule: int,
@@ -26,10 +34,16 @@ def weighted_multisteps(
     raise ValueError("every_k_schedule must be positive.")
 
   def init(params):
+    optimizer_init_params = jax.tree.map(
+        _promote_optimizer_float_value, params
+    )
+    inner_opt_state = jax.tree.map(
+        _promote_optimizer_float_value, inner.init(optimizer_init_params)
+    )
     return WeightedMultiStepsState(
         mini_step=jnp.zeros([], dtype=jnp.int32),
         gradient_step=jnp.zeros([], dtype=jnp.int32),
-        inner_opt_state=inner.init(params),
+        inner_opt_state=inner_opt_state,
         acc_gradient_sum=jax.tree.map(jnp.zeros_like, params),
         acc_effective_count=jnp.zeros([], dtype=jnp.float32),
     )
