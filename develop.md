@@ -2066,3 +2066,15 @@ No source code was changed in this planning analysis.
 - The seeded launcher now derives `GRADIENT_ACCUMULATION` in `run_summary.env`
   from the effective mini-batch and train-microbatch overrides. Compact
   `16/2` gates record eight, while formal `128/2` jobs record 64.
+- Server focused validation passed: the schedule-precedence test and exact
+  checkpoint-interval test each passed with status zero, and the broader trainer
+  selection passed nine tests with status zero. Pytest quiet mode intentionally
+  does not print the conflicting test values `0.123` and `0.001`; the passing
+  assertion proves that the injected optimizer state matched cosine step one
+  derived from `0.001`, rather than the scalar `0.123`.
+- The full config test then exposed an unrelated pre-existing test isolation
+  issue. Its mesh cases mocked `jax.device_count()` as four or eight but called
+  the real `jax.make_mesh()`, which sees the server's single CPU device in a
+  `JAX_PLATFORMS=cpu` process. The test now mocks `jax.make_mesh()` as well and
+  asserts the exact requested shape, axis names, and automatic axis types. This
+  changes no production mesh construction.
