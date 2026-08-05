@@ -1825,3 +1825,20 @@ No source code was changed in this planning analysis.
   with a ten-minute hard timeout. The Mac workspace lacks the pinned JAX/Flax/
   Optax environment, so only syntax, shell parsing, and diff checks were run
   locally. Server CPU gates are mandatory before any TPU gate.
+
+## 2026-08-05: CPU gate optional-backend correction
+
+- The first server CPU-gate run passed data/evaluation, weighted accumulation
+  and learning-rate, policy selection/gradient, and trainer-checkpointing
+  groups. The routing group then failed only because the pinned vLLM training
+  environment does not install the optional `sgl_jax` package.
+- This failure does not exercise the AIME distributed-vLLM path and does not
+  indicate a baseline, Policy-DTV, Policy-DTV-LOO, optimizer, or checkpoint bug.
+  Installing or upgrading accelerator dependencies would risk the already
+  reproduced vLLM environment and is not required.
+- The routing CPU gate now excludes tests whose names contain `sglang_jax`.
+  All vLLM routing and CLI tests remain included.
+- Nested learning-rate lookup now uses the supported NNX `get_value()` API when
+  available, avoiding the deprecation warning introduced by direct `.value`
+  access. Warnings emitted inside the pinned third-party `qwix` package are
+  unchanged and non-blocking.

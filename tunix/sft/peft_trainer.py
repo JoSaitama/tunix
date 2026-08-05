@@ -84,6 +84,9 @@ def _find_nested_hyperparam(state: Any, name: str) -> Any | None:
     hyperparams = getattr(value, "hyperparams", None)
     if hyperparams is not None and name in hyperparams:
       result = hyperparams[name]
+      get_value = getattr(result, "get_value", None)
+      if callable(get_value):
+        return get_value()
       return getattr(result, "value", result)
     inner = getattr(value, "inner_opt_state", None)
     if inner is not None:

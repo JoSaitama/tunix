@@ -35,7 +35,8 @@ run_gate trainer_checkpointing \
 
 run_gate rl_routing \
   tests/rl/rl_cluster_test.py \
-  tests/cli/grpo_main_test.py
+  tests/cli/grpo_main_test.py \
+  -k 'not sglang_jax'
 
 run_gate agentic_loss_and_checkpointing \
   tests/rl/agentic/agentic_grpo_learner_test.py \
