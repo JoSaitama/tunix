@@ -64,7 +64,13 @@ class Trainer(peft_trainer.PeftTrainer):
 
   @override
   def custom_checkpoint_metadata(self) -> dict[str, Any]:
-    return self.custom_checkpoint_metadata_fn()
+    metadata = dict(self.custom_checkpoint_metadata_fn())
+    # Actor train_steps advances at the completed accumulation boundary before
+    # the outer Agentic learner increments its mirrored global step.
+    metadata["global_step"] = self._train_steps
+    metadata["actor_train_step"] = self._train_steps
+    metadata["actor_iter_step"] = self._iter_steps
+    return metadata
 
   def restored_global_step(self) -> int:
     return self._restored_custom_metadata.get("global_step", 0)

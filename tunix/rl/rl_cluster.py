@@ -616,6 +616,16 @@ class RLCluster:
 
     self._maybe_load_model_from_cpu(self.train_actor, Role.ACTOR)
     actor_config = copy.deepcopy(self.cluster_config.training_config)
+    actor_config.use_effective_count_gradient_accumulation = (
+        actor_config.dynamic_batch_curation_variant
+        in (
+            None,
+            "self_inf_batch_policy",
+            "self_inf_group_policy",
+            "self_inf_batch_loo_policy",
+            "self_inf_group_loo_policy",
+        )
+    )
     actor_config.metrics_prefix = "actor"
     actor_config.pbar_description = "Actor Training"
     if actor_config.checkpoint_root_directory is not None:
@@ -647,6 +657,7 @@ class RLCluster:
               else "batch"
           ),
           "dot_threshold": actor_config.self_influence_dot_threshold,
+          "decisions_path": os.getenv("TUNIX_DBC_DECISIONS_PATH"),
       }
     elif actor_config.dynamic_batch_curation_variant in (
         "self_inf_batch_loo_policy", "self_inf_group_loo_policy"

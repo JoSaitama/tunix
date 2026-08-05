@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import os
@@ -198,7 +199,33 @@ def _load_dataset(args: argparse.Namespace) -> pd.DataFrame:
 
   if args.limit is not None:
     df = df.head(args.limit)
-  return df.reset_index(drop=True)
+  missing_columns = [
+      name for name in (args.question_col, args.answer_col) if name not in df
+  ]
+  if missing_columns:
+    raise ValueError(f"Evaluation dataset is missing columns: {missing_columns}")
+  questions = df[args.question_col].fillna("").astype(str).str.strip()
+  answers = df[args.answer_col].fillna("").astype(str).str.strip()
+  if questions.eq("").any() or answers.eq("").any():
+    raise ValueError("Evaluation dataset contains empty questions or answers.")
+  unique_questions = int(questions.nunique())
+  if unique_questions != len(df):
+    raise ValueError(
+        "Evaluation dataset contains duplicate questions: "
+        f"rows={len(df)}, unique_questions={unique_questions}."
+    )
+  if args.dataset_type == "aime" and args.limit is None and len(df) != 30:
+    raise ValueError(
+        f"Full AIME evaluation requires exactly 30 problems; received {len(df)}."
+    )
+  dataset_sha256 = hashlib.sha256(dataset_path.read_bytes()).hexdigest()
+  result = df.reset_index(drop=True)
+  result.attrs["validation"] = {
+      "rows": len(result),
+      "unique_questions": unique_questions,
+      "dataset_sha256": dataset_sha256,
+  }
+  return result
 
 
 def _format_prompt(
@@ -394,6 +421,7 @@ def run_eval(args: argparse.Namespace) -> dict[str, Any]:
     model, model_config = _load_base_model(args, mesh)
   sampler = _create_sampler(args, model, model_config, tokenizer, mesh)
   df = _load_dataset(args)
+  dataset_validation = dict(df.attrs.get("validation", {}))
 
   output_dir = _resolve_output_dir(args, actor_checkpoint_root, checkpoint_step)
   output_dir.mkdir(parents=True, exist_ok=True)
@@ -452,6 +480,7 @@ def run_eval(args: argparse.Namespace) -> dict[str, Any]:
   )
   summary = {
       "metrics": metrics,
+      "dataset_validation": dataset_validation,
       "checkpoint_source": args.checkpoint_source,
       "checkpoint_root": (
           str(actor_checkpoint_root) if actor_checkpoint_root else None

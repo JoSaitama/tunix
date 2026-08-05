@@ -876,3 +876,952 @@ evaluated separately.
 - Total-loss DTV remains unchanged and will be measured with the same
   16-prompt, 8192-token, no-checkpoint gate for a directly comparable timing
   baseline.
+
+## 2026-08-02: Train microbatch HBM limit and full-smoke decision
+
+- The original AIME reproduction path already sets
+  `rl_training_config.train_micro_batch_size=2`; this was not introduced by
+  the Policy-DTV port. With eight generations, each actor call processes two
+  prompt groups, or sixteen trajectories.
+- Exact-vmap `group_policy` gates at train microbatch sizes eight and four both
+  failed with XLA HBM exhaustion. The microbatch-four failure occurred while
+  compiling `score_batch` for 32 trajectories and included multi-GiB HLO
+  temporaries, so it was not a stale-process or host-memory failure.
+- Train microbatch size two is therefore the validated maximum for the exact
+  8192-token, eight-generation Policy-DTV configuration on this v5p-16 setup.
+  Increasing this parameter is not a viable speed optimization without
+  changing the score implementation or experimental shape.
+- The next validation is one full 128-prompt global update for each of
+  `group_policy` and `group_loo_policy`, run sequentially with train
+  microbatch size two and a step-1 checkpoint. Checkpoints must be removed
+  between methods because worker 0 has limited disk capacity.
+
+## 2026-08-02: Full group Policy-DTV smoke result
+
+- The full `group_policy` smoke completed one 128-prompt global update with
+  eight generations, 1024 trajectories, train microbatch size two, and 64
+  accumulated actor calls. Global step zero took 2000.74 seconds, the logged
+  step-1 loss was -0.042262, and the step-1 Orbax checkpoint finalized
+  successfully.
+- Both worker processes reported status zero (`HOST ... w-0 STATUS=0` and
+  `HOST ... w-1 STATUS=0`), with `LOCAL_STATUS=0` and `REMOTE_STATUS=0`.
+  The separately reported `REMOTE_SSH_STATUS=1` is a launcher/gcloud transport
+  status artifact and does not override the explicit remote process status.
+- Orbax reported 3.3 GiB of logical model parameters and 9.9 GiB of logical
+  optimizer state. The on-disk checkpoint occupied less than 7 GiB because
+  OCDBT stores chunked/compressed physical data; logical serialization volume
+  is not equal to `du` usage. Earlier large disk growth included accumulated
+  run directories, failed-run artifacts, logs/caches, or multiple checkpoints,
+  rather than a larger model produced by Policy-DTV.
+- The full step took 2000.74 seconds including the first-step compilation
+  overhead. Removing roughly 131 seconds of first-call compilation gives a
+  provisional steady-step estimate near 31.2 minutes. A 64-step short-sweep
+  run is therefore expected to require about 34--40 hours for one Policy-DTV
+  method and seed, allowing for rollout-length variability and final
+  checkpointing. This estimate must be updated with the full LOO smoke and a
+  multi-step stability run; it is not a one-epoch estimate.
+
+## 2026-08-02: Historical node-2 baseline audit
+
+- The historical run named
+  `baseline-630-prompt1024-beta001-seqmean-20260515-finalonly` completed
+  successfully on node 2 and contains a finalized 7.6-GiB actor checkpoint at
+  step 314 plus a full AIME k=16 evaluation directory. Despite `630` in the
+  directory name, TensorBoard contains 314 global training steps and the final
+  checkpoint is step 314; the name must not be interpreted as 630 completed
+  optimizer updates.
+- The run used the intended beta-0.001/sequence-mean configuration. Its
+  reference-policy KL remained finite and small, from approximately 8.28e-6
+  at step 1 to 6.61e-5 at step 314. Gradient norm remained finite (about 0.194
+  to 0.211), and the launcher and both actual worker processes reported status
+  zero. This is sufficient evidence that beta 0.001 is stable for the matched
+  AIME baseline and removes the need for an expensive three-value beta sweep.
+- The historical final checkpoint is a matched one-epoch baseline for a
+  one-epoch DTV result. It is not a matched final evaluation for a 64-step DTV
+  short run because only the step-314 checkpoint was retained. The 64-step
+  phase should be treated as method selection; final one-epoch comparison can
+  reuse the historical baseline only after its saved evaluation summary and
+  exact seed/config provenance are confirmed.
+- The archived distributed AIME evaluation is complete despite an earlier
+  failed single-worker attempt: it has `SUMMARY_OK=1`, 480 samples for 30
+  problems at k=16, and checkpoint step 314. Reported metrics are avg@16
+  0.04167, maj@16 0.20, pass@16 0.23333, and truncation rate 0.87292.
+- The short-sweep document does not define 64 steps as the paper's final
+  horizon. It explicitly defines 64-step rescue/screening runs. Because the
+  handoff requires matched training duration when reusing the historical
+  baseline, the formal one-epoch DTV horizon is 314 updates. A separate
+  64-step run is optional when threshold and beta are already fixed. The
+  efficient risk-control plan is one 314-step run with checkpoints every 64
+  steps and `max_to_keep=1`, allowing a step-64 decision without restarting
+  training or duplicating its first 64 updates.
+
+## 2026-08-02: Full group Policy-DTV-LOO smoke result
+
+- The full `group_loo_policy` smoke completed the matched 128-prompt,
+  eight-generation global update with train microbatch size two and 64 actor
+  calls. Global step zero took 1953.06 seconds (32.55 minutes), about 2.4%
+  faster than the ordinary group Policy-DTV full smoke. The step-1 loss was
+  0.012885.
+- Its step-1 Orbax checkpoint finalized successfully in about 50.24 seconds.
+  Orbax again reported 3.3 GiB of logical model parameters and 9.9 GiB of
+  logical optimizer state. Both worker processes, local execution, and the
+  parsed remote process status were zero.
+- Periodic checkpoints with `max_to_keep=1` still require enough transient
+  disk for the existing checkpoint and the new temporary checkpoint before
+  retention cleanup. With a physical checkpoint near 7--8 GiB and only about
+  18 GiB free on worker 0, saving every 64 steps may have unsafe peak-space
+  headroom. The historical node-1 checkpoint layout and save cadence must be
+  audited before changing the formal launcher.
+
+## 2026-08-02: Final checkpoint and formal-run decision
+
+- The node-1 audit confirmed that the three historical DTV runs retained only
+  their final actor checkpoint: steps 311, 314, and 63. Their recipe used
+  `save_interval_steps=500`; consequently, all three checkpoints were forced
+  final saves rather than periodic saves. This establishes final-only saving
+  as the reproduced historical behavior for runs shorter than 500 updates.
+- Historical checkpoints occupy approximately 14 GiB each, whereas the
+  current group Policy-DTV-LOO checkpoint occupies 7.5 GiB. The difference is
+  a physical serialization/layout difference and must not be assumed to
+  reduce the logical model or optimizer state. The current checkpoint is the
+  relevant storage estimate for the current branch.
+- Worker 0 had only 10 GiB free while the 7.5-GiB LOO smoke checkpoint was
+  present. Deleting that completed smoke output should restore approximately
+  17.5 GiB. This is sufficient for one final 7.5-GiB checkpoint, but it is not
+  sufficient for a safe two-checkpoint overlap during retention cleanup.
+- The earlier proposal to checkpoint every 64 updates is therefore withdrawn
+  for the present local disk. `max_to_keep=1` does not prevent transient
+  coexistence of the old checkpoint, the new checkpoint, and Orbax temporary
+  files. Formal runs should use `save_interval_steps=500`, retain the forced
+  final checkpoint, and start only after prior smoke checkpoints are removed.
+- The formal matched configuration is 314 optimizer updates, beta 0.001,
+  score threshold 0.0, clean rewards, eight generations, 8192 generation
+  tokens, batch and mini-batch size 128, and train microbatch size two. Seeds
+  are launched one at a time. At approximately 31--33 minutes per update, one
+  method/seed is expected to require roughly 6.8--7.5 days plus final
+  checkpointing; the two group Policy-DTV methods require roughly two weeks
+  per seed when run sequentially.
+
+## 2026-08-02: Historical step numbering and smoke-artifact audit
+
+- Historical checkpoint directory names are not directly comparable across
+  launcher/code versions. The older loop stored the final zero-based loop
+  index: 312 updates ended at checkpoint directory 311, while the
+  `officialish8k` configuration used 630 batches with a 0.5 train fraction,
+  producing 315 updates and final directory 314. The current branch stores a
+  one-update smoke as checkpoint directory 1. Formal duration must therefore
+  be defined by configured `max_steps` and verified update metrics, not by
+  assuming every checkpoint directory uses the same indexing convention.
+- Directories named `base_model_k16_aime_smoke*` are evaluation outputs, not
+  necessarily model checkpoints. Historical cleanup must first inventory all
+  directories named `smoke`, their physical sizes, and any nested checkpoint
+  or model-parameter data. Cleanup should remove only confirmed disposable
+  model/checkpoint payloads while retaining launcher logs, status files,
+  TensorBoard data, evaluation summaries, and sample outputs.
+
+## 2026-08-02: Historical cleanup decision
+
+- The historical base-model and checkpoint evaluation smoke directories are
+  tiny (8 KiB to 660 KiB) and contain no model/checkpoint payloads. They should
+  be retained because deleting them provides no meaningful disk recovery.
+- Disk consumption is dominated by three historical actor checkpoints of
+  approximately 14 GiB each. Each contains about 2.6 GiB of model parameters
+  and 12 GiB of optimizer state.
+- The unambiguous cleanup target is
+  `selfinf-thr-m005-64step-20260707/checkpoints`. This was a 64-step screening
+  run, has no archived evaluation directory, and keeps its launcher files,
+  manifest, TensorBoard events, and status logs outside the checkpoint tree.
+  Removing only this checkpoint should recover about 14 GiB while preserving
+  the experimental record.
+- The one-epoch checkpoints at steps 311 and 314 remain protected because they
+  represent historical trained models with evaluation provenance. They must
+  not be removed as part of smoke cleanup.
+
+## 2026-08-02: Checkpoint-size interpretation and worker-1 archival
+
+- Cleanup of the 64-step checkpoint is deferred. Its 14-GiB size is not caused
+  by retaining 64 steps of model history: a checkpoint stores one model and
+  optimizer state, whose tensor shapes do not grow with the number of completed
+  updates.
+- The old and current checkpoints both contain approximately 2.6 GiB of
+  physical model parameters. The observed size difference is concentrated in
+  optimizer state: approximately 12 GiB in the historical checkpoint versus
+  about 5 GiB in the current 7.5-GiB checkpoint. This is consistent with a
+  change in optimizer/Orbax physical representation, dtype, compression,
+  deduplication, or shard layout. It is not evidence that the current run lost
+  trained model parameters.
+- Worker 1 has enough local disk to archive the historical 64-step checkpoint.
+  Because earlier `gcloud ... scp` transfers failed even for a 28-MiB archive,
+  a single non-resumable 14-GiB SCP is not acceptable. The archive should be
+  copied with resumable `rsync` over the exact SSH command generated by gcloud,
+  then verified with a relative-path SHA-256 manifest before any source
+  checkpoint is removed from worker 0.
+- The verified worker-1 transport endpoint is
+  `sa_109738781960981123169@10.128.0.24`, using worker 0's
+  `~/.ssh/google_compute_engine` key and gcloud's TPU host-key options. Both
+  workers provide rsync 3.2.7. The archive transfer uses `rsync -rlptH` with
+  `--partial --append-verify`, without compression or owner/group
+  preservation. Source deletion is authorized only after source and
+  destination relative-path SHA-256 manifest hashes match exactly.
+
+## 2026-08-02: Formal group-policy launch and two-checkpoint policy
+
+- The 64-step historical checkpoint was copied to worker 1 and verified with
+  29 files and matching manifest hash
+  `c90891774fa50bcde0a2aabeee6bae10b805097eb92212779de0bc6450a6ce9c`.
+  Worker 0 then removed only the checkpoint tree while retaining logs,
+  TensorBoard, launcher files, and the manifest. Free space increased to
+  32 GiB; worker 1 retained 46 GiB free after the archive.
+- The formal `group_policy` run uses 314 optimizer updates, seed 0, clean
+  rewards, beta 0.001, DTV threshold 0.0, exact lean-vmap scoring, batch and
+  mini-batch size 128, train microbatch size two, eight generations, and 8192
+  generation tokens.
+- Checkpoints are written every 64 updates with `max_to_keep=1`. The step-64
+  checkpoint must be archived manually to worker 1 before step 128 is saved;
+  the current launcher does not perform automatic cross-worker archival.
+  Worker 0
+  then continues normal retention and keeps only the latest checkpoint,
+  ending with the final step-314 checkpoint. This yields the requested two
+  useful checkpoints without retaining multiple 7.5-GiB checkpoints on the
+  constrained worker-0 filesystem.
+- Steps 128, 192, and 256 do not need to be copied to worker 1 unless they are
+  independently required as permanent evaluation milestones. They remain
+  temporary local recovery checkpoints: each replaces the preceding local
+  checkpoint after a successful save. Missing the manual step-64 archive
+  window means that step 64 will be deleted when step 128 is committed.
+- The user selected this two-checkpoint plan for the seed-0 formal
+  `group_policy` run and will perform occasional manual checks. No polling
+  process or automatic synchronization is installed. The formal launch uses
+  `NUM_BATCHES=314`, `MAX_STEPS_OVERRIDE=314`, checkpoint interval 64,
+  `max_to_keep=1`, exact-vmap scoring, and an enabled forced final checkpoint.
+- The resolved seed-0 `group_policy` launch was verified from both worker
+  configuration dumps. It uses 314 batches/updates, data seed 42, model seed
+  0, batch and mini-batch size 128, train microbatch size two, eight
+  generations, 1024 prompt tokens, 8192 generation tokens, Agentic beta
+  0.001, sequence-mean-token-mean loss, clean rewards, group Policy-DTV,
+  threshold 0.0, checkpoint interval 64, and `max_to_keep=1`. The separately
+  printed legacy `grpo_config.beta=0.08` is inactive because the run uses
+  `training_mode=agentic_grpo`; the effective beta is the verified
+  `agentic_grpo_config.beta=0.001`.
+
+## 2026-08-04: Formal-run progress diagnostics
+
+- The earlier roughly 35--37 hour estimate for reaching update 64 was a
+  smoke-derived optimistic projection, not a deadline. Formal rollout latency
+  varies with generated sequence lengths, request scheduling, and the number
+  of usable groups. A missing step-64 checkpoint after 45 hours is not by
+  itself evidence of a stalled process.
+- Progress should be checked once from three independent signals: recent
+  training-step lines in the per-run `nohup.log`, the maximum scalar step in
+  TensorBoard event files, and live GRPO/VFIO ownership on both workers.
+  TensorBoard uses `flush_every_n_steps=20`, so its visible maximum may lag the
+  live trainer by up to approximately twenty updates. Checkpoint 64 appears
+  only after update 64 completes and Orbax finishes committing the checkpoint.
+
+## 2026-08-04: Periodic-checkpoint configuration is currently inactive
+
+- The formal node-1 run reached global step 73 while its actor checkpoint
+  directory remained empty. Source inspection identified the exact reason:
+  `PeftTrainer.train()` intentionally contains no periodic save call and states
+  that checkpoints are saved on close. Consequently,
+  `save_interval_steps=64` is parsed into the configuration but is never
+  applied during this Agentic training loop.
+- The current run will force-save only its final checkpoint when
+  `RLCluster.close()` calls `actor_trainer.close()`. The earlier plan describing
+  automatic local checkpoints at 64, 128, 192, and 256 is invalid for the
+  current commit and is superseded by this finding.
+- A step-64 checkpoint cannot be reconstructed from the in-memory step-73
+  process. Stopping the node-1 run would discard all completed progress, so it
+  should continue as a final-only run. Periodic checkpointing requires a source
+  fix and a newly started process; hot-patching files cannot change the already
+  loaded trainer code safely.
+
+## 2026-08-04: Meeting explanation of the Policy-DTV HBM bottleneck
+
+- HBM is the TPU accelerator memory used for model parameters, optimizer
+  state, activations, gradients, and XLA temporary buffers. An HBM OOM is
+  independent of host RAM and filesystem capacity; free disk cannot prevent
+  it.
+- Standard GRPO computes one aggregated training loss and one aggregated
+  backward pass for a microbatch. Policy-DTV must additionally obtain an exact
+  policy-loss gradient for each trajectory in order to evaluate gradient
+  alignment. For ordinary group DTV, the exact score is
+  `s_i = <g_i, mean_j(g_j)>`, where `g_i` is the policy-only trajectory
+  gradient. LOO-DTV uses the same per-trajectory gradients but excludes
+  `g_i` from its reference mean. These score passes retain substantially more
+  per-trajectory activations, gradient values, and XLA intermediates than an
+  ordinary aggregate GRPO backward pass.
+- The implementation already separates scoring from updating. Scoring uses
+  the lean policy-only loss with beta zero and exact vmapped gradients. After
+  the score mask is known, the update uses one masked aggregate Policy+KL
+  backward pass with beta 0.001. This removed the previous expensive
+  per-trajectory update gradients, but the exact per-trajectory score pass
+  remains the peak-HBM operation.
+- A larger train microbatch can improve speed by processing more trajectories
+  in parallel and reducing the number of actor calls. With global batch 128,
+  microbatch two requires 64 actor calls; four would require 32, and eight
+  would require 16. This changes execution partitioning, not the global batch,
+  number of generations, token length, DTV formula, or intended update.
+- HBM usage grows sharply with microbatch size because multiple 8192-token
+  activation/gradient graphs coexist. Exact-vmap experiments with microbatch
+  eight and four both failed with HBM OOM. Microbatch two completed full
+  128-prompt, eight-generation, 8192-token smoke tests for both group
+  Policy-DTV and group Policy-DTV-LOO. It is therefore the largest empirically
+  validated setting for this hardware and implementation, not an arbitrary
+  conservative choice.
+
+## 2026-08-05: Scaling to additional TPU workers
+
+- A larger TPU slice increases aggregate HBM, but it does not increase HBM per
+  accelerator. It reduces per-device memory only when model parameters,
+  optimizer state, activations, and Policy-DTV gradient intermediates are
+  correctly sharded over the additional devices.
+- Adding worker processes without changing the distributed process count,
+  process-host list, actor mesh, rollout topology, and vLLM configuration does
+  not provide usable memory or speed. The current launcher and recipe are
+  designed around a dual-worker v5p-16 slice; a larger slice requires an
+  explicit multi-worker port and cannot be attached dynamically to an already
+  running experiment.
+- Data parallelism may replicate the model and optimizer on each replica, so
+  aggregate HBM can increase without relieving the per-replica DTV score OOM.
+  FSDP/tensor/sequence sharding can reduce per-device state, but exact
+  per-trajectory gradient activations must also follow the intended sharding
+  for microbatch four to become feasible.
+- More workers can improve throughput by increasing parallel rollout or actor
+  compute, but collective communication, resharding, compilation, synchronization,
+  and a fixed global batch limit the gain. The speedup is therefore uncertain
+  and non-linear. A larger-slice experiment should first reproduce the exact
+  microbatch-two gate, then test microbatch four and compare peak HBM and
+  steady global-step time under identical algorithmic settings.
+
+## 2026-08-05: Reduced generation-length experiments
+
+- The AIME/DeepScaler training pipeline can run with generation limits below
+  8192 tokens. A 4096- or 2048-token cap reduces rollout work, activation
+  storage, gradient intermediates, and XLA buffer pressure, and may make a
+  larger train microbatch feasible.
+- This is not a strict reproduction of the historical 8192-token experiment.
+  Shorter caps truncate more reasoning trajectories before a final answer is
+  emitted, which increases zero rewards and degenerate all-zero groups and
+  changes the trajectory population scored by Policy-DTV. It therefore changes
+  both training efficiency and the effective learning problem.
+- The archived 8192-token baseline evaluation already reported an unusually
+  high truncation rate of approximately 87.3 percent. This makes an aggressive
+  reduction especially risky: the nonzero-reward rate may collapse even if the
+  code continues to train normally.
+- Reduced-length runs are appropriate as pilots or explicitly labeled compute
+  ablations. A fair method comparison at 4096 tokens requires a matched
+  4096-token baseline and matched random/reward/DTV methods. The existing
+  8192-token baseline must not be used as the sole direct comparator.
+
+## 2026-08-05: Read-only audit of `AIME GRPO_issues.pdf`
+
+Scope: this audit traced the current AIME launcher, data pipeline, Agentic
+rollout, reward and advantage construction, Policy-DTV trainers, gradient
+accumulation, checkpointing, and offline AIME evaluator. No training code was
+changed. The two active seed-0 jobs should not be interrupted on the basis of
+this audit.
+
+### Effective launch and update structure
+
+- The formal path is
+  `run_aime_reward_rank_noise_suite.sh -> run_aime_seeded_full.sh ->
+  run_official_like_dual_worker.sh ->
+  run_deepscaler_disagg_v5p16_1epoch.sh -> grpo_main_distributed.py ->
+  grpo_main.py -> GRPOLearner -> RLCluster -> actor trainer`.
+- The current full training batch is 128 prompts. Each prompt produces eight
+  trajectories. `train_micro_batch_size=2` therefore means two prompt groups,
+  or 16 trajectories, per actor call.
+- RL configuration intentionally rejects an explicitly supplied
+  `gradient_accumulation_steps`. It derives the effective value as
+  `mini_batch_size // train_micro_batch_size = 128 // 2 = 64`. The CLI also
+  removes the raw YAML field before constructing the RL configuration.
+- `optax.MultiSteps` performs one optimizer update after those 64 actor
+  microbatches. The Agentic learner also advances one global step after the
+  same 64 microbatches. Consequently, 314 global steps are 314 optimizer
+  updates, not 314 microbatch calls.
+- The PDF is correct that early/raw configuration output showing accumulation
+  one is misleading. Its proposed launcher fix of explicitly passing 64 is
+  incorrect for this repository and would be rejected. The appropriate future
+  fix is to log and assert the constructed/effective value after RL config
+  initialization.
+
+### Training-data cardinality and the 314-step contract
+
+- The DeepScaleR JSON contains 40,315 raw rows. The current loader
+  deterministically removes six rows with empty questions or answers, leaving
+  40,309 rows before prompt-token-length filtering.
+- A nominal 314-step run requests `314 * 128 = 40,192` prompts. The pre-length
+  margin is therefore 117 rows, not 123 as stated in the PDF.
+- Prompt-length filtering occurs before the final slice. If more than 117 of
+  the 40,309 retained rows exceed the 1,024-token prompt limit, fewer than
+  40,192 examples remain. The Agentic loader rejects/skips a final incomplete
+  batch, so the job can finish before update 314. This exact post-tokenization
+  count is not asserted by the launcher and must be checked once on the server.
+- Dataset shuffling is deterministic for a fixed data seed. The selected
+  40,192-example subset is therefore reproducible once the tokenizer, model
+  files, loader revision, and seed are fixed.
+
+### AIME 2024 evaluation semantics
+
+- The AIME parquet path is opened by the training recipe, but its rows are not
+  returned to `GRPOLearner` and no online AIME evaluation is performed during
+  training. `eval_every_n_steps` therefore does not evaluate AIME in this path.
+- Final AIME evaluation is a separate script. It iterates all parquet rows and
+  supports a final partial inference batch, so a 30-question dataset does not
+  have to be divisible by the training batch size of 128.
+- AIME 2024 consists of 15 AIME I and 15 AIME II questions. With `k=16`, the
+  evaluator produces 30 * 16 = 480 samples. `avg@16` is sample accuracy over
+  480 generations; `pass@16` and `maj@16` are averaged over the 30 problems.
+  The archived summary reporting 30 problems and 480 samples demonstrates
+  that all 30 rows were evaluated.
+- The evaluator does not independently prove that an arbitrary parquet is
+  AIME 2024. It trusts the configured file. Dataset provenance, row count,
+  unique-question count, missing fields, and any available year/source columns
+  should be checked and recorded once; a file hash is appropriate when the
+  parquet lacks provenance metadata.
+
+### Policy-DTV and Policy-DTV-LOO mathematics
+
+- The score loss is policy-only GRPO loss with beta zero. The masked update
+  uses the normal Policy+KL loss with beta 0.001. This matches the intended
+  experiment: KL does not alter trajectory ranking, while it remains active in
+  the model update.
+- For ordinary group DTV, the implementation computes exactly
+  `s_i = <g_i, mean_j(g_j)>`. For LOO it computes exactly
+  `s_i = <g_i, mean_{j != i}(g_j)>`. The group size is eight and the Agentic
+  queue preserves the contiguous eight-trajectory group layout required by
+  the reshape.
+- The exact-vmap implementation changes execution and memory behavior but not
+  those formulas. The PDF does not identify a mathematical error in the DTV
+  dot-product or LOO mean.
+
+### Confirmed high-priority normalization issue
+
+- After selecting a mask, `make_masked_aggregate_grad_fn` zeroes rejected rows
+  and applies `sequence-mean-token-mean`. This divides by the number retained
+  inside each 16-trajectory actor microbatch. `optax.MultiSteps` then combines
+  64 equally weighted microbatch-mean gradients.
+- If retained counts differ across microbatches, this is not the same objective
+  as one mean over every retained trajectory in the full 128-prompt batch.
+  Microbatches with fewer retained trajectories receive disproportionate
+  weight. This is partition-dependent and is a real experimental issue, not
+  only a logging issue.
+- A correct full-batch retained-mean implementation must accumulate gradient
+  numerators and effective retained counts across all 64 microbatches, then
+  divide once. The count must include only rows that pass the method mask and
+  have a nonempty `completion_mask`, because degenerate groups are already
+  disabled by the learner.
+- The PDF's conceptual numerator/count solution is correct, but simply changing
+  a denominator or passing an accumulation flag is insufficient. It requires a
+  coordinated accumulator/optimizer change while preserving one scheduler and
+  optimizer update per global step, plus an integration test using unequal
+  retained counts.
+- The two active runs use the legacy microbatch-local retained-mean objective.
+  They can finish and provide useful preliminary results, but should not be
+  labeled final results for a paper that defines a uniform mean over all
+  retained trajectories.
+
+### Ordinary versus LOO selection policy
+
+- Ordinary group Policy-DTV currently applies only `score >= threshold`.
+  Group Policy-DTV-LOO additionally enforces a default 25-percent minimum keep,
+  which retains at least two of eight trajectories per group.
+- This difference is real, but it is faithful to the GSM8K reference rather
+  than an accidental AIME porting bug. It becomes an experimental confound if
+  the paper describes ordinary DTV and LOO as differing only in whether the
+  self term is included.
+- Before new final seeds, the experiment contract must explicitly choose one
+  of: a shared minimum-keep rule, threshold-only for both, or documenting the
+  LOO cap as part of the method. Existing group-policy versus group-LOO-policy
+  results otherwise compare both score definition and selection policy.
+- Ordinary DTV also lacks the LOO path's explicit finite-value guard and
+  fallback. `NaN >= threshold` is false, positive infinity is retained, and an
+  all-negative group can retain zero. Training remains numerically executable
+  because the masked denominator is clipped, but diagnostics and the method
+  contract are incomplete.
+
+### Fixed random/reward filters
+
+- The method called reward filtering ranks `advantages`, not raw reward. This
+  matches the GSM8K implementation. For a nondegenerate GRPO group,
+  standardized advantage preserves reward ordering, so the distinction mainly
+  matters for ties and degenerate groups.
+- Fractional group filtering uses deterministic stochastic rounding. At a
+  0.10 ratio with eight generations, a group filters one trajectory with 0.8
+  probability and none with 0.2 probability; ten percent is an expectation,
+  not an exact per-group count.
+- These trainers share the same microbatch-local retained-mean normalization.
+  At ratios that produce variable retained counts, they are affected by the
+  normalization issue as well.
+
+### Logging and checkpoint findings
+
+- Ordinary Policy-DTV records aggregate score statistics and kept fraction but
+  does not write the per-trajectory decision record supported by the LOO and
+  fixed-filter paths. This does not change gradients, but it prevents complete
+  post-hoc auditing of score, mask, group, and effective retained count.
+- Periodic checkpoint saving is currently disabled in the trainer; the normal
+  close path force-saves the final checkpoint. The active jobs therefore must
+  continue to completion to produce their checkpoints.
+- Adding a save directly inside the inner trainer loop, as proposed in the PDF,
+  risks an off-by-one Agentic metadata state because the outer learner advances
+  `global_steps` only after `update_actor` returns. A future periodic-save fix
+  should occur at the completed full-batch boundary (or explicitly pass the
+  completed step) and must have a real resume integration test.
+
+### Disposition
+
+- Do not restart the active seed-0 runs. Finish and evaluate them as preliminary
+  runs with their exact code revision and the two disclosed semantics:
+  microbatch-local retained means and different ordinary/LOO keep policies.
+- Before launching additional final seeds, address the full-batch retained-mean
+  normalization, decide and document the shared selection contract, add
+  effective-config/data-cardinality assertions, and add common decision
+  diagnostics. Periodic checkpoint/resume support is important operationally
+  but can be implemented independently of the method mathematics.
+- The PDF is strongest on the normalization, observability, and checkpoint
+  risks. It is incorrect about explicitly passing gradient accumulation, stale
+  by six rows in its dataset arithmetic, and treats the ordinary/LOO selection
+  difference as a bug even though that difference is inherited from the GSM8K
+  reference.
+
+## 2026-08-05: Minimal final-experiment repair scope
+
+The intended paper matrix is now limited to baseline, group Policy-DTV, and
+group Policy-DTV-LOO, with one seed for each method. This reduced matrix changes
+the repair priorities but not the mathematical findings above.
+
+- `8192` is the maximum completion length per trajectory. It is unrelated to
+  the coincidental arithmetic `128 * 64 = 8192`. One optimizer update uses 128
+  prompts, eight trajectories per prompt (1,024 trajectories total), split
+  into 64 actor calls of two prompts / 16 trajectories each.
+- The 314-update horizon is an explicit historical-baseline alignment. The
+  archived `officialish8k` baseline used 630 requested batches with a 0.5 train
+  fraction, yielding 315 update slots and a final zero-based checkpoint
+  directory numbered 314. The new launcher directly requests 314 updates.
+  This is an experiment convention, not a value derived from the 8,192-token
+  limit or gradient accumulation.
+- Full-batch effective-trajectory normalization should be shared by all three
+  final methods. Baseline has no DTV rejection, but degenerate all-zero groups
+  have zero completion masks and can still make effective counts vary between
+  microbatches. Correcting only DTV would therefore create a new infrastructure
+  mismatch against baseline.
+- For a strict paper ablation, ordinary and LOO DTV should use threshold zero,
+  the same finite-value handling, and the same zero-retention behavior. The LOO
+  25-percent minimum-keep cap should not remain enabled only for LOO if the
+  claimed independent variable is the score formula. Removing it is closer to
+  the paper rule that trajectories with score below zero are filtered. If a
+  shared cap is retained for operational reasons, it must be enabled for both
+  DTV variants and disclosed as part of the method.
+- Degenerate groups should contribute neither a gradient numerator nor an
+  effective retained count in all three methods. This preserves their existing
+  absence of learning signal while preventing denominator-dependent weighting.
+- Random/reward filters, mismatch data, renaming reward to advantage, and their
+  ratio semantics are outside the final three-method matrix and do not block
+  the final experiments. Their code can remain unchanged.
+- Offline AIME evaluation is the correct design for this slow pipeline. Wiring
+  AIME into the trainer or lowering `eval_every_n_steps` is unnecessary and
+  would add expensive, potentially disruptive work. Dataset provenance and the
+  30-problem/480-sample contract should instead be asserted in the offline
+  evaluator or launch manifest.
+- Periodic checkpoint and tested full-batch-boundary resume are operationally
+  important for multi-day final runs. They should be repaired before restarting
+  final runs, but separately from DTV score mathematics. The currently active
+  processes cannot acquire this behavior through a source hot patch.
+- Learning-rate schedule advancement, group contiguity, checkpoint/global-step
+  agreement, and exact dataset cardinality should be implemented as assertions
+  or small integration gates. They require verification, not speculative
+  algorithm changes.
+
+Minimal blocking changes before the final three runs:
+
+1. Implement one shared full-batch numerator/count accumulation contract for
+   baseline, group Policy-DTV, and group Policy-DTV-LOO.
+2. Unify ordinary/LOO selection semantics and nonfinite handling.
+3. Assert at launch that the token-filtered dataset supplies at least 314 full
+   batches and log the actual dropped/remainder counts.
+4. Log the effective constructed configuration, including accumulation 64,
+   group size eight, beta, threshold, full batch, microbatch, and update count.
+5. Add full-batch-boundary periodic checkpoint/resume support or explicitly
+   accept final-only checkpoint risk.
+
+Useful but nonblocking for the three-run matrix: detailed per-trajectory DTV
+decision logs and an end-of-run consistency summary. Out of scope: online AIME
+evaluation and all random/reward/mismatch-specific cleanup.
+
+## 2026-08-05: Degenerate, nonfinite, zero-retention, and checkpoint semantics
+
+No code was changed in this analysis.
+
+### Three distinct cases that must not share an implicit fallback
+
+1. A degenerate GRPO group has identical rewards for all eight completions.
+   Group-standardized advantages are consequently all zero. With
+   `degenerate_group_masking=true`, the learner zeros the completion masks, so
+   the group intentionally supplies no policy-learning signal. Such rows must
+   not contribute to either the gradient numerator or the effective retained
+   denominator, regardless of whether a DTV threshold mask happens to label
+   their zero scores as kept.
+2. A nonfinite DTV score (`NaN`, positive infinity, or negative infinity) is a
+   numerical failure, not an ordinary filtering decision. Current threshold
+   comparison rejects NaN and negative infinity but accepts positive infinity.
+   The robust contract is to require `isfinite(score)` before selection, count
+   and log nonfinite values, and exclude them from both numerator and count.
+   A nonfinite event should optionally fail a strict validation run because it
+   can indicate unstable gradients.
+3. A finite all-negative score group is a legitimate threshold outcome. It is
+   essentially impossible for exact ordinary DTV in exact arithmetic because
+   the sum of ordinary scores is `G * ||mean(g)||^2 >= 0`, but it can occur for
+   LOO scores because the self-norm term is removed. Under the paper's strict
+   `score < 0` rule, that LOO group retains zero trajectories and contributes
+   neither numerator nor count. This should not silently trigger an LOO-only
+   minimum-keep fallback if ordinary and LOO are intended to differ only in
+   score definition.
+
+The effective row predicate for normalization should therefore be conceptually
+`method_selected & isfinite(score) & completion_mask_has_any_token`. Baseline
+has no method score, so its predicate is simply
+`completion_mask_has_any_token`. If a complete full batch has zero effective
+rows, the optimizer update should be explicitly skipped or applied as a
+well-defined zero update and logged; division by a clipped denominator alone
+is not sufficient observability.
+
+### Minimal checkpoint policy under limited disk
+
+- Saving every step is unnecessary. Checkpoint frequency determines the amount
+  of recomputation after failure; `max_to_keep` and checkpoint contents
+  determine steady disk use.
+- A full resumable actor checkpoint includes model parameters and optimizer
+  state and is approximately 7.5 GB in the current implementation. With
+  `max_to_keep=1`, only the newest completed checkpoint remains, although an
+  atomic write/rotation may transiently require roughly two checkpoints
+  (approximately 15 GB).
+- The minimal robust policy for multi-day runs is one rolling resumable
+  checkpoint plus the final checkpoint, saved only at full optimizer/global
+  step boundaries. A 64-step interval limits lost work to at most 64 updates;
+  a 128-step interval halves checkpoint I/O frequency but can lose several days
+  of work. Neither interval accumulates all historical checkpoints when
+  `max_to_keep=1` works correctly.
+- Model-parameters-only checkpoints are smaller and sufficient for final AIME
+  evaluation, but they cannot faithfully resume Adam/optimizer state and the
+  learning-rate schedule. They are therefore suitable for an archived
+  milestone, not as the sole crash-recovery checkpoint.
+- Under tight Worker 0 capacity, use one rolling full checkpoint locally. If a
+  scientifically useful milestone such as step 64 must be preserved, copy it
+  once to Worker 1 after checksum verification, then allow Worker 0 rotation to
+  replace it. The final checkpoint remains on Worker 0 and may also be archived
+  after completion.
+- Periodic saving should not be implemented until a full-batch-boundary save
+  and resume integration test proves that checkpoint step, Agentic global
+  step, optimizer state, and dataset fast-forward position agree.
+
+## 2026-08-05: Final recommendations for LR, selection, and step 314
+
+No source code was changed in this analysis.
+
+### Learning-rate step units
+
+- The current construction is structurally correct: the scheduled base
+  optimizer is wrapped in `optax.MultiSteps` with an automatically derived
+  accumulation interval of 64. The inner optimizer and its schedule advance
+  only when the accumulated update is emitted, not on every actor microbatch.
+- Therefore warmup, decay, and max-step values are intended to be measured in
+  global optimizer updates. A 314-step run should traverse 314 schedule update
+  points rather than 20,096 (`314 * 64`). Historical TensorBoard behavior is
+  consistent with this interpretation.
+- This remains an item to assert, not a reason to redesign the optimizer. A
+  minimal gate should log optimizer count and LR for the first 65 microbatches:
+  the first 64 calls form one update, and the schedule must advance exactly
+  once. The end summary should compare optimizer, actor, Agentic global, and
+  checkpoint steps.
+
+### Recommended final DTV selection contract
+
+- Both ordinary and LOO use their exact policy-only scores and the shared
+  threshold zero.
+- Both require finite scores. Nonfinite values are excluded and separately
+  counted; a strict run should fail if persistent nonfinite values appear.
+- Neither method uses a minimum-keep cap. This implements the paper rule
+  `score < 0 -> drop` and isolates the ordinary-versus-LOO score definition.
+- Degenerate zero-advantage groups are excluded through the effective
+  completion mask and do not enter the numerator or denominator.
+- A finite all-negative LOO group legitimately contributes zero rows. If the
+  entire 128-prompt full batch has zero effective trajectories, emit a clearly
+  logged zero/skip update and do not advance the optimizer or LR schedule.
+  This last event should be extremely visible because advancing a scheduler
+  without a learning update changes the experiment.
+
+### Exact dataset construction for the final update
+
+- Do not rely on the downstream learner to encounter and discard a partial
+  batch. Before batching, evaluate the prompt length with the exact production
+  tokenizer, after empty-field filtering and deterministic shuffling.
+- Build the ordered valid-example index set, assert it contains at least
+  `314 * 128 = 40,192` rows, select exactly the first 40,192 valid rows, and
+  then batch with an explicit complete-batch requirement.
+- This guarantees 314 batches. The final batch consists of valid selected rows
+  40,064 through 40,191 and contains exactly 128 prompts. No duplication,
+  padding, or partial-batch update is required.
+- Record raw, empty-filtered, overlength-filtered, selected, unused, full-batch,
+  and remainder counts in the run manifest. Also record a deterministic hash
+  of the selected source indices or problem identifiers.
+- If fewer than 40,192 valid rows exist, abort before allocating TPU resources.
+  Do not silently repeat examples or pad the last batch. The clean alternatives
+  are to use the common horizon `floor(valid_count / 128)` for all three methods
+  (which requires a matched baseline) or deliberately revise the prompt-length
+  contract and rerun all three. Preserving the historical 314 comparison makes
+  the preflight abort the preferred behavior.
+
+## 2026-08-05: Cost of cardinality and optimizer-step validation
+
+No source code was changed in this analysis.
+
+- The exact-cardinality change is localized to dataset preparation and a run
+  manifest. It tokenizes approximately 40,000 prompts once, constructs the
+  deterministic valid-index list, selects 40,192 rows, and then uses the same
+  training iterator as before. This adds seconds to a few minutes of CPU startup
+  work and should not change steady TPU training time, rollout volume, sequence
+  length, compilation shape, or gradient computation.
+- The valid-index result can be cached by dataset hash, tokenizer/model hash,
+  prompt-template version, maximum prompt length, and shuffle seed. Both workers
+  must validate the same manifest/hash; they do not need to recompute it for
+  every restart when those inputs are unchanged.
+- Verifying accumulation 64 does not require a 64-global-step AIME smoke. One
+  global optimizer update contains 64 microbatch calls. Existing TensorBoard
+  data can confirm that LR and optimizer-indexed metrics use global steps rather
+  than thousands of microsteps, but global-only logging cannot independently
+  prove what happened inside an accumulation window.
+- The decisive cheap test is a synthetic CPU unit/integration test with the
+  real scheduled optimizer wrapped by `optax.MultiSteps`: feed 63 small
+  gradients and assert parameters and inner schedule count do not advance;
+  feed the 64th and assert exactly one update; feed the 65th and assert no
+  second update. This takes seconds and does not perform rollout or compile the
+  1.5B model.
+- Existing completed smoke/formal logs should be inspected first for LR scalar
+  step indices and values. A one-global-step TPU smoke remains appropriate only
+  as the final end-to-end gate after the normalization/selection/data changes,
+  not as the primary test of optimizer accumulation.
+
+## 2026-08-05: Learning-rate log audit from the active group-policy run
+
+No source code was changed in this analysis.
+
+- The active TensorBoard file contains 125 `actor/train/learning_rate` points at
+  steps 1 through 125. This confirms that metric step indices are global actor
+  updates rather than the 64-times-larger microbatch count.
+- Every recorded value is approximately `9.983778e-7`. This scalar cannot be a
+  faithful reading of the configured 314-step cosine schedule: a standard
+  cosine decay from `1e-6` reaches approximately `6.57e-7` at schedule step 125
+  and zero at step 314.
+- The recipe selects `cosine_decay_schedule`, not
+  `warmup_cosine_decay_schedule`. `_extract_kwargs` passes only parameters
+  accepted by the selected Optax schedule, so `warmup_steps` and `warmup_ratio`
+  are not used by this schedule. The effective intended schedule is cosine
+  decay from `init_value=1e-6` over `decay_steps=314`, without warmup.
+- `PeftTrainer._try_get_learning_rate` was written for a direct or simply
+  chained injected-hyperparameter optimizer. The RL optimizer is additionally
+  wrapped in `optax.MultiSteps`; the constant scalar strongly suggests that the
+  logger is reading a stale or incorrect nested hyperparameter state. It does
+  not by itself prove that the optimizer is using a constant LR.
+- The running job should not be stopped based only on this metric. Before final
+  runs, a synthetic 65-call MultiSteps test must inspect both parameter updates
+  and the nested injected schedule count/value. It should establish whether the
+  actual optimizer schedule advances once per 64 calls. The logger must then be
+  updated to read that same authoritative nested state.
+- The final experiment must explicitly choose either no-warmup cosine (matching
+  the currently selected schedule type) or a real warmup-cosine schedule. Merely
+  passing `warmup_steps` alongside `cosine_decay_schedule` does not enable
+  warmup. The chosen schedule must be shared by baseline, DTV, and DTV-LOO.
+
+## 2026-08-05: Chosen LR contract and consolidated pre-implementation list
+
+No training source code was changed in this analysis.
+
+### Chosen learning-rate contract
+
+- Final baseline, group Policy-DTV, and group Policy-DTV-LOO will all use
+  `cosine_decay_schedule`, `init_value=1e-6`, `decay_steps=314`, and no warmup.
+- The unused `warmup_ratio`, `warmup_steps`, and `end_value` fields should not
+  be presented as effective schedule parameters. Standard Optax cosine decay
+  reaches zero at the decay horizon under its default alpha.
+- Optimizer construction creates the dynamic injected-hyperparameter AdamW
+  transform first and then wraps it in `optax.MultiSteps(64)`. MultiSteps calls
+  the inner transform only when it emits an accumulated update, so the expected
+  actual schedule unit is one global optimizer update.
+- Existing gradient-accumulation tests use a scalar or constant schedule and
+  therefore cannot detect a stuck or incorrectly logged dynamic schedule.
+- `PeftTrainer._try_get_learning_rate` checks a direct `hyperparams` field or a
+  shallow chain. It does not explicitly traverse MultiSteps'
+  `inner_opt_state`. The constant TensorBoard value is therefore a logger defect
+  with strong code-level support, while a 65-call test against the exact server
+  Optax version remains the authoritative proof that the real schedule state
+  advances once at call 64.
+
+### Blocking changes before the three final one-seed runs
+
+1. Add exact prompt-cardinality preparation: production tokenizer and template,
+   deterministic valid indices, at least 40,192 valid rows, exact selection of
+   40,192, complete 128-prompt batches, and a selection hash/manifest.
+2. Replace microbatch-local means with one RL full-batch gradient numerator and
+   effective-row-count accumulation shared by baseline, group DTV, and group
+   DTV-LOO. Apply the optimizer once after 64 microbatches.
+3. Unify group DTV selection: threshold zero, no method-specific minimum keep,
+   finite-score requirement, degenerate rows excluded by effective completion
+   mask, and explicit zero-retention/full-batch-zero behavior.
+4. Lock the LR contract to no-warmup cosine, remove misleading effective-config
+   claims for ignored warmup fields, make the logger recursively read the
+   authoritative MultiSteps inner schedule state, and add the 65-call dynamic
+   schedule test.
+5. Log/assert the constructed runtime configuration and end-state agreement:
+   batch 128, microbatch two, accumulation 64, generations eight, response
+   length 8,192, beta 0.001, threshold zero, 314 updates, optimizer/actor/global
+   step agreement, and LR schedule count.
+6. Implement a rolling full resumable checkpoint at completed global-step
+   boundaries, preferably interval 64 and `max_to_keep=1`, with an
+   interrupted-versus-continuous resume integration test. Account for the
+   approximately 15-GB transient two-checkpoint rotation requirement.
+
+### Required tests/gates
+
+- Dataset cardinality and deterministic selection-hash test.
+- Unequal-kept-count full-batch gradient equivalence test covering baseline,
+  DTV, LOO, degenerate groups, and an entire zero-effective microbatch.
+- Ordinary/LOO score and shared-selection tests for finite, nonfinite,
+  all-negative, and zero-retention cases.
+- Dynamic cosine plus MultiSteps 65-call CPU test, including parameters,
+  gradient step, nested schedule count/value, and logged LR.
+- Checkpoint/resume equivalence at a completed accumulation boundary.
+- One full 8,192-token, dual-worker, one-global-step TPU gate for each of the
+  three final methods after all CPU gates pass.
+
+### Nonblocking but recommended
+
+- Common per-trajectory decision records for DTV and LOO.
+- Offline AIME input provenance/hash and assertions for 30 unique problems and
+  480 outputs at k=16.
+- A concise final run summary including filtered data counts, zero-retention and
+  nonfinite counts, selected fraction, optimizer/global/checkpoint steps, and
+  actual LR endpoints.
+
+### Explicitly deferred
+
+- Online AIME evaluation.
+- Random/reward fixed-filter changes, method renaming, ratio semantics, and
+  mismatch-data changes.
+- Batch-scope DTV methods and additional seeds.
+
+## 2026-08-05: Estimated implementation footprint for items 1-10
+
+This is a planning estimate only; no training source was changed.
+
+- Expected unique footprint: approximately 16-22 files, including 9-12
+  production Python/shell files and 7-10 test files. A clean shared
+  implementation is approximately 450-750 production lines plus 350-650 test
+  lines, for roughly 800-1,400 added/changed lines in total. The range includes
+  deletions and refactoring, not only net additions.
+- Dataset cardinality and manifest: `deepscaler_data.py`, possibly shared data
+  utilities, the seeded launcher, and data tests; approximately 60-110
+  production plus 60-100 test lines.
+- Shared full-batch numerator/count accumulation is the largest mathematical
+  change. It affects `peft_trainer.py` or a new RL-specific accumulation helper,
+  `memory_bounded_curation.py`, baseline trainer routing in `rl_cluster.py`, both
+  policy trainers, and equivalence tests; approximately 160-280 production plus
+  140-240 test lines.
+- Unified selection/nonfinite/degenerate behavior affects the shared curation
+  helper and both policy trainers/tests; approximately 50-100 production plus
+  80-140 test lines.
+- No-warmup cosine cleanup and effective configuration output affect the recipe,
+  seeded launcher, config/runtime logging, and tests; approximately 35-75
+  production plus 30-70 test lines.
+- MultiSteps-aware LR introspection affects `peft_trainer.py` and its tests;
+  approximately 25-55 production plus 50-90 test lines.
+- Runtime/end summary affects `grpo_main.py`, `rl_cluster.py` or the Agentic
+  learner, and launcher status output; approximately 50-100 production plus
+  40-80 test lines.
+- Full-batch-boundary rolling checkpoint/resume affects `agentic_rl_learner.py`,
+  `peft_trainer.py`, possibly `checkpoint_manager.py`, and checkpoint/Agentic
+  integration tests; approximately 100-190 production plus 100-180 test lines.
+- Common DTV decision logging affects both policy trainers and potentially a
+  shared logging helper; approximately 40-80 production plus 40-80 test lines.
+- Offline AIME provenance/cardinality validation affects
+  `eval_final_checkpoint_metrics.py` and evaluator tests; approximately 25-50
+  production plus 30-60 test lines.
+- Final run summary overlaps the effective-config, selection, data-manifest, and
+  checkpoint work; incremental cost approximately 25-60 production plus 20-50
+  test lines.
+
+The implementation should be split into independently reviewable commits:
+data/config preflight; selection and full-batch normalization; LR logging/tests;
+checkpoint/resume; diagnostics/offline evaluation. Combining all work into one
+patch would make mathematical regression review and TPU failure isolation much
+harder.
+
+## 2026-08-05: CPU-first validation strategy for the five implementation stages
+
+No source code was changed in this planning analysis.
+
+- Every implementation stage can have a blocking CPU gate. No TPU run is
+  required between stages. CPU tests can validate deterministic data selection,
+  mathematical gradient equivalence, optimizer/schedule state transitions,
+  checkpoint/resume metadata, and diagnostics using small NNX models and
+  synthetic Agentic batches.
+- Stage 1 (data/config): use the production tokenizer on CPU, verify exactly
+  40,192 selected examples and 314 complete batches, deterministic hashes, and
+  final effective configuration. Tokenizer work requires no accelerator.
+- Stage 2 (selection/normalization): use small scalar/tree models and synthetic
+  groups to compare one monolithic retained mean against 64 split
+  numerator/count microbatches, including unequal counts, degenerate groups,
+  nonfinite scores, zero-retention LOO groups, and an all-zero full batch.
+- Stage 3 (LR): run 65 and 128 synthetic MultiSteps calls using the exact server
+  Optax version; assert parameter-update count, nested gradient/schedule count,
+  cosine values, and logger equality. No model rollout is needed.
+- Stage 4 (checkpoint/resume): in a temporary CPU directory, compare a small
+  continuous run with a run interrupted at a completed accumulation boundary,
+  restored, and continued. Compare model parameters, optimizer state, schedule
+  count, Agentic global step, dataset position, and rolling retention behavior.
+- Stage 5 (diagnostics/offline evaluation): use synthetic selection records,
+  small parquet fixtures, fake 30-problem/480-sample output, and mocked launcher
+  statuses. Verify JSON schemas, hashes, counts, and exit-status propagation.
+- CPU tests cannot validate TPU HBM allocation, XLA SPMD compilation, real
+  two-worker sharding/collectives, distributed vLLM rollout, or multi-host
+  shutdown. Those risks require final TPU integration gates after all five CPU
+  stages pass.
+- The minimum defensible TPU plan is three sequential one-global-step, full
+  8,192-token dual-worker gates: baseline, group Policy-DTV, and group
+  Policy-DTV-LOO. They may be launched by one suite command, but they remain
+  three method-specific jobs. There is no need for five rounds of TPU debugging.
+- A one-step gate with checkpoint interval one can validate real sharded
+  checkpoint writing. Full distributed resume can be optional if TPU time is
+  exceptionally constrained, but the CPU resume test must pass and the first
+  formal step-64 checkpoint should then be treated as a monitored operational
+  milestone rather than assumed proven behavior.
+
+## 2026-08-05: Five-stage implementation completed locally, CPU gates pending
+
+- The two pre-fix TPU jobs should be terminated and retained only as preliminary
+  logs. The new objective changes full-batch trajectory weighting for both jobs,
+  and removes the LOO-only 25-percent minimum-keep policy, so continuing them
+  cannot produce the final comparable results.
+- Stage 1 adds opt-in strict dataset preparation, exact token-length validation,
+  an exact `num_batches * batch_size` selection, and a deterministic selection
+  manifest before cluster construction.
+- Stage 2 adds an effective-count weighted Optax accumulation transform. It
+  multiplies each local mean gradient by its active trajectory count, sums 64
+  numerators, divides once by the total count, and calls the inner optimizer
+  once. Baseline and policy DTV variants use it; legacy total-loss and fixed
+  filters remain on their previous path. Ordinary and LOO policy selection now
+  share finite threshold-zero semantics with no minimum-keep cap.
+- Stage 3 locks the recipe to no-warmup cosine and adds nested optimizer-state
+  LR discovery plus dynamic-schedule tests.
+- Stage 4 restores periodic checkpoint attempts only after completed
+  accumulation boundaries. Actor metadata records completed actor/global and
+  iterator steps, and the seeded formal launcher defaults to interval 64 with
+  `max_to_keep=1` supplied by its existing config.
+- Stage 5 adds compact ordinary-DTV score/mask decisions, strict offline AIME
+  row/uniqueness/hash validation, a data manifest, an effective runtime config
+  log, and launcher/training summaries.
+- `run_aime_cpu_gates.sh` runs each JAX-sensitive group in a separate process
+  with a ten-minute hard timeout. The Mac workspace lacks the pinned JAX/Flax/
+  Optax environment, so only syntax, shell parsing, and diff checks were run
+  locally. Server CPU gates are mandatory before any TPU gate.

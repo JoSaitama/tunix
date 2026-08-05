@@ -24,6 +24,8 @@ import contextlib
 import copy
 import dataclasses
 import itertools
+import json
+import os
 import queue
 import threading
 from typing import Any, AsyncIterator, Callable, Dict, Generic, Iterable, Iterator, List, Sequence, Type, TypeVar
@@ -880,6 +882,25 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         self._global_step_start_time = time.time()
 
     _ = producer_future.result()
+    summary_path = os.getenv("TUNIX_TRAINING_SUMMARY_PATH")
+    if summary_path and jax.process_index() == 0:
+      actor_trainer = self.rl_cluster.actor_trainer
+      learning_rate = actor_trainer._try_get_learning_rate()  # pylint: disable=protected-access
+      summary = {
+          "global_step": int(self.rl_cluster.global_steps),
+          "actor_train_step": int(actor_trainer.train_steps),
+          "actor_iter_step": int(actor_trainer.iter_steps),
+          "checkpoint_step": actor_trainer.checkpoint_manager.latest_step(),
+          "learning_rate": (
+              None if learning_rate is None else float(np.asarray(learning_rate))
+          ),
+      }
+      absolute_path = os.path.abspath(summary_path)
+      os.makedirs(os.path.dirname(absolute_path), exist_ok=True)
+      with open(absolute_path, "w", encoding="utf-8") as output:
+        json.dump(summary, output, indent=2, sort_keys=True)
+        output.write("\n")
+      logging.info("Final Agentic training summary: %s", summary)
     self.rl_cluster.close()
 
   def _put_prompts_to_queue(

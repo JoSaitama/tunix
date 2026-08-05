@@ -2,10 +2,14 @@
 
 import ast
 import functools
+import hashlib
 import importlib
+import json
 import os
 from typing import Any, Callable, Optional, Union
 
+from absl import logging
+import grain
 from tunix.generate import tokenizer_adapter
 
 Tokenizer = tokenizer_adapter.Tokenizer
@@ -142,6 +146,8 @@ def post_init_dataset(
     num_epochs: int = 1,
     prompt_key: str = "prompts",
     custom_batch_fn: Optional[Callable] = None,
+    require_complete_num_batches: bool = False,
+    selection_manifest_path: Optional[str] = None,
 ):
   """Applies post-initialization transformations to a dataset.
 
@@ -161,6 +167,72 @@ def post_init_dataset(
   Returns:
     The processed dataset.
   """
+  if require_complete_num_batches and num_batches is None:
+    raise ValueError(
+        "require_complete_num_batches requires an explicit num_batches value."
+    )
+
+  if require_complete_num_batches:
+    input_size = len(dataset)
+    valid_examples = []
+    overlength_count = 0
+    selection_hasher = hashlib.sha256()
+    for index in range(input_size):
+      example = dataset[index]
+      prompt = example[prompt_key]
+      if (
+          max_prompt_length is not None
+          and max_prompt_length > 0
+          and len(tokenizer.encode(prompt)) > max_prompt_length
+      ):
+        overlength_count += 1
+        continue
+      valid_examples.append(example)
+
+    required_size = num_batches * batch_size
+    valid_size = len(valid_examples)
+    if valid_size < required_size:
+      raise ValueError(
+          "Token-filtered dataset cannot supply the requested complete "
+          f"batches: valid_rows={valid_size}, required_rows={required_size}, "
+          f"num_batches={num_batches}, batch_size={batch_size}."
+      )
+    selected_examples = valid_examples[:required_size]
+    for index, example in enumerate(selected_examples):
+      identity = {
+          "selected_index": index,
+          "prompt": example[prompt_key],
+          "question": example.get("question"),
+          "answer": example.get("answer"),
+      }
+      selection_hasher.update(
+          json.dumps(
+              identity, sort_keys=True, ensure_ascii=False, separators=(",", ":")
+          ).encode("utf-8")
+      )
+      selection_hasher.update(b"\n")
+    manifest = {
+        "input_rows": input_size,
+        "overlength_rows": overlength_count,
+        "valid_rows": valid_size,
+        "selected_rows": required_size,
+        "unused_valid_rows": valid_size - required_size,
+        "batch_size": batch_size,
+        "full_batches": num_batches,
+        "remainder": valid_size % batch_size,
+        "max_prompt_length": max_prompt_length,
+        "selection_sha256": selection_hasher.hexdigest(),
+    }
+    logging.info("Strict dataset selection manifest: %s", manifest)
+    if selection_manifest_path:
+      manifest_path = os.path.abspath(selection_manifest_path)
+      os.makedirs(os.path.dirname(manifest_path), exist_ok=True)
+      with open(manifest_path, "w", encoding="utf-8") as manifest_file:
+        json.dump(manifest, manifest_file, indent=2, sort_keys=True)
+        manifest_file.write("\n")
+    dataset = grain.MapDataset.source(selected_examples)
+    max_prompt_length = None
+
   if max_prompt_length is not None and max_prompt_length > 0:
 
     def prompt_length_filter(x):
@@ -169,7 +241,7 @@ def post_init_dataset(
 
     dataset = dataset.filter(prompt_length_filter)
 
-  if num_batches is not None:
+  if num_batches is not None and not require_complete_num_batches:
     target_size = min(num_batches * batch_size, len(dataset))
     dataset = dataset[:target_size]
 

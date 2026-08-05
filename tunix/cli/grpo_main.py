@@ -735,7 +735,54 @@ class GrpoPipeline(config.HyperParameters):
         num_epochs=self.config.get("num_train_epochs", 1),
         prompt_key=self.config.get("prompt_key", "prompts"),
         custom_batch_fn=custom_batch_fn,
+        require_complete_num_batches=self.config.get(
+            "require_complete_num_batches", False
+        ),
+        selection_manifest_path=os.getenv("TUNIX_DATA_MANIFEST_PATH"),
     )
+
+    mini_batch_size = int(
+        self.config["rl_training_config"]["mini_batch_size"]
+    )
+    train_micro_batch_size = int(
+        self.config["rl_training_config"]["train_micro_batch_size"]
+    )
+    effective_config = {
+        "batch_size": int(self.config.get("batch_size", 1)),
+        "num_batches": int(self.config.get("num_batches", 0)),
+        "max_steps": int(self.config["rl_training_config"]["max_steps"]),
+        "mini_batch_size": mini_batch_size,
+        "train_micro_batch_size": train_micro_batch_size,
+        "gradient_accumulation_steps": (
+            mini_batch_size // train_micro_batch_size
+        ),
+        "num_generations": int(
+            self.config["agentic_grpo_config"]["num_generations"]
+        ),
+        "max_response_length": int(
+            self.config["agentic_grpo_config"]["max_response_length"]
+        ),
+        "beta": float(self.config["agentic_grpo_config"]["beta"]),
+        "dot_threshold": float(
+            self.config["rl_training_config"].get(
+                "self_influence_dot_threshold", 0.0
+            )
+        ),
+        "lr_schedule": self.config["rl_training_config"][
+            "actor_optimizer_config"
+        ].get("schedule_type"),
+        "lr_init": float(
+            self.config["rl_training_config"]["actor_optimizer_config"].get(
+                "init_value", 0.0
+            )
+        ),
+        "lr_decay_steps": int(
+            self.config["rl_training_config"]["actor_optimizer_config"].get(
+                "decay_steps", 0
+            )
+        ),
+    }
+    logging.info("Effective Agentic GRPO configuration: %s", effective_config)
 
     rl_cluster = self.create_rl_cluster(tokenizer)
     if getattr(rl_cluster.rollout, "should_serve_only", lambda: False)():

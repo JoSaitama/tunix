@@ -28,6 +28,7 @@ class PolicySelfInfLooTrainer(self_inf_loo_trainer.SelfInfLooTrainer):
   def __init__(self, *args, **kwargs):
     super().__init__(*args, **kwargs)
     self.score_objective = "policy"
+    self.min_keep_fraction = 0.0
 
   def with_policy_score_loss_fn(
       self, score_loss_fn: Callable[..., Any], *, has_aux: bool = False
@@ -55,17 +56,15 @@ class PolicySelfInfLooTrainer(self_inf_loo_trainer.SelfInfLooTrainer):
     batch_size = memory_bounded_curation.batch_size(inputs)
     scores = stats["loo_score"]
 
+    threshold_mask = memory_bounded_curation.threshold_selection(
+        scores, self.dot_threshold
+    )
     if self.scope == "group":
       group_size = int(self.num_generations or 0)
       num_groups = batch_size // group_size
-      masks = self_inf_loo_trainer._group_capped_mask(
-          scores.reshape(num_groups, group_size),
-          self.min_keep_fraction,
-          self.dot_threshold,
-      )
-      mask, threshold_mask, retained_by_cap, cap_triggered = (
-          x.reshape((batch_size,)) if x.ndim == 2 else x for x in masks
-      )
+      mask = threshold_mask
+      retained_by_cap = jnp.zeros_like(mask)
+      cap_triggered = jnp.zeros((num_groups,), dtype=jnp.bool_)
       group_indices = jnp.repeat(jnp.arange(num_groups), group_size)
       generation_indices = jnp.tile(jnp.arange(group_size), num_groups)
       group_kept = jnp.mean(mask.reshape(num_groups, group_size), axis=1)
@@ -76,11 +75,9 @@ class PolicySelfInfLooTrainer(self_inf_loo_trainer.SelfInfLooTrainer):
           ) == 0).astype(jnp.float32)
       )
     else:
-      mask, threshold_mask, retained_by_cap, cap_triggered = (
-          self_inf_loo_trainer._capped_mask(
-              scores, self.min_keep_fraction, self.dot_threshold
-          )
-      )
+      mask = threshold_mask
+      retained_by_cap = jnp.zeros_like(mask)
+      cap_triggered = jnp.asarray(False)
       group_size = int(self.num_generations or 0)
       if group_size > 0 and batch_size % group_size == 0:
         num_groups = batch_size // group_size
@@ -96,16 +93,23 @@ class PolicySelfInfLooTrainer(self_inf_loo_trainer.SelfInfLooTrainer):
     update_grad_fn = memory_bounded_curation.make_masked_aggregate_grad_fn(
         self.loss_fn, wrt=wrt, has_aux=self._has_aux
     )
-    out, final_grads = update_grad_fn(model, inputs, mask)
+    effective_mask = memory_bounded_curation.effective_trajectory_mask(
+        inputs, mask
+    )
+    out, final_grads = update_grad_fn(model, inputs, effective_mask)
     if self._has_aux:
       final_loss, final_aux = out
     else:
       final_loss, final_aux = out, None
     grad_norm = optax.global_norm(final_grads)
-    optimizer.update(model, final_grads)
+    optimizer.update(
+        model,
+        final_grads,
+        effective_count=jnp.sum(effective_mask.astype(jnp.float32)),
+    )
 
     if self._has_aux and isinstance(final_aux, dict):
-      mask_f = mask.astype(jnp.float32)
+      mask_f = effective_mask.astype(jnp.float32)
       num_kept = jnp.sum(mask_f)
       pre_cap = jnp.sum(threshold_mask.astype(jnp.float32))
       final_aux.update({
@@ -134,7 +138,7 @@ class PolicySelfInfLooTrainer(self_inf_loo_trainer.SelfInfLooTrainer):
           "loo_standard_cross_term": stats["standard_cross_term"],
           "loo_standard_score": stats["standard_score"],
           "loo_threshold_mask": threshold_mask,
-          "loo_final_mask": mask,
+          "loo_final_mask": effective_mask,
           "loo_retained_by_cap_mask": retained_by_cap,
           "loo_group_indices": group_indices,
           "loo_generation_indices": generation_indices,
@@ -190,9 +194,11 @@ class PolicySelfInfLooTrainer(self_inf_loo_trainer.SelfInfLooTrainer):
       )
       return grad_fn(model, batch_inputs, trajectory_mask)
 
-    def apply_update(model, optimizer, gradients):
+    def apply_update(model, optimizer, gradients, effective_count):
       grad_norm = optax.global_norm(gradients)
-      optimizer.update(model, gradients)
+      optimizer.update(
+          model, gradients, effective_count=effective_count
+      )
       return grad_norm
 
     score_step = nnx.jit(score_batch)
@@ -216,17 +222,15 @@ class PolicySelfInfLooTrainer(self_inf_loo_trainer.SelfInfLooTrainer):
       stats = score_step(inputs)
       batch_size = memory_bounded_curation.batch_size(inputs)
       scores = stats["loo_score"]
+      threshold_mask = memory_bounded_curation.threshold_selection(
+          scores, self.dot_threshold
+      )
       if self.scope == "group":
         group_size = int(self.num_generations or 0)
         num_groups = batch_size // group_size
-        masks = self_inf_loo_trainer._group_capped_mask(
-            scores.reshape(num_groups, group_size),
-            self.min_keep_fraction,
-            self.dot_threshold,
-        )
-        mask, threshold_mask, retained_by_cap, cap_triggered = (
-            x.reshape((batch_size,)) if x.ndim == 2 else x for x in masks
-        )
+        mask = threshold_mask
+        retained_by_cap = jnp.zeros_like(mask)
+        cap_triggered = jnp.zeros((num_groups,), dtype=jnp.bool_)
         group_indices = jnp.repeat(jnp.arange(num_groups), group_size)
         generation_indices = jnp.tile(jnp.arange(group_size), num_groups)
         group_kept = jnp.mean(mask.reshape(num_groups, group_size), axis=1)
@@ -237,11 +241,9 @@ class PolicySelfInfLooTrainer(self_inf_loo_trainer.SelfInfLooTrainer):
             ) == 0).astype(jnp.float32)
         )
       else:
-        mask, threshold_mask, retained_by_cap, cap_triggered = (
-            self_inf_loo_trainer._capped_mask(
-                scores, self.min_keep_fraction, self.dot_threshold
-            )
-        )
+        mask = threshold_mask
+        retained_by_cap = jnp.zeros_like(mask)
+        cap_triggered = jnp.asarray(False)
         group_size = int(self.num_generations or 0)
         if group_size > 0 and batch_size % group_size == 0:
           num_groups = batch_size // group_size
@@ -254,14 +256,18 @@ class PolicySelfInfLooTrainer(self_inf_loo_trainer.SelfInfLooTrainer):
         groups_with_cap = cap_triggered.astype(jnp.float32)
         groups_all_negative = (jnp.sum(threshold_mask) == 0).astype(jnp.float32)
 
-      out, final_grads = update_step(inputs, mask)
+      effective_mask = memory_bounded_curation.effective_trajectory_mask(
+          inputs, mask
+      )
+      out, final_grads = update_step(inputs, effective_mask)
       if self._has_aux:
         final_loss, final_aux = out
       else:
         final_loss, final_aux = out, None
-      grad_norm = apply_step(final_grads)
+      effective_count = jnp.sum(effective_mask.astype(jnp.float32))
+      grad_norm = apply_step(final_grads, effective_count)
       if self._has_aux and isinstance(final_aux, dict):
-        mask_f = mask.astype(jnp.float32)
+        mask_f = effective_mask.astype(jnp.float32)
         num_kept = jnp.sum(mask_f)
         pre_cap = jnp.sum(threshold_mask.astype(jnp.float32))
         final_aux.update({
@@ -292,7 +298,7 @@ class PolicySelfInfLooTrainer(self_inf_loo_trainer.SelfInfLooTrainer):
             "loo_standard_cross_term": stats["standard_cross_term"],
             "loo_standard_score": stats["standard_score"],
             "loo_threshold_mask": threshold_mask,
-            "loo_final_mask": mask,
+            "loo_final_mask": effective_mask,
             "loo_retained_by_cap_mask": retained_by_cap,
             "loo_group_indices": group_indices,
             "loo_generation_indices": generation_indices,

@@ -97,6 +97,20 @@ def apply_trajectory_mask(inputs: Any, mask: jax.Array) -> Any:
   return {**inputs, "train_example": masked_example}
 
 
+def effective_trajectory_mask(inputs: Any, selection_mask: jax.Array) -> jax.Array:
+  """Combines method selection with rows containing effective response tokens."""
+  train_example = inputs["train_example"]
+  completion_mask = train_example.completion_mask
+  reduce_axes = tuple(range(1, completion_mask.ndim))
+  active = jnp.any(completion_mask != 0, axis=reduce_axes)
+  return selection_mask.astype(jnp.bool_) & active
+
+
+def threshold_selection(scores: jax.Array, threshold: float) -> jax.Array:
+  """Applies the shared finite threshold contract for policy DTV methods."""
+  return jnp.isfinite(scores) & (scores >= threshold)
+
+
 def make_masked_aggregate_grad_fn(
     loss_fn: Callable[..., Any], *, wrt: type, has_aux: bool
 ) -> Callable[..., Any]:

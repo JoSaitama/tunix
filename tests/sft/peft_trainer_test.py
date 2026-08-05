@@ -506,6 +506,29 @@ class PeftTrainerTest(parameterized.TestCase):
         rtol=1e-5,
     )
 
+  def test_periodic_checkpoint_is_considered_only_after_accumulation_boundary(self):
+    config = peft_trainer.TrainingConfig(
+        eval_every_n_steps=100,
+        max_steps=2,
+        gradient_accumulation_steps=2,
+    )
+    model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
+    trainer = peft_trainer.PeftTrainer(model, optax.sgd(1e-3), config)
+    trainer = trainer.with_gen_model_input_fn(dummy_gen_model_input_fn)
+    trainer.checkpoint_manager = mock.create_autospec(
+        checkpoint_manager.CheckpointManager, instance=True
+    )
+    trainer.checkpoint_manager.latest_step.return_value = None
+
+    trainer.train(dummy_datasets(batch_size=2, repeat=4))
+
+    periodic_steps = [
+        call.args[0]
+        for call in trainer.checkpoint_manager.save.call_args_list
+        if not call.kwargs.get("force", False)
+    ]
+    self.assertEqual(periodic_steps, [1, 2])
+
   @parameterized.named_parameters(
       dict(
           testcase_name='without_grad_accu',
@@ -568,25 +591,18 @@ class PeftTrainerTest(parameterized.TestCase):
     mock_checkpoint_manager_init.assert_called_once_with(
         root_directory='/tmp/checkpoint', options=checkpoint_options
     )
-    # Assert that the checkpoint manager is called with the correct arguments
-    # and does not have any unexpected calls.
-    mock_checkpoint_manager.assert_has_calls(
-        [
-            mock.call.maybe_restore(
-                mock.ANY, mock.ANY, restore_only_lora_params=True
-            ),
-            mock.call.latest_step(),
-            mock.call.save(
-                expected_save_steps[-1],
-                mock.ANY,
-                mock.ANY,
-                save_only_lora_params=True,
-                force=True,
-            ),
-            mock.call.close(),
-        ],
-        any_order=False,
+    mock_checkpoint_manager.maybe_restore.assert_called_once_with(
+        mock.ANY, mock.ANY, restore_only_lora_params=True
     )
+    mock_checkpoint_manager.save.assert_any_call(
+        expected_save_steps[-1],
+        mock.ANY,
+        mock.ANY,
+        save_only_lora_params=True,
+        force=True,
+        custom_metadata={},
+    )
+    mock_checkpoint_manager.close.assert_called_once()
 
   def test_loss_fn_with_aux(self):
     def custom_loss_fn(

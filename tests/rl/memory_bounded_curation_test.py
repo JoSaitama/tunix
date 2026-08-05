@@ -51,6 +51,24 @@ def _score_loss(model, train_example, algo_config=None):
 
 class MemoryBoundedCurationTest(absltest.TestCase):
 
+  def test_effective_mask_excludes_degenerate_completion_rows(self):
+    example = _SyntheticTrainExample(
+        feature=jnp.zeros((3,)),
+        completion_mask=jnp.asarray([[1, 1], [0, 0], [1, 0]])
+    )
+    inputs = {"train_example": example}
+    actual = memory_bounded_curation.effective_trajectory_mask(
+        inputs, jnp.asarray([True, True, False])
+    )
+    np.testing.assert_array_equal(actual, [True, False, False])
+
+  def test_threshold_selection_rejects_nonfinite_without_minimum_keep(self):
+    scores = jnp.asarray([1.0, 0.0, -1.0, jnp.nan, jnp.inf, -jnp.inf])
+    actual = memory_bounded_curation.threshold_selection(scores, 0.0)
+    np.testing.assert_array_equal(
+        actual, [True, True, False, False, False, False]
+    )
+
   def test_batch_statistics_match_explicit_gradient_matrix(self):
     gradients = jnp.asarray([[1.0, 2.0], [-3.0, 1.0], [2.0, -4.0]])
     stats = memory_bounded_curation.dtv_statistics(

@@ -51,21 +51,30 @@ class PolicySelfInfTrainer(self_inf_trainer.SelfInfTrainer):
         group_size=self.num_generations,
     )
     scores = stats["standard_score"]
-    mask = scores >= self.dot_threshold
+    mask = memory_bounded_curation.threshold_selection(
+        scores, self.dot_threshold
+    )
+    effective_mask = memory_bounded_curation.effective_trajectory_mask(
+        inputs, mask
+    )
 
     update_grad_fn = memory_bounded_curation.make_masked_aggregate_grad_fn(
         self.loss_fn, wrt=wrt, has_aux=self._has_aux
     )
-    out, final_grads = update_grad_fn(model, inputs, mask)
+    out, final_grads = update_grad_fn(model, inputs, effective_mask)
     if self._has_aux:
       final_loss, final_aux = out
     else:
       final_loss, final_aux = out, None
     grad_norm = optax.global_norm(final_grads)
-    optimizer.update(model, final_grads)
+    optimizer.update(
+        model,
+        final_grads,
+        effective_count=jnp.sum(effective_mask.astype(jnp.float32)),
+    )
 
     if self._has_aux and isinstance(final_aux, dict):
-      mask_f = mask.astype(jnp.float32)
+      mask_f = effective_mask.astype(jnp.float32)
       kept = jnp.sum(mask_f)
       batch_size = memory_bounded_curation.batch_size(inputs)
       final_aux.update({
@@ -73,6 +82,18 @@ class PolicySelfInfTrainer(self_inf_trainer.SelfInfTrainer):
           "self_inf_dot_mean": jnp.mean(scores),
           "self_inf_dot_std": jnp.std(scores),
           "self_inf_kept_fraction": kept / float(batch_size),
+          "self_inf_nonfinite_score_count": jnp.sum(~jnp.isfinite(scores)),
+          "self_inf_scores": scores,
+          "self_inf_threshold_mask": mask,
+          "self_inf_final_mask": effective_mask,
+          "self_inf_group_indices": jnp.repeat(
+              jnp.arange(batch_size // int(self.num_generations or batch_size)),
+              int(self.num_generations or batch_size),
+          ),
+          "self_inf_generation_indices": jnp.tile(
+              jnp.arange(int(self.num_generations or batch_size)),
+              batch_size // int(self.num_generations or batch_size),
+          ),
       })
     return final_loss, final_aux, grad_norm
 
@@ -206,9 +227,11 @@ class PolicySelfInfTrainer(self_inf_trainer.SelfInfTrainer):
       )
       return grad_fn(model, batch_inputs, trajectory_mask)
 
-    def apply_update(model, optimizer, gradients):
+    def apply_update(model, optimizer, gradients, effective_count):
       grad_norm = optax.global_norm(gradients)
-      optimizer.update(model, gradients)
+      optimizer.update(
+          model, gradients, effective_count=effective_count
+      )
       return grad_norm
 
     score_step = nnx.jit(score_batch)
@@ -233,15 +256,21 @@ class PolicySelfInfTrainer(self_inf_trainer.SelfInfTrainer):
       inputs.pop("algo_config", None)
       stats = score_step(inputs)
       scores = stats["standard_score"]
-      mask = scores >= self.dot_threshold
-      out, final_grads = update_step(inputs, mask)
+      mask = memory_bounded_curation.threshold_selection(
+          scores, self.dot_threshold
+      )
+      effective_mask = memory_bounded_curation.effective_trajectory_mask(
+          inputs, mask
+      )
+      out, final_grads = update_step(inputs, effective_mask)
       if self._has_aux:
         final_loss, final_aux = out
       else:
         final_loss, final_aux = out, None
-      grad_norm = apply_step(final_grads)
+      effective_count = jnp.sum(effective_mask.astype(jnp.float32))
+      grad_norm = apply_step(final_grads, effective_count)
       if self._has_aux and isinstance(final_aux, dict):
-        mask_f = mask.astype(jnp.float32)
+        mask_f = effective_mask.astype(jnp.float32)
         kept = jnp.sum(mask_f)
         size = memory_bounded_curation.batch_size(inputs)
         final_aux.update({
@@ -249,6 +278,18 @@ class PolicySelfInfTrainer(self_inf_trainer.SelfInfTrainer):
             "self_inf_dot_mean": jnp.mean(scores),
             "self_inf_dot_std": jnp.std(scores),
             "self_inf_kept_fraction": kept / float(size),
+            "self_inf_nonfinite_score_count": jnp.sum(~jnp.isfinite(scores)),
+            "self_inf_scores": scores,
+            "self_inf_threshold_mask": mask,
+            "self_inf_final_mask": effective_mask,
+            "self_inf_group_indices": jnp.repeat(
+                jnp.arange(size // int(self.num_generations or size)),
+                int(self.num_generations or size),
+            ),
+            "self_inf_generation_indices": jnp.tile(
+                jnp.arange(int(self.num_generations or size)),
+                size // int(self.num_generations or size),
+            ),
         })
       return final_loss, final_aux, grad_norm
 

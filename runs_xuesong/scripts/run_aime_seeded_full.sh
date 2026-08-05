@@ -52,18 +52,21 @@ export MAX_STEPS_OVERRIDE="${MAX_STEPS_OVERRIDE:-$NUM_BATCHES}"
 if [[ "$NUM_BATCHES" -le 64 ]]; then
   CHECKPOINT_INTERVAL="${CHECKPOINT_INTERVAL:-$NUM_BATCHES}"
 else
-  CHECKPOINT_INTERVAL="${CHECKPOINT_INTERVAL:-500}"
+  CHECKPOINT_INTERVAL="${CHECKPOINT_INTERVAL:-64}"
 fi
 export TUNIX_EXPERIMENT_SEED="$SEED"
 export TUNIX_REWARD_RANK_NOISE_SEED="${TUNIX_REWARD_RANK_NOISE_SEED:-$SEED}"
 export TUNIX_GRPO_NUM_GENERATIONS=8
 export TUNIX_DBC_DECISIONS_PATH="${LOG_ROOT}/selection.jsonl"
+export TUNIX_DATA_MANIFEST_PATH="${LOG_ROOT}/data_manifest.json"
+export TUNIX_TRAINING_SUMMARY_PATH="${LOG_ROOT}/training_summary.json"
 mkdir -p "$RUN_ROOT" "$LOG_ROOT" "$CACHE_ROOT"
 exec > >(tee "${LOG_ROOT}/nohup.log") 2>&1
 
 ARGS=(
   "model_config.rng_seed=${SEED}"
   "data_config.seed=$((42 + SEED))"
+  require_complete_num_batches=true
   rollout_config.max_prompt_length=1024
   rollout_config.total_generation_steps=8192
   rollout_config.max_tokens_to_generate=8192
@@ -85,4 +88,24 @@ bash "${REPO}/runs_xuesong/scripts/run_official_like_dual_worker.sh" "${ARGS[@]}
 status=$?
 set -e
 printf '%s\n' "$status" > "${LOG_ROOT}/exit_code"
+cat > "${LOG_ROOT}/run_summary.env" <<EOF
+METHOD=${METHOD}
+SEED=${SEED}
+DATA_MODE=${DATA_MODE}
+RUN_NAME=${RUN_NAME}
+RUN_ROOT=${RUN_ROOT}
+LOG_ROOT=${LOG_ROOT}
+NUM_BATCHES=${NUM_BATCHES}
+MAX_STEPS=${MAX_STEPS_OVERRIDE}
+GRADIENT_ACCUMULATION=64
+NUM_GENERATIONS=8
+MAX_RESPONSE_LENGTH=8192
+BETA=0.001
+DOT_THRESHOLD=0.0
+LR_SCHEDULE=cosine_decay_schedule
+LR_INIT=1e-6
+LR_DECAY_STEPS=${MAX_STEPS_OVERRIDE}
+WARMUP=none
+EXIT_CODE=${status}
+EOF
 exit "$status"

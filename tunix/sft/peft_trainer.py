@@ -14,7 +14,7 @@
 
 """PEFT trainer."""
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 import contextlib
 import dataclasses
 import functools
@@ -45,12 +45,64 @@ from tunix.sft import profiler
 from tunix.sft import progress_bar
 from tunix.sft import sharding_utils
 from tunix.sft import utils
+from tunix.sft import weighted_gradient_accumulation
 
 _ModelInputT = Dict[str, ArrayLike]
 P = ParamSpec("P")
 MetricsLogger = sft_metrics_logger.MetricsLogger
 MetricsLoggerOptions = sft_metrics_logger.MetricsLoggerOptions
 _SKIP_FINAL_CHECKPOINT_ENV = "TUNIX_SKIP_FINAL_CHECKPOINT"
+
+
+def _effective_trajectory_count(inputs: Any) -> jax.Array:
+  """Counts rows that still contain at least one effective response token."""
+  if not isinstance(inputs, dict) or "train_example" not in inputs:
+    raise ValueError(
+        "Effective-count accumulation requires inputs['train_example']."
+    )
+  completion_mask = getattr(inputs["train_example"], "completion_mask", None)
+  if completion_mask is None:
+    raise ValueError(
+        "Effective-count accumulation requires TrainExample.completion_mask."
+    )
+  reduce_axes = tuple(range(1, completion_mask.ndim))
+  return jnp.sum(jnp.any(completion_mask != 0, axis=reduce_axes))
+
+
+def _find_nested_hyperparam(state: Any, name: str) -> Any | None:
+  """Finds an injected hyperparameter through optimizer wrapper states."""
+  seen = set()
+
+  def visit(value):
+    if value is None or isinstance(value, (str, bytes, int, float, bool)):
+      return None
+    identity = id(value)
+    if identity in seen:
+      return None
+    seen.add(identity)
+
+    hyperparams = getattr(value, "hyperparams", None)
+    if hyperparams is not None and name in hyperparams:
+      result = hyperparams[name]
+      return getattr(result, "value", result)
+    inner = getattr(value, "inner_opt_state", None)
+    if inner is not None:
+      result = visit(inner)
+      if result is not None:
+        return result
+    if isinstance(value, Mapping):
+      children = value.values()
+    elif isinstance(value, (tuple, list)):
+      children = value
+    else:
+      children = ()
+    for child in children:
+      result = visit(child)
+      if result is not None:
+        return result
+    return None
+
+  return visit(state)
 
 
 @dataclasses.dataclass(slots=True, kw_only=True)
@@ -60,6 +112,7 @@ class TrainingConfig:
   eval_every_n_steps: int
   max_steps: int | None = None
   gradient_accumulation_steps: int | None = None
+  use_effective_count_gradient_accumulation: bool = False
 
   # If set, the checkpoints will be saved to this path. Checkpoints
   # contains the model params and the train data iterator state.
@@ -237,9 +290,14 @@ class PeftTrainer:
     self.config = training_config
     self._lora_enabled = utils.is_lora_enabled(self.model)
     if training_config.gradient_accumulation_steps is not None:
-      optimizer = optax.MultiSteps(
-          optimizer, training_config.gradient_accumulation_steps
-      )
+      if training_config.use_effective_count_gradient_accumulation:
+        optimizer = weighted_gradient_accumulation.weighted_multisteps(
+            optimizer, training_config.gradient_accumulation_steps
+        )
+      else:
+        optimizer = optax.MultiSteps(
+            optimizer, training_config.gradient_accumulation_steps
+        )
     if self._lora_enabled:
       self.optimizer = nnx.Optimizer(self.model, optimizer, wrt=nnx.LoRAParam)
     else:
@@ -378,7 +436,11 @@ class PeftTrainer:
     )
     out, grads = grad_fn(model, **inputs)
     grad_norm = optax.global_norm(grads)
-    optimizer.update(model, grads)
+    if self.config.use_effective_count_gradient_accumulation:
+      effective_count = _effective_trajectory_count(inputs)
+      optimizer.update(model, grads, effective_count=effective_count)
+    else:
+      optimizer.update(model, grads)
     if self._has_aux:
       loss, aux = out
       return loss, aux, grad_norm
@@ -479,15 +541,9 @@ class PeftTrainer:
 
   def _try_get_learning_rate(self) -> float | None:
     """Returns the learning rate from the optimizer state if available."""
-    try:
-      return self.optimizer.opt_state.hyperparams["learning_rate"].value
-    except AttributeError:
-      for chainpart in self.optimizer.opt_state:
-        if isinstance(chainpart, optax.EmptyState):
-          break
-        if hasattr(chainpart, "hyperparams"):
-          return chainpart.hyperparams["learning_rate"].value
-      return None
+    return _find_nested_hyperparam(
+        self.optimizer.opt_state, "learning_rate"
+    )
 
   def _log_metrics(
       self,
@@ -752,8 +808,14 @@ class PeftTrainer:
           self._train_steps += 1
           self._write_train_metrics()
 
-          # Checkpoints are saved on close. This avoids writing early,
-          # low-value checkpoints during short or SSD-constrained runs.
+          self.checkpoint_manager.save(
+              self._train_steps,
+              self.model,
+              self.optimizer,
+              save_only_lora_params=self._lora_enabled,
+              force=False,
+              custom_metadata=self.custom_checkpoint_metadata(),
+          )
 
           if (
               eval_ds

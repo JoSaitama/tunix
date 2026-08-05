@@ -16,6 +16,8 @@
 
 from __future__ import annotations
 
+import json
+import os
 from typing import Any, Callable, Literal
 
 from flax import nnx
@@ -36,14 +38,46 @@ class SelfInfTrainer(rl_trainer.Trainer):
       scope: Literal["batch", "group"] = "batch",
       num_generations: int | None = None,
       dot_threshold: float = 0.0,
+      decisions_path: str | None = None,
       **kwargs,
   ):
     super().__init__(*args, **kwargs)
     self.scope = scope
     self.num_generations = num_generations
     self.dot_threshold = dot_threshold
+    self.decisions_path = decisions_path
     self._score_loss_fn: Callable[..., Any] | None = None
     self._score_loss_has_aux = False
+    if decisions_path:
+      os.makedirs(os.path.dirname(os.path.abspath(decisions_path)), exist_ok=True)
+
+  def _post_process_train_step(self, aux: Any) -> None:
+    if self.decisions_path and isinstance(aux, dict):
+      keys = (
+          "self_inf_scores",
+          "self_inf_threshold_mask",
+          "self_inf_final_mask",
+          "self_inf_group_indices",
+          "self_inf_generation_indices",
+      )
+      arrays = {
+          key: np.asarray(aux.pop(key)).tolist() for key in keys if key in aux
+      }
+      if arrays:
+        record = {
+            "train_step": int(self._train_steps) + 1,
+            "scope": self.scope,
+            "num_generations": self.num_generations,
+            "dot_threshold": self.dot_threshold,
+            "score_objective": "policy",
+            "nonfinite_score_count": int(
+                np.asarray(aux.get("self_inf_nonfinite_score_count", 0))
+            ),
+            **arrays,
+        }
+        with open(self.decisions_path, "a", encoding="utf-8") as output:
+          output.write(json.dumps(record, separators=(",", ":")) + "\n")
+    super()._post_process_train_step(aux)
 
   def _with_score_loss_fn(
       self, score_loss_fn: Callable[..., Any], *, has_aux: bool
