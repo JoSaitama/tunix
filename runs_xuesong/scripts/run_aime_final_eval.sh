@@ -71,7 +71,7 @@ cat > "${OUTPUT_DIR}/eval_config.json" <<EOF
   "temperature": 0.6,
   "top_p": 0.95,
   "mesh_shape": "4,1",
-  "mesh_axes": "fsdp,sp",
+  "mesh_axes": "fsdp,tp",
   "problem_batch_size": ${PROBLEM_BATCH_SIZE},
   "max_num_seqs": ${MAX_NUM_SEQS},
   "max_num_batched_tokens": ${MAX_NUM_BATCHED_TOKENS}
@@ -89,7 +89,7 @@ EVAL_ARGS=(
   --tokenizer_path "$TOKENIZER_PATH"
   --model_config deepseek_r1_distill_qwen_1p5b
   --mesh_shape 4,1
-  --mesh_axes fsdp,sp
+  --mesh_axes fsdp,tp
   --sampler_type vllm
   --num_samples "$NUM_SAMPLES"
   --batch_size 1

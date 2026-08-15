@@ -2422,3 +2422,17 @@ No source code was changed in this planning analysis.
 - Records now store `engine_seed`; the summary explicitly documents that reproducibility relies on one engine-level seed plus deterministic request ordering. It no longer claims an unsupported per-slot seed schedule.
 - Exact reproducibility remains an empirical property of this JAX-vLLM build. Two identical mini-evaluations must still be compared by generated-token hashes before formal evaluation.
 - This change affects evaluation sampling initialization only. It does not modify checkpoint loading, model weights, training, decoding temperature/top-p, sample cardinality, or metric definitions.
+
+## 2026-08-15 — Deterministic mini-evaluation acceptance
+
+- Two independent two-problem, two-sample, 512-token evaluations of the Group Policy-DTV-LOO step-314 checkpoint completed successfully with the same vLLM engine seed (`2026`) and fixed sample-slot-major request order.
+- Both launchers returned zero on the local and remote workers, each output contained exactly four unique `(problem_id, sample_index)` records, and the complete sample files, per-record generated-token hashes, and computed metrics matched exactly.
+- This empirically validates deterministic token generation for the tested JAX-vLLM build and launch topology under the engine-level seed protocol. It authorizes the matched full AIME 2024 evaluation while remaining an environment-specific result rather than a general guarantee for every vLLM build.
+- Node 1 currently has the original pre-trained model and the Group Policy-DTV-LOO step-314 checkpoint. These two models will be evaluated sequentially on Node 1 with identical 30-problem, k=16, 8,192-token decoding settings. Baseline and ordinary Group Policy-DTV results can be added later from their respective nodes using the same evaluator commit and protocol.
+
+## 2026-08-15 — Base-model evaluation mesh correction
+
+- The first pre-trained base-model evaluation failed while loading safetensors because the launcher forced mesh axes `fsdp,sp`, while the Qwen2 parameter partition specifications require a `tp` resource axis.
+- The original AIME v5p-16 training entry point configures the actor mesh as shape `(4,1)` with axes `('fsdp','tp')`, and the evaluator itself already defaults to `fsdp,tp`. The incompatible `fsdp,sp` override existed only in the new evaluation launcher.
+- Corrected the launcher and its recorded configuration to use `(4,1)` `fsdp,tp` for every evaluated model. This is an axis-name correction, not a change in device count, model weights, decoding settings, or vLLM tensor parallelism.
+- The prior checkpoint mini-evaluations demonstrated seed determinism but used the incorrect launcher mesh labels. Before full comparison, run one compact base-model gate and one compact Group Policy-DTV-LOO checkpoint gate under the corrected common `fsdp,tp` mesh.
