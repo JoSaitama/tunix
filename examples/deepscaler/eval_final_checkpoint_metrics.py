@@ -329,6 +329,7 @@ def _create_sampler(
   )
   engine_kwargs = {
       "model": args.model_version,
+      "seed": args.eval_seed,
       "max_model_len": (
           args.max_prompt_length + args.max_generation_steps + 100
       ),
@@ -366,7 +367,6 @@ def _generate_once(
     args: argparse.Namespace,
     sampler,
     prompts: list[str],
-    generation_seed: int,
 ):
   top_p = None if args.top_p is not None and args.top_p <= 0 else args.top_p
   return sampler(
@@ -376,7 +376,6 @@ def _generate_once(
       temperature=args.temperature,
       top_p=top_p,
       top_k=args.top_k,
-      seed=generation_seed,
       echo=False,
       pad_output=False,
   )
@@ -399,19 +398,16 @@ def _generation_batches(
     num_problems: int,
     num_samples: int,
     problem_batch_size: int,
-    eval_seed: int,
 ):
   """Yields deterministic sample-slot-major generation batches."""
   if num_problems <= 0 or num_samples <= 0 or problem_batch_size <= 0:
     raise ValueError("Generation cardinalities and batch size must be positive.")
   for sample_index in range(num_samples):
-    generation_seed = eval_seed + sample_index
     for start in range(0, num_problems, problem_batch_size):
       yield (
           sample_index,
           start,
           min(start + problem_batch_size, num_problems),
-          generation_seed,
       )
 
 
@@ -464,18 +460,19 @@ def run_eval(args: argparse.Namespace) -> dict[str, Any]:
   if problem_batch_size <= 0:
     raise ValueError("problem_batch_size and max_num_seqs must be positive.")
   with samples_jsonl.open("w", encoding="utf-8") as f:
-    # JAX vLLM supports one seed per sampler call, not one seed per request.
-    # Keep each problem unique within a call and vary the seed by sample slot.
-    for sample_index, start, end, generation_seed in _generation_batches(
+    # JAX vLLM rejects SamplingParams.seed because it is treated as a
+    # per-request seed. Reproducibility is provided by the engine-level seed
+    # configured once in _create_sampler and by this fixed request order.
+    for sample_index, start, end in _generation_batches(
         num_problems=len(df),
         num_samples=args.num_samples,
         problem_batch_size=problem_batch_size,
-        eval_seed=args.eval_seed,
     ):
       batch_df = df.iloc[start:end]
       print(
           f"Generating sample slot {sample_index}, rows "
-          f"{start}-{start + len(batch_df) - 1}, seed={generation_seed}.",
+          f"{start}-{start + len(batch_df) - 1}, "
+          f"engine_seed={args.eval_seed}.",
           flush=True,
       )
       prompts = [
@@ -484,7 +481,7 @@ def run_eval(args: argparse.Namespace) -> dict[str, Any]:
           )
           for _, row in batch_df.iterrows()
       ]
-      output = _generate_once(args, sampler, prompts, generation_seed)
+      output = _generate_once(args, sampler, prompts)
       for output_index, (_, row) in enumerate(batch_df.iterrows()):
         problem_id = int(start + output_index)
         tokens = output.tokens[output_index]
@@ -501,7 +498,7 @@ def run_eval(args: argparse.Namespace) -> dict[str, Any]:
         record = {
             "problem_id": problem_id,
             "sample_index": sample_index,
-            "generation_seed": generation_seed,
+            "engine_seed": args.eval_seed,
             "question": str(row[args.question_col]),
             "ground_truth": ground_truth,
             "response": response,
@@ -555,9 +552,11 @@ def run_eval(args: argparse.Namespace) -> dict[str, Any]:
       "model_version": str(Path(args.model_version).expanduser()),
       "dataset": str(Path(args.dataset).expanduser()),
       "eval_seed": args.eval_seed,
-      "generation_seed_schedule": [
-          args.eval_seed + index for index in range(args.num_samples)
-      ],
+      "engine_seed": args.eval_seed,
+      "seed_semantics": (
+          "single vLLM engine seed with deterministic sample-slot-major "
+          "request order; JAX backend rejects per-request seeds"
+      ),
       "problem_batch_size": problem_batch_size,
       "generation_wall_time_seconds": time.monotonic() - generation_started,
       "num_dataset_rows": len(df),

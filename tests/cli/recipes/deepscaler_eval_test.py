@@ -43,7 +43,7 @@ class DeepScalerEvalTest(absltest.TestCase):
       with self.assertRaisesRegex(ValueError, "exactly 30"):
         eval_final_checkpoint_metrics._load_dataset(_args(path))
 
-  def test_generate_once_forwards_seed_to_vllm(self):
+  def test_generate_once_omits_unsupported_per_request_seed(self):
     sampler = mock.Mock(return_value=object())
     args = argparse.Namespace(
         top_p=0.95,
@@ -54,7 +54,7 @@ class DeepScalerEvalTest(absltest.TestCase):
     )
 
     result = eval_final_checkpoint_metrics._generate_once(
-        args, sampler, ["p0", "p1"], 2029
+        args, sampler, ["p0", "p1"]
     )
 
     self.assertIsNotNone(result)
@@ -65,7 +65,6 @@ class DeepScalerEvalTest(absltest.TestCase):
         temperature=0.6,
         top_p=0.95,
         top_k=None,
-        seed=2029,
         echo=False,
         pad_output=False,
     )
@@ -84,14 +83,13 @@ class DeepScalerEvalTest(absltest.TestCase):
         num_problems=30,
         num_samples=16,
         problem_batch_size=16,
-        eval_seed=2026,
     ))
 
     self.assertLen(batches, 32)
-    self.assertEqual(batches[0], (0, 0, 16, 2026))
-    self.assertEqual(batches[1], (0, 16, 30, 2026))
-    self.assertEqual(batches[2], (1, 0, 16, 2027))
-    self.assertEqual(batches[-1], (15, 16, 30, 2041))
+    self.assertEqual(batches[0], (0, 0, 16))
+    self.assertEqual(batches[1], (0, 16, 30))
+    self.assertEqual(batches[2], (1, 0, 16))
+    self.assertEqual(batches[-1], (15, 16, 30))
 
   def test_token_hash_is_stable_and_order_sensitive(self):
     first = eval_final_checkpoint_metrics._token_ids_sha256([1, 2, 3])

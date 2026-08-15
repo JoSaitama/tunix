@@ -2407,3 +2407,18 @@ No source code was changed in this planning analysis.
 - Corrected `run_aime_final_eval.sh` to execute Worker 0 directly under the invoking local user and launch only Worker 1 through gcloud. Worker 1 participates in distributed initialization and barriers but does not write primary evaluation artifacts.
 - Added bounded mini-gate overrides for dataset limit, sample count, generation length, problem batch size, vLLM sequence capacity, and batched-token capacity. Formal evaluation defaults remain unchanged at 30 problems, k=16, and 8,192 generation steps.
 - The launcher now records local, remote-program, and remote-SSH statuses separately and validates the expected sample cardinality derived from the selected mini or formal protocol.
+
+## 2026-08-15 — Mini-evaluation stale TPU lock diagnosis
+
+- The corrected local/remote launcher passed its initial live-process and VFIO-owner checks, but Worker 0 then failed TPU backend initialization with `The TPU is already in use by another process`.
+- The pre-launch `fuser` output was empty, so this is not evidence of a concurrent evaluator or training process. It is consistent with a stale `/tmp/libtpu_lockfile` left after the earlier failed distributed evaluation.
+- Recovery must first terminate the current failed gate on both workers, verify that `/dev/vfio/0` has no owner, and only then remove `/tmp/libtpu_lockfile` independently on Worker 0 and Worker 1. Each worker has node-local `/tmp` storage.
+- No model, checkpoint, evaluation metric, decoding parameter, or distributed topology change is required for this failure.
+
+## 2026-08-15 — JAX-vLLM evaluation seed compatibility correction
+
+- The first mini-evaluation that reached generation failed with `ValueError: JAX does not support per-request seed.` The installed JAX-vLLM backend treats `SamplingParams.seed` as a per-request setting and rejects it, even when one scalar seed is shared by every request in a sampler call.
+- Corrected the evaluator to pass `eval_seed` once as the vLLM engine seed and to omit `SamplingParams.seed` from generation calls. The sample-slot-major problem ordering remains fixed and auditable.
+- Records now store `engine_seed`; the summary explicitly documents that reproducibility relies on one engine-level seed plus deterministic request ordering. It no longer claims an unsupported per-slot seed schedule.
+- Exact reproducibility remains an empirical property of this JAX-vLLM build. Two identical mini-evaluations must still be compared by generated-token hashes before formal evaluation.
+- This change affects evaluation sampling initialization only. It does not modify checkpoint loading, model weights, training, decoding temperature/top-p, sample cardinality, or metric definitions.
