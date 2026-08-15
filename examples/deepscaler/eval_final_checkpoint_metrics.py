@@ -28,6 +28,7 @@ import time
 from typing import Any, Sequence
 
 import jax
+from jax.experimental import multihost_utils
 from flax import nnx
 import pandas as pd
 import transformers
@@ -38,6 +39,7 @@ from tunix.models.qwen2 import model as qwen2_model_lib
 from tunix.models.qwen2 import params as qwen2_params_lib
 from tunix.sft import checkpoint_manager as checkpoint_manager_lib
 from tunix.utils import math_eval_metrics
+from tunix.utils import math_utils
 
 
 MODEL_CONFIGS = {
@@ -364,10 +366,9 @@ def _generate_once(
     args: argparse.Namespace,
     sampler,
     prompts: list[str],
-    sample_index: int,
+    generation_seed: int,
 ):
   top_p = None if args.top_p is not None and args.top_p <= 0 else args.top_p
-  seed = None if args.sampler_type == "vllm" else sample_index
   return sampler(
       input_strings=prompts,
       max_generation_steps=args.max_generation_steps,
@@ -375,7 +376,7 @@ def _generate_once(
       temperature=args.temperature,
       top_p=top_p,
       top_k=args.top_k,
-      seed=seed,
+      seed=generation_seed,
       echo=False,
       pad_output=False,
   )
@@ -387,6 +388,27 @@ def _write_json(path: Path, value: Any) -> None:
     f.write("\n")
 
 
+def _generation_batches(
+    *,
+    num_problems: int,
+    num_samples: int,
+    problem_batch_size: int,
+    eval_seed: int,
+):
+  """Yields deterministic sample-slot-major generation batches."""
+  if num_problems <= 0 or num_samples <= 0 or problem_batch_size <= 0:
+    raise ValueError("Generation cardinalities and batch size must be positive.")
+  for sample_index in range(num_samples):
+    generation_seed = eval_seed + sample_index
+    for start in range(0, num_problems, problem_batch_size):
+      yield (
+          sample_index,
+          start,
+          min(start + problem_batch_size, num_problems),
+          generation_seed,
+      )
+
+
 def run_eval(args: argparse.Namespace) -> dict[str, Any]:
   _maybe_initialize_jax_distributed()
   if jax.process_index() != 0:
@@ -395,7 +417,7 @@ def run_eval(args: argparse.Namespace) -> dict[str, Any]:
         "eval.",
         flush=True,
     )
-    _wait_for_primary_done(args)
+    multihost_utils.sync_global_devices("aime_eval_primary_done")
     return {
         "process_index": jax.process_index(),
         "status": "secondary_eval_done",
@@ -431,40 +453,60 @@ def run_eval(args: argparse.Namespace) -> dict[str, Any]:
   summary_json = output_dir / "summary.json"
 
   records = []
+  generation_started = time.monotonic()
+  problem_batch_size = min(args.problem_batch_size, args.max_num_seqs)
+  if problem_batch_size <= 0:
+    raise ValueError("problem_batch_size and max_num_seqs must be positive.")
   with samples_jsonl.open("w", encoding="utf-8") as f:
-    for start in range(0, len(df), args.batch_size):
-      batch_df = df.iloc[start : start + args.batch_size]
+    # JAX vLLM supports one seed per sampler call, not one seed per request.
+    # Keep each problem unique within a call and vary the seed by sample slot.
+    for sample_index, start, end, generation_seed in _generation_batches(
+        num_problems=len(df),
+        num_samples=args.num_samples,
+        problem_batch_size=problem_batch_size,
+        eval_seed=args.eval_seed,
+    ):
+      batch_df = df.iloc[start:end]
       print(
-          f"Generating rows {start}-{start + len(batch_df) - 1} "
-          f"with {args.num_samples} samples each.",
+          f"Generating sample slot {sample_index}, rows "
+          f"{start}-{start + len(batch_df) - 1}, seed={generation_seed}.",
           flush=True,
       )
-      expanded_prompts = []
-      expanded_metadata = []
-      for item_index, (_, row) in enumerate(batch_df.iterrows()):
-        prompt = _format_prompt(
-            tokenizer, str(row[args.question_col]), args.dataset_type
-        )
-        for sample_index in range(args.num_samples):
-          expanded_prompts.append(prompt)
-          expanded_metadata.append((item_index, sample_index, row))
-
-      output = _generate_once(args, sampler, expanded_prompts, start)
-      for output_index, (item_index, sample_index, row) in enumerate(
-          expanded_metadata
-      ):
+      prompts = [
+          _format_prompt(
+              tokenizer, str(row[args.question_col]), args.dataset_type
+          )
+          for _, row in batch_df.iterrows()
+      ]
+      output = _generate_once(args, sampler, prompts, generation_seed)
+      for output_index, (_, row) in enumerate(batch_df.iterrows()):
+        problem_id = int(start + output_index)
         tokens = output.tokens[output_index]
         token_count = len(tokens)
         response = output.text[output_index]
         ground_truth = str(row[args.answer_col])
+        extracted_answer = math_eval_metrics.extract_response_answer(response)
+        normalized_answer = (
+            math_utils.mathd_normalize_answer(extracted_answer)
+            if extracted_answer is not None
+            else None
+        )
         record = {
-            "problem_id": int(start + item_index),
+            "problem_id": problem_id,
             "sample_index": sample_index,
+            "generation_seed": generation_seed,
             "question": str(row[args.question_col]),
             "ground_truth": ground_truth,
             "response": response,
-            "extracted_answer": math_eval_metrics.extract_response_answer(
-                response
+            "extracted_answer": extracted_answer,
+            "normalized_answer": normalized_answer,
+            "is_correct": math_eval_metrics.is_extracted_answer_correct(
+                extracted_answer, ground_truth
+            ),
+            "answer_extracted": extracted_answer is not None,
+            "format_valid": bool(response and "\\boxed" in response),
+            "aime_answer_valid": (
+                math_eval_metrics.is_valid_aime_answer(extracted_answer)
             ),
             "token_count": token_count,
             "truncated": token_count >= args.max_generation_steps,
@@ -472,6 +514,17 @@ def run_eval(args: argparse.Namespace) -> dict[str, Any]:
         records.append(record)
         f.write(json.dumps(record, ensure_ascii=False) + "\n")
       f.flush()
+
+  expected_records = len(df) * args.num_samples
+  observed_keys = {
+      (record["problem_id"], record["sample_index"]) for record in records
+  }
+  if len(records) != expected_records or len(observed_keys) != expected_records:
+    raise RuntimeError(
+        "Evaluation generation cardinality mismatch: "
+        f"expected={expected_records}, records={len(records)}, "
+        f"unique_keys={len(observed_keys)}."
+    )
 
   metrics = math_eval_metrics.compute_at_k_metrics(
       records,
@@ -493,6 +546,12 @@ def run_eval(args: argparse.Namespace) -> dict[str, Any]:
       ),
       "model_version": str(Path(args.model_version).expanduser()),
       "dataset": str(Path(args.dataset).expanduser()),
+      "eval_seed": args.eval_seed,
+      "generation_seed_schedule": [
+          args.eval_seed + index for index in range(args.num_samples)
+      ],
+      "problem_batch_size": problem_batch_size,
+      "generation_wall_time_seconds": time.monotonic() - generation_started,
       "num_dataset_rows": len(df),
       "samples_jsonl": str(samples_jsonl),
       "args": vars(args),
@@ -503,6 +562,7 @@ def run_eval(args: argparse.Namespace) -> dict[str, Any]:
       done_sentinel,
       {"checkpoint_step": checkpoint_step, "status": "primary_eval_done"},
   )
+  multihost_utils.sync_global_devices("aime_eval_primary_done")
   return summary
 
 
@@ -540,6 +600,16 @@ def parse_args() -> argparse.Namespace:
   parser.add_argument("--sampler_type", choices=("vllm", "vanilla"), default="vllm")
   parser.add_argument("--num_samples", type=int, default=16)
   parser.add_argument("--batch_size", type=int, default=1)
+  parser.add_argument(
+      "--problem_batch_size",
+      type=int,
+      default=16,
+      help=(
+          "Distinct problems per seeded sampler call; capped by "
+          "--max_num_seqs."
+      ),
+  )
+  parser.add_argument("--eval_seed", type=int, default=2026)
   parser.add_argument("--max_prompt_length", type=int, default=2048)
   parser.add_argument("--max_generation_steps", type=int, default=8192)
   parser.add_argument("--temperature", type=float, default=0.6)
@@ -583,7 +653,12 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
   args = parse_args()
-  run_eval(args)
+  try:
+    run_eval(args)
+  except BaseException:  # Ensure a waiting secondary is released on failure.
+    if jax.distributed.is_initialized() and jax.process_index() == 0:
+      multihost_utils.sync_global_devices("aime_eval_primary_done")
+    raise
   if not args.disable_hard_exit:
     sys.stdout.flush()
     sys.stderr.flush()

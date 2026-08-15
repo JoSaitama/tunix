@@ -14,6 +14,8 @@
 
 """Tests for DeepScaler math eval @k metrics."""
 
+import math
+
 from absl.testing import absltest
 
 from tunix.utils import math_eval_metrics
@@ -161,6 +163,52 @@ class MathEvalMetricsTest(absltest.TestCase):
     self.assertEqual(metrics["avg@16"], 1.0)
     self.assertEqual(metrics["pass@16"], 1.0)
     self.assertEqual(metrics["maj@16"], 1.0)
+
+  def test_detailed_format_length_and_count_metrics(self):
+    samples = [_sample(answer="42", token_count=10) for _ in range(4)]
+    samples.extend(_sample(answer="17", token_count=20) for _ in range(8))
+    samples.extend(
+        math_eval_metrics.MathEvalSample(
+            problem_id="p0",
+            response="No final boxed answer.",
+            ground_truth="42",
+            token_count=30,
+            truncated=True,
+        )
+        for _ in range(4)
+    )
+
+    metrics = math_eval_metrics.compute_at_k_metrics(samples, k=16)
+
+    self.assertEqual(metrics["correct_count"], 4)
+    self.assertEqual(metrics["solved_problem_count"], 1)
+    self.assertEqual(metrics["majority_correct_count"], 0)
+    self.assertEqual(metrics["extractable_answer_rate"], 12 / 16)
+    self.assertEqual(metrics["format_failure_rate"], 4 / 16)
+    self.assertEqual(metrics["accuracy_given_extractable"], 4 / 12)
+    self.assertEqual(metrics["truncated_accuracy"], 0.0)
+    self.assertEqual(metrics["nontruncated_accuracy"], 4 / 12)
+    self.assertEqual(metrics["median_tokens"], 20.0)
+    self.assertEqual(metrics["p90_tokens"], 30.0)
+
+  def test_pass_at_k_curve_uses_standard_estimator(self):
+    samples = [_sample(answer="42") for _ in range(4)]
+    samples.extend(_sample(answer="17") for _ in range(12))
+
+    metrics = math_eval_metrics.compute_at_k_metrics(samples, k=16)
+
+    self.assertEqual(metrics["pass@16"], 1.0)
+    self.assertEqual(metrics["pass@1"], 4 / 16)
+    self.assertAlmostEqual(
+        metrics["pass@2"], 1 - (math.comb(12, 2) / math.comb(16, 2))
+    )
+
+  def test_aime_answer_validation(self):
+    self.assertTrue(math_eval_metrics.is_valid_aime_answer("000"))
+    self.assertTrue(math_eval_metrics.is_valid_aime_answer("999"))
+    self.assertFalse(math_eval_metrics.is_valid_aime_answer("1000"))
+    self.assertFalse(math_eval_metrics.is_valid_aime_answer("1/2"))
+    self.assertFalse(math_eval_metrics.is_valid_aime_answer(None))
 
 
 if __name__ == "__main__":

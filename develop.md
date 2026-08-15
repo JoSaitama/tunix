@@ -2078,3 +2078,321 @@ No source code was changed in this planning analysis.
   `JAX_PLATFORMS=cpu` process. The test now mocks `jax.make_mesh()` as well and
   asserts the exact requested shape, axis names, and automatic axis types. This
   changes no production mesh construction.
+
+## 2026-08-05: final compact TPU gate procedure after CPU validation
+
+- After the complete CPU config gate passes, deploy the exact committed runtime
+  files from Worker 0 to Worker 1 before starting TPU work. Worker 1 is a runtime
+  copy rather than a Git checkout, so deployment uses small per-file downloads
+  pinned to Worker 0's exact Git commit instead of an unreliable streamed Git
+  archive.
+- Remove only the explicitly named prior compact-gate run and log directories;
+  do not delete shared model, dataset, cache, or historical experiment paths.
+- The final compact `group_policy` TPU gate uses batch size 16, mini-batch size
+  16, and train microbatch size 2. This produces eight microbatches followed by
+  one optimizer update. It is the direct HBM test for microbatch two at the full
+  eight generations and 8,192-token response limit.
+- The gate succeeds only when the suite records exit code zero, both distributed
+  worker statuses are zero, global and actor train step equal one, actor iterator
+  step equals eight, the recorded gradient accumulation equals eight, and logs
+  contain no HBM resource-exhausted or out-of-memory failure. Interval 999 plus
+  final-checkpoint suppression should now leave no checkpoint after the exact
+  checkpoint-gating correction.
+
+## 2026-08-05: final microbatch-two group-policy TPU gate result
+
+- Run `grpo_aime_dtv_selfinf_group_policy_seed0_clean_20260805_085831`
+  completed successfully. Worker 0 and Worker 1 both returned status zero; the
+  suite returned exit code zero. No HBM resource-exhausted, process abort,
+  traceback, or optimizer dtype error occurred.
+- The effective runtime configuration was batch size 16, mini-batch size 16,
+  train microbatch size 2, eight gradient-accumulation calls, eight generations,
+  8,192 response tokens, Policy-DTV group scope, threshold zero, beta 0.001,
+  and sequence-mean-token-mean loss aggregation.
+- The final summary reported one global step, one optimizer step, eight actor
+  iterator steps, no checkpoint, and learning rate approximately `1e-6`. Both
+  workers explicitly constructed `cosine_decay_schedule(init_value=1e-6,
+  decay_steps=1)`. The gate's single update cannot display later decay values,
+  but the multi-update CPU regression already verified schedule precedence over
+  the conflicting scalar field.
+- Exact checkpoint gating behaved as intended: interval 999 did not trigger a
+  periodic save, final saving was disabled, `checkpoint_step` was null, and no
+  model files were written.
+- The dataset gate removed nine overlength prompts, found 40,300 valid rows,
+  selected exactly 16 rows for one complete gate batch, and recorded the stable
+  selection hash. All eight DTV decision records had zero nonfinite scores.
+  Degenerate all-zero-advantage groups were excluded from the final update mask,
+  while finite negative DTV scores were removed by the threshold-zero rule.
+- This result validates the peak-HBM shape used by formal group Policy-DTV:
+  formal `128/128/2` training repeats the same two-prompt/eight-generation
+  microbatch program 64 times per optimizer step instead of eight. It does not
+  mathematically prove that a hardware fault or memory leak cannot occur during
+  a multi-day run, but there is no evidence of iteration-dependent HBM growth in
+  the tested compiled update path. The group-policy method is ready for formal
+  training. Baseline and group-policy-LOO still require their own final compact
+  TPU integration gates before their respective formal runs.
+
+## 2026-08-05: degenerate groups and sequential final TPU gates
+
+- A degenerate GRPO group is a prompt whose eight sampled completions receive
+  identical rewards. With binary math rewards this commonly means all eight are
+  incorrect, but it can also mean all eight are correct. Group centering and
+  normalization then produce eight zero advantages, so the group contains no
+  within-prompt preference signal. It is not classified as degenerate merely
+  because some answers are incorrect.
+- `degenerate_group_masking=true` excludes such trajectories from the complete
+  actor update, including both the policy term and the KL term. This avoids
+  allowing signal-free groups to dilute effective-count normalization or apply
+  KL-only updates. The tradeoff is that an all-incorrect prompt does not teach
+  the model from that rollout; learning can occur later only if another rollout
+  for that prompt produces reward variation. This behavior is shared by the
+  baseline, group Policy-DTV, and group Policy-DTV-LOO comparisons.
+- The remaining final integration validation is performed sequentially on the
+  same v5p-16 node. First run `group_loo_policy` with `16/16/2`; verify both
+  worker statuses and suite exit code are zero and TPU processes have exited.
+  Then run `baseline` with the identical data, rollout, optimizer, and
+  microbatch settings. Interval 999 and final-checkpoint suppression prevent
+  either compact gate from writing model checkpoints.
+
+## 2026-08-05: final baseline and group-LOO gate acceptance
+
+- The final baseline and group Policy-DTV-LOO compact gates both completed with
+  Worker 0 status zero, Worker 1 status zero, and no HBM OOM or Python failure.
+  Each run completed eight actor iterator calls, one optimizer update, and one
+  global step; checkpoint step was null and the authoritative learning rate was
+  approximately `1e-6`.
+- Both gates used the same `16/16/2` accumulation geometry, eight generations,
+  8,192 response tokens, beta 0.001, sequence-mean-token-mean aggregation,
+  deterministic seed/data selection, and degenerate-group masking as the final
+  group-policy gate. All three formal methods have therefore passed their final
+  method-specific distributed TPU integration gate.
+- Baseline timing was a 121.57-second first compiled actor call followed by
+  seven steady calls of approximately 3.93--4.05 seconds. Group LOO used a
+  181.87-second first compiled call followed by seven steady calls of
+  approximately 21.75--21.79 seconds. The baseline is expected to be much
+  faster: it performs one aggregate Policy+KL backward per microbatch, while
+  each DTV method additionally computes exact per-trajectory policy-gradient
+  scores before its masked aggregate Policy+KL update. The earlier claim that
+  baseline steady actor calls were approximately 18 seconds was not supported
+  by these final logs.
+- Group Policy-DTV uses the exact standard score
+  `<g_i, sum_j g_j>/G`; group Policy-DTV-LOO uses the exact leave-one-out score
+  `<g_i, sum_{j != i} g_j>/(G-1)`. Both use policy-only gradients for scoring,
+  finite `score >= 0` selection, no minimum-retention cap, the same degenerate
+  group mask, and an effective-count-weighted masked aggregate Policy+KL update.
+- The compact gates prove method routing and peak microbatch HBM behavior. The
+  formal jobs must explicitly set 314 batches and optimizer steps, batch and
+  mini-batch size 128, train microbatch size 2, LR decay steps 314, checkpoint
+  interval 64, and complete-batch enforcement. The validated 40,300-row dataset
+  supplies the required 40,192 rows for exactly 314 complete batches.
+
+## 2026-08-05: formal group Policy-DTV-LOO launch configuration
+
+- The formal seed-zero clean group Policy-DTV-LOO run uses 314 complete batches
+  and optimizer updates, batch and mini-batch size 128, train microbatch size 2,
+  64 effective-count-weighted accumulation calls per optimizer update, eight
+  generations, 8,192 response tokens, beta 0.001, threshold zero, and a
+  no-warmup cosine schedule from `1e-6` over 314 optimizer updates.
+- Periodic checkpoints are requested at completed optimizer steps 64, 128, 192,
+  and 256. The independent final-save path writes step 314. With
+  `max_to_keep=1`, a newly finalized checkpoint replaces the previous local
+  checkpoint; this is rolling retention at a 64-step interval, not permanent
+  retention of every 64-step model. Step 64 must be copied to external storage
+  after its metadata is complete and before step 128 is saved if it is required
+  for later analysis.
+- Trajectory text logging remains disabled to limit disk consumption, while DTV
+  decision diagnostics, TensorBoard metrics, run summary, data manifest,
+  distributed worker logs, and checkpoint metadata remain enabled.
+
+## 2026-08-05: formal group-LOO data-gate confirmation
+
+- Formal run `grpo_aime_dtv_selfinf_group_loo_policy_seed0_clean_20260805_095513`
+  created a valid strict data manifest: 40,309 input rows, nine tokenizer-
+  overlength rows, 40,300 valid rows, exactly 40,192 selected rows, 314 complete
+  batches of 128, and 108 unused valid rows. The deterministic formal selection
+  hash is `adc37181ea707583d3a775a9032b1ebc3c617931e4180bda9267d4b65ecc0928`.
+- `run_summary.env` is a suite completion artifact and is not expected while the
+  multi-day job is still active. Runtime method, microbatch, learning-rate, and
+  checkpoint settings must be confirmed from the effective configuration in the
+  live worker log without polling or modifying the process.
+
+## 2026-08-05: formal group-LOO runtime configuration accepted
+
+- The live effective configuration for formal run
+  `grpo_aime_dtv_selfinf_group_loo_policy_seed0_clean_20260805_095513` exactly
+  matches the approved experiment: batch and mini-batch size 128, train
+  microbatch size 2, 64 accumulation calls, 314 complete batches and optimizer
+  steps, eight generations, 8,192 response tokens, beta 0.001, and threshold
+  zero.
+- Runtime routing explicitly enabled `self_inf_group_loo_policy` with group
+  scope and eight generations. The actor optimizer explicitly constructed a
+  no-warmup cosine schedule with initial value `1e-6` and decay length 314.
+  Periodic checkpoint configuration is interval 64 with rolling retention one.
+- Generic non-Agentic configuration values still printed elsewhere in the
+  merged configuration are not selected by this training path. The effective
+  Agentic summary and actor-specific configuration are authoritative. No restart
+  or modification of the active formal process is required.
+
+## 2026-08-05: interpretation of group-LOO retention diagnostics
+
+- Formal group Policy-DTV-LOO uses `min_keep_fraction=0.0`; the legacy retention
+  cap is disabled. Consequently `loo_retention_cap_triggered`,
+  `loo_groups_with_cap_triggered`, `loo_retained_by_cap_mask`, and every element
+  of `loo_group_cap_triggered` remain zero or false.
+- `loo_pre_cap_kept_samples` counts the finite scores satisfying the threshold
+  before the common effective trajectory mask. `loo_post_cap_kept_samples`
+  currently counts the final effective mask after degenerate-group masking. Its
+  historical name is therefore misleading when the cap is disabled; it is best
+  interpreted as final effective retained samples.
+- In the inspected record, group zero retained only generation one because its
+  LOO score was the sole nonnegative finite score. Group one had eight zero LOO
+  scores, so all eight passed `score >= 0` initially, but the group had all-zero
+  advantages and all eight were removed from the final effective update. This
+  explains pre-threshold retention nine and final retention one without any cap
+  activation.
+
+## 2026-08-07: formal step-64 checkpoint archive
+
+- The formal group Policy-DTV-LOO step-64 checkpoint completed successfully:
+  root metadata, model manifest, and optimizer manifest existed, and no Orbax
+  temporary checkpoint directory remained.
+- The completed checkpoint tree, approximately 14.3 GB, was copied from Worker
+  0 to the Worker 1 archive with `rsync --append-verify`. Final archive
+  acceptance requires a read-only comparison of relative-path SHA256 manifests,
+  file counts, and required remote metadata. Verification is scoped only to the
+  immutable `actor/64` directory and does not interact with the active training
+  process or later rolling checkpoints.
+
+## 2026-08-07: formal group-LOO runtime projection at step 68
+
+- The formal run launched at approximately 2026-08-05 09:55 UTC and completed
+  logged global step 68 at approximately 2026-08-07 02:25 UTC, about 40.5 hours
+  of wall-clock time including initialization, compilation, rollout, training,
+  synchronization, and the step-64 checkpoint.
+- The latest complete optimizer step took 2,117.34 seconds, or approximately
+  35.29 minutes. This agrees closely with the wall-clock average after allowing
+  for zero-based versus one-based step logging.
+- Approximately 245--246 optimizer updates remain out of 314. At the observed
+  steady rate, pure remaining computation is about 144--145 hours, or 6.0 days.
+  Allowing for checkpoints at 128, 192, 256, and final 314, rollout-length
+  variance, and filesystem delays gives a practical estimate of 6.0--6.3 more
+  days, assuming no interruption. The expected finish is around 2026-08-13
+  02:30--09:30 UTC, equivalent to 2026-08-13 10:30--17:30 Asia/Shanghai.
+
+## 2026-08-07: local retention decision after archiving step 64
+
+- Do not manually delete the active run's local `actor/64` directory while the
+  in-process Orbax CheckpointManager still records it as the latest managed
+  checkpoint. External deletion can leave the manager's in-memory retention
+  state inconsistent with the filesystem when step 128 is finalized.
+- Worker 0 currently has approximately 18 GB free and the completed checkpoint
+  is approximately 14.3 GB. This should fit one additional checkpoint before
+  rolling retention removes step 64, but the temporary low-water mark may be
+  only several gigabytes. Free space should first be recovered from unrelated
+  historical gates, caches, or checkpoints after a read-only size audit.
+- Once step 128 completes, `max_to_keep=1` should remove local step 64
+  automatically. The separately verified Worker 1 archive remains the permanent
+  step-64 copy.
+
+## 2026-08-07: Worker 0 disk headroom before step 128
+
+- Truncating oversized Docker container JSON logs increased Worker 0 free space
+  from approximately 18 GB to 21 GB. This did not remove the experiment's repo
+  logs, TensorBoard data, DTV decisions, or checkpoints.
+- The active step-64 checkpoint occupies approximately 14 GB. A same-sized step
+  128 checkpoint should leave approximately 6--7 GB of transient free space
+  before Orbax rolling retention removes step 64. This is adequate but should be
+  observed once after step 128 completes; the active step-64 directory should
+  not be deleted manually.
+- Other large space consumers are historical LHF checkpoints (approximately
+  29 GB total) and a 3.4 GB `/tmp/models` copy. They may be valuable or active
+  and must not be removed during the current run without separate verification.
+
+## 2026-08-13: formal baseline launch parity
+
+- The formal baseline run must differ from the two DTV runs only in method
+  routing. It uses seed zero, clean data, 314 complete batches and optimizer
+  updates, batch and mini-batch size 128, train microbatch size 2, eight
+  generations, 8,192 response tokens, beta 0.001, sequence-mean-token-mean loss
+  aggregation, and the common degenerate-group mask.
+- The actor optimizer uses the same no-warmup cosine schedule from `1e-6` over
+  314 optimizer updates. Checkpoints use interval 64, `max_to_keep=1`, and an
+  enabled final step-314 save. Trajectory text logging remains disabled. The
+  suite's required filter argument has no effect on the baseline method.
+
+## 2026-08-14: final group-LOO checkpoint and AIME 2024 evaluation design
+
+- A training checkpoint does not embed the DeepScaleR examples, rollout text,
+  or reward decisions. Step 314 contains model parameters, optimizer state, and
+  checkpoint metadata. Dataset provenance is established by the run's strict
+  data manifest, selection hash, effective configuration, and retained logs.
+- Final acceptance has three layers. First, verify the step-314 root metadata,
+  model and optimizer manifests, absence of Orbax temporary directories, final
+  suite/worker exit statuses, and a 314-step training summary. Second, audit
+  TensorBoard and DTV decision logs for finite loss/LR, zero nonfinite scores,
+  sensible retained fractions, and the expected cosine endpoint. Third, restore
+  step 314 and run the tracked offline evaluator on the exact AIME 2024 parquet.
+- The formal evaluation uses all 30 unique AIME 2024 problems, 16 stochastic
+  samples per problem (480 records), vLLM, temperature 0.6, top-p 0.95, maximum
+  generation length 8,192, maximum prompt length 2,048, batch size one,
+  `max_num_seqs=16`, and `max_num_batched_tokens=38400`. Required outputs are
+  `samples.jsonl`, `summary.json`, dataset SHA256 provenance, and metrics
+  `avg@16`, `pass@16`, `maj@16`, average tokens, and truncation rate.
+- Scientific comparison requires the base model, baseline step 314, group
+  Policy-DTV step 314, and group Policy-DTV-LOO step 314 to use the same evaluator
+  commit, dataset hash, tokenizer, decoding parameters, and sample count. A
+  training loss alone is not evidence of improved AIME accuracy.
+## 2026-08-15 — Formal group LOO run exit-status audit
+
+- The formal `group_loo_policy` run reached global/actor train step 314 and produced a structurally complete final actor checkpoint at step 314.
+- Its recorded `EXIT_CODE=1` is the return code of `run_official_like_dual_worker.sh`; that launcher returns 1 when either `LOCAL_STATUS` or the resolved `REMOTE_STATUS` is nonzero.
+- The exit code alone therefore does not prove that optimizer updates or checkpoint persistence failed. The retained worker status records and the tails of `local.log` and `remote.log` must be inspected before classifying the run.
+- Do not rerun or delete the final checkpoint until that post-training exit source is identified and the checkpoint is restore/evaluation tested.
+- The Worker 0 log confirms all 314 updates, final weight synchronization, and successful synchronous finalization of checkpoint 314. The final checkpoint replaced checkpoint 256 according to `max_to_keep=1`.
+- No fatal training, HBM OOM, or Orbax save error appears at the end of the Worker 0 log. The tolerant math-parser messages and Orbax "No metadata found" informational messages did not prevent successful saves.
+- The Worker 0 filesystem does not contain the Worker 1 `remote.log`, because the same absolute path resolves to Worker 1's node-local disk inside the remote command. The remaining exit-code diagnosis therefore requires a one-time read of that file on Worker 1.
+- Worker 1's remote log ends abruptly at 2026-08-12 06:32 while the rollout engine still reports roughly 965 running requests. It contains neither a clean shutdown nor the launcher's `HOST=... STATUS=0` record. Worker 0 continued until 2026-08-13 02:33.
+- This missing remote program status explains the outer exit code: the launcher had to fall back to the failed/disconnected SSH transport status and returned 1.
+- The final checkpoint is structurally complete, but scientific acceptance of the run additionally requires confirming that Worker 0 explicitly recovered/rerouted the lost rollout process and that no incomplete batch was consumed. A checkpoint restore and AIME evaluation remain required.
+- Worker 0 explicitly logged lost distributed-rollout connections followed by one retry after remote restart. This recovery behavior occurred multiple times and training subsequently completed contiguous global steps 280 through 314 with normal per-step durations.
+- The complete 314-step decision/selection cardinality and contiguous optimizer-step sequence provide no evidence that a partial rollout batch was consumed. Retried unfinished generations may change exact stochastic samples, but they do not change the method, objective, batch cardinality, or data-selection semantics.
+- The reported kernel-journal command was executed at the Worker 0 shell prompt, so its empty result proves only that Worker 0 had no matching kernel OOM event. It does not audit Worker 1's kernel journal.
+- Operational classification: training and final checkpoint succeeded; the outer exit code is a remote-session/status-record failure. Scientific acceptance still requires a successful checkpoint restore and the planned AIME 2024 evaluation.
+
+### Restore validation plan
+
+- Validate actor checkpoint 314 first; checkpoint 64 is an optional intermediate comparison and is not required for final-model restore validation.
+- Run the restore on both TPU hosts so JAX distributed initialization is valid. Process 0 constructs the historical `(4, 1)` `fsdp,sp` mesh and calls the existing evaluator's `_load_final_actor_model`; process 1 participates only in initialization and a final global barrier.
+- The gate must print `Restored actor checkpoint step 314.` and `RESTORE_GATE_OK step=314` and return zero on both workers.
+- This gate reads model parameters only. It does not generate samples, update parameters, save a checkpoint, or require the step-64 archive to be copied back.
+
+### Restore validation result
+
+- The two-host restore gate passed with `process_count=2`, four local TPU devices per process, and eight global TPU devices.
+- Process 0 restored exactly actor checkpoint step 314 from the formal `group_loo_policy` run.
+- Both processes completed the final multihost barrier and the command returned `RESTORE_GATE_STATUS=0`.
+- The final actor checkpoint is therefore readable and mesh-compatible. The earlier experiment `EXIT_CODE=1` is classified as a launcher/remote-session termination-status failure rather than a failed training or failed final checkpoint.
+- The remaining scientific validation is the full AIME 2024 evaluation: 30 problems, 16 samples per problem, 480 total generations, using checkpoint 314.
+- `RESTORE_GATE_DONE process=1 restored=None` is expected: the restore gate intentionally executes `_load_final_actor_model` only on JAX process 0. Process 1 initializes its four local TPU devices and joins the final global barrier, but does not read the checkpoint; its local `restored` variable therefore remains `None`.
+- `short_sweep_queue_20260707.md` defines only the 64-step training sweep (threshold, beta, and optional response-length stages). It contains no evaluation protocol.
+- Final evaluation should therefore match the recovered historical baseline evaluation rather than infer settings from the sweep note: AIME 2024, checkpoint 314, 30 problems, 16 samples per problem, 8192 generation steps, temperature 0.6, top-p 0.95, batch size 1, vLLM, mesh `(4, 1)` with `fsdp,sp`, `max_num_seqs=16`, `max_num_batched_tokens=38400`, and vLLM HBM utilization 0.8.
+
+## Proposed detailed AIME evaluation implementation (discussion only)
+
+- Re-evaluate the base model, the newly trained baseline step 314, Group Policy-DTV step 314, and Group Policy-DTV-LOO step 314 under one new matched protocol. Historical baseline numbers are protocol references, not substitutes for the retrained baseline.
+- The current evaluator explicitly sets `seed=None` for vLLM. `VllmSampler` accepts one sampling seed but documents that the JAX vLLM backend does not support a distinct seed for each request inside one call.
+- Merely replacing `None` with a scalar evaluation seed is unsafe because the current evaluator sends sixteen duplicate prompts for one problem in the same call; all duplicate requests could share an unsuitable seed configuration.
+- Proposed deterministic schedule: iterate sample slots 0 through 15; for each slot, generate one completion for every AIME problem in fixed dataset order, chunked by `max_num_seqs`; pass `eval_seed + sample_slot` as the call seed. This keeps duplicate copies of the same problem out of the same seeded call and requires roughly the same number of calls as the historical problem-major batching.
+- Before full evaluation, run the same two-problem deterministic gate twice and compare response/token hashes. A fixed seed provides matched, reproducible sampling intent, but bitwise determinism must be empirically verified for the exact distributed vLLM/JAX build and scheduling configuration.
+- Store every response and primitive field once, then compute correctness, format, length, diversity, pass@k, and paired model comparisons offline without additional TPU generation.
+
+## 2026-08-15 — Detailed AIME evaluation implementation
+
+- Updated `examples/deepscaler/eval_final_checkpoint_metrics.py` with an explicit `--eval_seed`, sample-slot-major generation, a fixed auditable seed schedule, strict `(problem_id, sample_index)` cardinality validation, enriched per-sample facts, generation wall time, and a real multihost completion barrier.
+- The seed schedule is `eval_seed + sample_index`. Each seeded call contains distinct problems only; the same problem is never duplicated inside one JAX-vLLM call that shares a seed. With 30 AIME problems and `problem_batch_size=16`, a full k=16 evaluation uses 32 sampler calls.
+- Extended `tunix/utils/math_eval_metrics.py` while retaining all historical keys. New metrics cover standard estimated pass@1/2/4/8/16, absolute correct/solved/majority counts, boxed/extractable/AIME-valid format rates, conditional accuracy, token percentiles, truncated versus non-truncated accuracy, correct/incorrect lengths, answer diversity, vote concentration, and answer entropy.
+- Added `examples/deepscaler/analyze_aime_eval.py` to generate `detailed_summary.json` and `per_problem.jsonl` from retained samples without TPU generation.
+- Added `examples/deepscaler/compare_aime_evals.py` for problem-aligned model comparison and paired problem-level bootstrap confidence intervals. Bootstrap resampling treats the 30 problems, not the 480 correlated generations, as independent units.
+- Added `runs_xuesong/scripts/run_aime_final_eval.sh`, which fixes the matched AIME-2024 k=16 protocol, launches both TPU workers, records configuration and logs, and requires a summary, completion sentinel, and exactly 480 sample records before returning zero.
+- Added or extended CPU tests for detailed metrics, pass@k, AIME answer validation, explicit seed forwarding, deterministic scheduling, offline per-problem summaries, aligned comparisons, and reproducible bootstrap.
+- Local static validation passed with `python3 -m py_compile`, `bash -n`, and `git diff --check`. The Mac checkout has no project `.venv` or pytest installation, so dependency-backed pytest must run in the server environment before deployment or TPU evaluation.

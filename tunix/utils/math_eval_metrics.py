@@ -20,7 +20,10 @@ import collections
 import contextlib
 import dataclasses
 import io
+import math
 import numbers
+import re
+import statistics
 from typing import Any, Iterable, Mapping, Sequence
 
 from tunix.utils import math_rewards
@@ -166,6 +169,51 @@ def _majority_answer(samples: Sequence[MathEvalSample]) -> str | None:
   return representative[winner]
 
 
+def _percentile(values: Sequence[int], percentile: float) -> float:
+  if not values:
+    raise ValueError("Cannot compute a percentile from an empty sequence.")
+  ordered = sorted(float(value) for value in values)
+  position = (len(ordered) - 1) * percentile
+  lower = math.floor(position)
+  upper = math.ceil(position)
+  if lower == upper:
+    return ordered[lower]
+  weight = position - lower
+  return ordered[lower] * (1 - weight) + ordered[upper] * weight
+
+
+def _pass_at_k(num_samples: int, num_correct: int, k: int) -> float:
+  if not 1 <= k <= num_samples:
+    raise ValueError(f"pass@k requires 1 <= k <= {num_samples}; received {k}.")
+  if num_correct <= 0:
+    return 0.0
+  if num_samples - num_correct < k:
+    return 1.0
+  return 1.0 - (
+      math.comb(num_samples - num_correct, k) / math.comb(num_samples, k)
+  )
+
+
+def is_valid_aime_answer(extracted_answer: str | None) -> bool:
+  if extracted_answer is None:
+    return False
+  normalized = math_utils.mathd_normalize_answer(extracted_answer)
+  if normalized is None or not re.fullmatch(r"[+-]?\d+", normalized.strip()):
+    return False
+  value = int(normalized)
+  return 0 <= value <= 999
+
+
+def _answer_entropy(answer_counts: collections.Counter[str]) -> float:
+  total = sum(answer_counts.values())
+  if total == 0:
+    return 0.0
+  return -sum(
+      (count / total) * math.log(count / total)
+      for count in answer_counts.values()
+  )
+
+
 def compute_at_k_metrics(
     samples: Iterable[MathEvalSample | Mapping[str, Any]],
     *,
@@ -205,24 +253,52 @@ def compute_at_k_metrics(
           f"Expected exactly {k} samples per problem, got {bad_counts}."
       )
 
-  sample_correct = []
-  sample_token_counts = []
-  sample_truncated = []
+  sample_correct: list[bool] = []
+  sample_token_counts: list[int] = []
+  sample_truncated: list[bool] = []
+  sample_extractable: list[bool] = []
+  sample_boxed: list[bool] = []
+  sample_valid_aime: list[bool] = []
   pass_scores = []
   maj_scores = []
+  correct_counts = []
+  unique_answer_counts = []
+  top_answer_vote_shares = []
+  answer_entropies = []
 
   for group_samples in grouped.values():
     group_correct = [
         is_response_correct(sample.response, sample.ground_truth)
         for sample in group_samples
     ]
+    extracted_answers = [
+        extract_response_answer(sample.response) for sample in group_samples
+    ]
+    answer_keys = [_vote_key(answer) for answer in extracted_answers]
+    answer_counts = collections.Counter(
+        key for key in answer_keys if key is not None
+    )
     sample_correct.extend(group_correct)
     sample_token_counts.extend(_sample_token_count(s) for s in group_samples)
     sample_truncated.extend(
         _sample_truncated(s, max_generation_steps) for s in group_samples
     )
+    sample_extractable.extend(answer is not None for answer in extracted_answers)
+    sample_boxed.extend(
+        bool(sample.response and "\\boxed" in sample.response)
+        for sample in group_samples
+    )
+    sample_valid_aime.extend(
+        is_valid_aime_answer(answer) for answer in extracted_answers
+    )
 
     pass_scores.append(any(group_correct))
+    correct_counts.append(sum(group_correct))
+    unique_answer_counts.append(len(answer_counts))
+    top_answer_vote_shares.append(
+        max(answer_counts.values(), default=0) / len(group_samples)
+    )
+    answer_entropies.append(_answer_entropy(answer_counts))
     majority_answer = _majority_answer(group_samples)
     maj_scores.append(
         is_extracted_answer_correct(
@@ -232,13 +308,81 @@ def compute_at_k_metrics(
 
   num_samples = len(sample_correct)
   num_problems = len(grouped)
-  return {
+  correct_count = sum(sample_correct)
+  extractable_count = sum(sample_extractable)
+  truncated_correct = sum(
+      correct and truncated
+      for correct, truncated in zip(sample_correct, sample_truncated)
+  )
+  nontruncated_correct = sum(
+      correct and not truncated
+      for correct, truncated in zip(sample_correct, sample_truncated)
+  )
+  truncated_count = sum(sample_truncated)
+  nontruncated_count = num_samples - truncated_count
+  correct_tokens = [
+      token_count
+      for token_count, correct in zip(sample_token_counts, sample_correct)
+      if correct
+  ]
+  incorrect_tokens = [
+      token_count
+      for token_count, correct in zip(sample_token_counts, sample_correct)
+      if not correct
+  ]
+  result = {
       f"avg@{k}": sum(sample_correct) / num_samples,
       f"pass@{k}": sum(pass_scores) / num_problems,
       f"maj@{k}": sum(maj_scores) / num_problems,
       "avg_tokens": sum(sample_token_counts) / num_samples,
+      "median_tokens": statistics.median(sample_token_counts),
+      "p90_tokens": _percentile(sample_token_counts, 0.90),
+      "p95_tokens": _percentile(sample_token_counts, 0.95),
       "truncation_rate": sum(sample_truncated) / num_samples,
+      "correct_count": correct_count,
+      "solved_problem_count": sum(pass_scores),
+      "majority_correct_count": sum(maj_scores),
+      "boxed_answer_rate": sum(sample_boxed) / num_samples,
+      "extractable_answer_rate": extractable_count / num_samples,
+      "format_failure_rate": 1.0 - (extractable_count / num_samples),
+      "valid_aime_answer_rate": sum(sample_valid_aime) / num_samples,
+      "extractable_but_incorrect_rate": sum(
+          extractable and not correct
+          for extractable, correct in zip(sample_extractable, sample_correct)
+      ) / num_samples,
+      "accuracy_given_extractable": (
+          correct_count / extractable_count if extractable_count else 0.0
+      ),
+      "truncated_accuracy": (
+          truncated_correct / truncated_count if truncated_count else 0.0
+      ),
+      "nontruncated_accuracy": (
+          nontruncated_correct / nontruncated_count
+          if nontruncated_count
+          else 0.0
+      ),
+      "avg_correct_tokens": (
+          sum(correct_tokens) / len(correct_tokens) if correct_tokens else 0.0
+      ),
+      "avg_incorrect_tokens": (
+          sum(incorrect_tokens) / len(incorrect_tokens)
+          if incorrect_tokens
+          else 0.0
+      ),
+      "avg_unique_answers_per_problem": (
+          sum(unique_answer_counts) / num_problems
+      ),
+      "avg_top_answer_vote_share": (
+          sum(top_answer_vote_shares) / num_problems
+      ),
+      "avg_answer_entropy": sum(answer_entropies) / num_problems,
       "num_problems": num_problems,
       "num_samples": num_samples,
       "k": k,
   }
+  for pass_k in (1, 2, 4, 8, 16):
+    if pass_k <= k:
+      result[f"pass@{pass_k}"] = sum(
+          _pass_at_k(k, correct, pass_k) for correct in correct_counts
+      ) / num_problems
+  return result
