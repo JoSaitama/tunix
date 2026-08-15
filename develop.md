@@ -2436,3 +2436,64 @@ No source code was changed in this planning analysis.
 - The original AIME v5p-16 training entry point configures the actor mesh as shape `(4,1)` with axes `('fsdp','tp')`, and the evaluator itself already defaults to `fsdp,tp`. The incompatible `fsdp,sp` override existed only in the new evaluation launcher.
 - Corrected the launcher and its recorded configuration to use `(4,1)` `fsdp,tp` for every evaluated model. This is an axis-name correction, not a change in device count, model weights, decoding settings, or vLLM tensor parallelism.
 - The prior checkpoint mini-evaluations demonstrated seed determinism but used the incorrect launcher mesh labels. Before full comparison, run one compact base-model gate and one compact Group Policy-DTV-LOO checkpoint gate under the corrected common `fsdp,tp` mesh.
+
+### Corrected base-model gate result
+
+- The two-problem, two-sample, 512-token pre-trained base-model gate completed under `(4,1)` `fsdp,tp` with local, remote-program, and remote-SSH statuses all zero.
+- The base safetensors loaded successfully, four sample records and a summary were produced, and the launcher cardinality checks passed. This confirms that the corrected mesh is compatible with the Qwen2 base-model loader.
+- The remaining integration prerequisite is one Group Policy-DTV-LOO step-314 compact gate under the same corrected mesh before launching the two full 30-problem, k=16 evaluations.
+
+### Corrected checkpoint gate and training-mesh audit
+
+- The Group Policy-DTV-LOO step-314 two-problem, two-sample, 512-token gate also completed under `(4,1)` `fsdp,tp`, with local, remote-program, and remote-SSH statuses all zero and exactly four sample records.
+- The gate restored checkpoint step 314, generated both sample slots with engine seed 2026, and emitted no resource-axis error.
+- The retained formal training log explicitly records actor and rollout meshes as shape `(4,1)` with axes `('fsdp','tp')`; the runtime trainer line reports `Mesh('fsdp': 4, 'tp': 1)`. The completed training therefore did not use the erroneous evaluation-only `fsdp,sp` override.
+- Both required model-loading paths are now accepted under one common mesh. Full pre-trained and Group Policy-DTV-LOO evaluations may proceed in a new output root without reusing any earlier failed artifacts.
+
+## 2026-08-15 — Full pre-trained and Group Policy-DTV-LOO evaluation acceptance
+
+- Both matched full evaluations completed with local, remote-program, and remote-SSH statuses zero. Each contains 480 records covering 30 unique AIME problems with k=16, engine seed 2026, 8,192 maximum generation steps, and the identical dataset SHA256 `8bd8728e362242688926bb75c46e270f0f4240b3f60206cbc7fc3763d6dfcaff`.
+- The pre-trained model produced 27 correct samples (`avg@16=0.05625`), solved 9 problems (`pass@16=0.30`), and had 6 majority-correct problems (`maj@16=0.20`).
+- Group Policy-DTV-LOO produced 21 correct samples (`avg@16=0.04375`), solved 9 problems (`pass@16=0.30`), and had 9 majority-correct problems (`maj@16=0.30`). The preliminary comparison is therefore mixed: lower sample-level accuracy, unchanged problem-level pass, and higher majority accuracy.
+- Both models have very high truncation rates (0.90625 and 0.9125) and format-failure rates (0.8875 and 0.895833). These do not invalidate the matched outputs, but they limit statistical power and require explicit reporting alongside accuracy metrics.
+- The outputs are technically suitable for offline detailed and paired problem-level analysis. No claim of improvement should be made until record-integrity checks and paired bootstrap confidence intervals are complete.
+
+## 2026-08-15 — Post-evaluation 64-step tuning decision (discussion only)
+
+- The paired 10,000-resample problem-level bootstrap found no decisive 95% effect versus the pre-trained model: `avg@16` delta -0.0125 with CI [-0.03333, 0.00417], `pass@16` delta 0 with CI [-0.10, 0.10], and `maj@16` delta +0.10 with CI [0, 0.23333].
+- Do not immediately attribute this result to beta. The comparison lacks the retrained GRPO baseline and ordinary Group Policy-DTV evaluations, so it cannot yet separate a general GRPO/AIME issue from a DTV-LOO-specific issue.
+- AIME 2024 has now been observed and must not be repeatedly used to choose beta and then reported as an untouched test set. Any 64-step beta selection should use training diagnostics plus a distinct validation set; AIME 2024 results should be described as preliminary if they influence method selection.
+- If additional tuning is authorized, use matched 64-step runs from the same initialization and data order. Keep the existing beta 0.001 as control, then test a small logarithmic set such as 0.01 and 0.04 before considering 0.08. Do not launch a broad sweep.
+- Selection criteria should be fixed before running: finite training, reward/accuracy trend on a non-AIME-2024 validation set, KL magnitude, response completion/format and truncation behavior, DTV retained fraction/effective count, and no degradation relative to a matched 64-step baseline. A 64-step result is a screening gate, not a substitute for the final 314-step comparison.
+- Before any new training, evaluate the already available retrained baseline and ordinary Group Policy-DTV checkpoints with the locked evaluator protocol. Those results have higher decision value and lower cost than immediately retraining DTV-LOO.
+
+### Node scheduling constraint
+
+- The ordinary Group Policy-DTV step-314 checkpoint is stored on ziao2, where the matched baseline is still training. Full evaluation initializes both TPU workers and must not run concurrently with that training.
+- Do not stop, modify, pull code into, or start evaluation on ziao2 while the baseline process owns the TPU. After baseline training and final checkpoint validation complete, deploy the locked evaluator to both ziao2 workers and evaluate the baseline and ordinary DTV checkpoints sequentially on that node.
+- Avoid copying the approximately 14 GB DTV checkpoint to ziao1 unless scheduling becomes critical. Ziao1 has limited free disk after retaining the DTV-LOO checkpoint, and same-node evaluation on ziao2 avoids unnecessary transfer and storage risk.
+- Until ziao2 becomes available, use CPU-only analysis of the completed ziao1 outputs and retained training diagnostics. Do not begin beta retraining merely to occupy the idle TPU before the missing baseline and ordinary-DTV comparisons are available.
+
+### Multi-seed evaluation sampling plan
+
+- Additional evaluation seeds are useful because the current paired bootstrap quantifies uncertainty across 30 problems but does not measure variability from stochastic decoding. Each full seed already contains 16 samples per problem; changing the engine seed creates another deterministic but different set of 480 completions.
+- Lock the evaluation seed set before observing additional results. Use three total seeds initially: 2026 (already complete), 2027, and 2028. Run the same seeds for every model and report every result; do not select the most favorable seed.
+- On ziao1 this requires four additional full evaluations (two new seeds for the pre-trained model and two for Group Policy-DTV-LOO). At the observed approximately 33--34 minutes per evaluation, the expected sequential TPU time is roughly 2.2--2.5 hours.
+- Report per-seed k=16 metrics and their mean/range or standard deviation. Optionally pool all 48 samples per problem for secondary `avg@48`, `pass@48`, and `maj@48` analysis, but do not relabel pooled k=48 results as k=16.
+- These are evaluation seeds only. They do not establish robustness across independent training seeds because all post-trained checkpoints still come from training seed zero.
+- If the DTV-LOO average-accuracy delta changes sign across evaluation seeds, sampling noise is a material explanation. If it remains consistently negative while majority remains consistently positive, the evidence favors a real accuracy-versus-consistency tradeoff rather than one unlucky decoding stream.
+
+### Automated five-seed evaluation suite
+
+- Added `runs_xuesong/scripts/run_aime_eval_seed_suite.sh` for the locked evaluation seeds `0, 5, 13, 21, 42`, matching the seed convention used in the other experiments.
+- On ziao1, the suite interprets `baseline` as the original pre-trained base model because the trained GRPO baseline remains on ziao2. Each seed runs Group Policy-DTV-LOO first and the pre-trained model second, always sequentially.
+- Before and after every evaluation, the suite performs a bounded check that both TPU workers have no evaluator/vLLM process and no VFIO owner. It removes a stale node-local libtpu lock only after the worker is verified free. Failure to release the TPU aborts the suite rather than starting overlapping work.
+- Each model/seed output must contain zero launcher statuses, the completion sentinel, summary, and exactly 480 sample records. Completed outputs are resumable and skipped; pre-existing incomplete outputs cause a fail-fast stop so evidence is never overwritten.
+- The suite is intended to run once under nohup. Its server-side bounded checks do not consume Codex usage and eliminate the need for continuous manual monitoring.
+
+### Optional cross-node checkpoint migration
+
+- Ordinary Group Policy-DTV can be evaluated earlier by copying its completed, static step-314 checkpoint from ziao2 Worker 0 to ziao1 Worker 0. The copy is read-only on ziao2 and must not target any checkpoint currently being written by the active baseline run.
+- Before importing another approximately 14 GB checkpoint, archive the already evaluated Group Policy-DTV-LOO step-314 checkpoint from ziao1 Worker 0 to ziao1 Worker 1, verify a deterministic file manifest, and only then remove the Worker 0 source. This preserves recovery while maintaining safe free space on ziao1 Worker 0.
+- Validate the DTV source checkpoint structurally and by manifest before transfer, copy it into a method-specific archive directory rather than an active run directory, verify the destination manifest, and retain the ziao2 source until DTV restore and compact evaluation gates pass.
+- Do not copy or evaluate the in-progress ziao2 baseline checkpoint. Baseline remains scheduled for validation and evaluation after training completes.
