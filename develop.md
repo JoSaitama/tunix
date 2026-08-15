@@ -2399,3 +2399,11 @@ No source code was changed in this planning analysis.
 - The Worker 0 CPU gate passed all 21 focused tests in 4.43 seconds. The three emitted messages are existing SWIG and JAX `shard_map` deprecation warnings, not evaluation correctness failures.
 - The next integration gate is two identical two-problem, two-sample, 512-token distributed-vLLM evaluations with `eval_seed=2026`. Acceptance requires both runs to return zero, each to contain four unique `(problem_id, sample_index)` records, and response/token hashes to match exactly. This gate tests protocol determinism cheaply before the 30-problem k=16 evaluation.
 - Added `token_ids_sha256` to each generated record so the mini-gate can compare exact generated token sequences rather than relying on response text and token counts alone. Hashing occurs after generation on the host and does not affect sampling or model computation.
+
+## 2026-08-15 — Mini-evaluation permission failure and launcher correction
+
+- The first distributed mini-evaluation restored checkpoint 314, initialized both JAX hosts, initialized vLLM, and synchronized model weights successfully. It failed before generation with `PermissionError` while opening `run1/samples.jsonl`.
+- Root cause: `gcloud --worker=all` connected to Worker 0 with a service-account identity, while the output directory had been created by `jason_chia925_gmail_com`. This was a host filesystem ownership mismatch, not a checkpoint, evaluator, TPU, vLLM, or HBM failure.
+- Corrected `run_aime_final_eval.sh` to execute Worker 0 directly under the invoking local user and launch only Worker 1 through gcloud. Worker 1 participates in distributed initialization and barriers but does not write primary evaluation artifacts.
+- Added bounded mini-gate overrides for dataset limit, sample count, generation length, problem batch size, vLLM sequence capacity, and batched-token capacity. Formal evaluation defaults remain unchanged at 30 problems, k=16, and 8,192 generation steps.
+- The launcher now records local, remote-program, and remote-SSH statuses separately and validates the expected sample cardinality derived from the selected mini or formal protocol.
