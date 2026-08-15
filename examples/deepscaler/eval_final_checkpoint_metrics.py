@@ -388,6 +388,12 @@ def _write_json(path: Path, value: Any) -> None:
     f.write("\n")
 
 
+def _token_ids_sha256(tokens: Sequence[Any]) -> str:
+  return hashlib.sha256(
+      ",".join(str(int(token)) for token in tokens).encode("utf-8")
+  ).hexdigest()
+
+
 def _generation_batches(
     *,
     num_problems: int,
@@ -483,6 +489,7 @@ def run_eval(args: argparse.Namespace) -> dict[str, Any]:
         problem_id = int(start + output_index)
         tokens = output.tokens[output_index]
         token_count = len(tokens)
+        token_ids_sha256 = _token_ids_sha256(tokens)
         response = output.text[output_index]
         ground_truth = str(row[args.answer_col])
         extracted_answer = math_eval_metrics.extract_response_answer(response)
@@ -509,6 +516,7 @@ def run_eval(args: argparse.Namespace) -> dict[str, Any]:
                 math_eval_metrics.is_valid_aime_answer(extracted_answer)
             ),
             "token_count": token_count,
+            "token_ids_sha256": token_ids_sha256,
             "truncated": token_count >= args.max_generation_steps,
         }
         records.append(record)

@@ -93,6 +93,15 @@ class DeepScalerEvalTest(absltest.TestCase):
     self.assertEqual(batches[2], (1, 0, 16, 2027))
     self.assertEqual(batches[-1], (15, 16, 30, 2041))
 
+  def test_token_hash_is_stable_and_order_sensitive(self):
+    first = eval_final_checkpoint_metrics._token_ids_sha256([1, 2, 3])
+    repeated = eval_final_checkpoint_metrics._token_ids_sha256([1, 2, 3])
+    reordered = eval_final_checkpoint_metrics._token_ids_sha256([3, 2, 1])
+
+    self.assertEqual(first, repeated)
+    self.assertNotEqual(first, reordered)
+    self.assertLen(first, 64)
+
 
 if __name__ == "__main__":
   absltest.main()
