@@ -2497,3 +2497,22 @@ No source code was changed in this planning analysis.
 - Before importing another approximately 14 GB checkpoint, archive the already evaluated Group Policy-DTV-LOO step-314 checkpoint from ziao1 Worker 0 to ziao1 Worker 1, verify a deterministic file manifest, and only then remove the Worker 0 source. This preserves recovery while maintaining safe free space on ziao1 Worker 0.
 - Validate the DTV source checkpoint structurally and by manifest before transfer, copy it into a method-specific archive directory rather than an active run directory, verify the destination manifest, and retain the ziao2 source until DTV restore and compact evaluation gates pass.
 - Do not copy or evaluate the in-progress ziao2 baseline checkpoint. Baseline remains scheduled for validation and evaluation after training completes.
+
+## 2026-08-16 — Locked five-seed DTV-LOO evaluation interpretation
+
+- The locked evaluation seeds are `0, 5, 13, 21, 42`. They are stochastic decoding seeds for the same pre-trained model and the same training-seed-0 Group Policy-DTV-LOO checkpoint; they are not independent training seeds.
+- Mean `avg@16` across the five seeds is 4.9583% for pre-training and 4.3333% for DTV-LOO, a -0.625 percentage-point delta. This corresponds to 119 versus 104 correct completions across 2,400 generated responses.
+- Mean `pass@16` is 30.6667% versus 26.6667%, a -4.0 percentage-point delta. DTV-LOO is negative on three seeds and tied on two; it is never positive.
+- Mean `maj@16` is 26.0% versus 20.0%, a -6.0 percentage-point delta. DTV-LOO is negative on all five locked seeds.
+- Individual seed-level problem-bootstrap intervals mostly include zero because AIME 2024 contains only 30 problems. Nevertheless, the cross-seed direction is consistently unfavorable, especially for pass and majority. Under this checkpoint and locked protocol, DTV-LOO shows no improvement and should be classified as an unsuccessful run rather than presented as a positive result.
+- This evidence does not prove that the DTV-LOO algorithm universally fails: it covers one training seed, one beta/configuration, and one 30-problem benchmark. Evaluation seeds quantify decoding variation but cannot replace independent training seeds.
+- The earlier seed-2026 evaluation is a pilot outside the locked five-seed set. Its positive majority delta must not be substituted for or silently pooled into the predeclared primary result.
+- The next high-value comparison is ordinary Group Policy-DTV under the identical evaluator, five seeds, dataset hash, k=16, and 8,192-token protocol. If ordinary DTV improves while LOO degrades, the evidence points to the LOO variant; if ordinary DTV and the retrained baseline also degrade, the broader GRPO/AIME training configuration is implicated.
+- A cross-node DTV checkpoint transfer is acceptable only after source checkpoint completeness, source and destination free space, and deterministic manifest verification. Prefer keeping at least approximately 25--30 GB free on ziao1 Worker 0 before importing a roughly 14 GB checkpoint; archive and verify the completed DTV-LOO checkpoint on Worker 1 first if necessary.
+
+### Ordinary Group Policy-DTV five-seed evaluation
+
+- The ordinary Group Policy-DTV step-314 checkpoint was copied from ziao2 Worker 0 to ziao1 Worker 0 after the DTV-LOO step-314 checkpoint was archived and byte-for-byte verified on ziao1 Worker 1.
+- The DTV source and destination each contain 24 files with manifest hash `1bb4d0c0e74f9cbcb94b812f4061b5db0e3814f8d7a171fb7873c2d0b73a2b0b`. The destination checkpoint is owned by the invoking Jason account and is retained under its original run name.
+- Generalized `run_aime_eval_seed_suite.sh` with an explicit `EVAL_MODELS` selector and `DTV_RUN_ROOT`. Supported labels are `dtv`, `dtv_loo`, and `pretrain`; the prior default `dtv_loo pretrain` behavior remains unchanged.
+- Ordinary DTV evaluation must use `EVAL_MODELS=dtv`, a new suite root, and the locked seeds `0 5 13 21 42`. This prevents DTV outputs from being mislabeled as DTV-LOO and preserves the completed earlier suite.

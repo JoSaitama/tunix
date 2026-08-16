@@ -9,8 +9,10 @@ MODEL_PATH="${MODEL_PATH:-/home/lhf_hongfu_gmail_com/models/deepseek-r1-distill-
 TOKENIZER_PATH="${TOKENIZER_PATH:-${MODEL_PATH}}"
 EVAL_DATA_PATH="${EVAL_DATA_PATH:-/home/lhf_hongfu_gmail_com/tunix-hf-data/aime_eval.parquet}"
 LOO_RUN_ROOT="${LOO_RUN_ROOT:-${REPO}/runs_xuesong/runs/grpo_aime_dtv_selfinf_group_loo_policy_seed0_clean_20260805_095513}"
+DTV_RUN_ROOT="${DTV_RUN_ROOT:-${REPO}/runs_xuesong/runs/grpo_aime_dtv_selfinf_group_policy_seed0_clean_20260805_101839}"
 BASE_SOURCE_ROOT="${BASE_SOURCE_ROOT:-${REPO}/runs_xuesong/eval_sources/deepseek_r1_distill_qwen_1p5b}"
 SUITE_ROOT="${SUITE_ROOT:-${REPO}/runs_xuesong/evals/aime2024_k16_multiseed_fsdp_tp}"
+EVAL_MODELS="${EVAL_MODELS:-dtv_loo pretrain}"
 TPU_RELEASE_ATTEMPTS="${TPU_RELEASE_ATTEMPTS:-30}"
 TPU_RELEASE_INTERVAL_SECONDS="${TPU_RELEASE_INTERVAL_SECONDS:-10}"
 
@@ -145,10 +147,31 @@ run_eval() {
   wait_for_tpu_release
 }
 
+read -r -a SELECTED_MODELS <<< "$EVAL_MODELS"
+if [[ "${#SELECTED_MODELS[@]}" -eq 0 ]]; then
+  echo "ERROR: EVAL_MODELS must contain at least one model label." >&2
+  exit 2
+fi
+
 for seed in "${SEEDS[@]}"; do
-  run_eval "$seed" dtv_loo checkpoint 314 "$LOO_RUN_ROOT"
-  run_eval "$seed" pretrain base_model 0 "$BASE_SOURCE_ROOT"
+  for model in "${SELECTED_MODELS[@]}"; do
+    case "$model" in
+      dtv)
+        run_eval "$seed" dtv checkpoint 314 "$DTV_RUN_ROOT"
+        ;;
+      dtv_loo)
+        run_eval "$seed" dtv_loo checkpoint 314 "$LOO_RUN_ROOT"
+        ;;
+      pretrain)
+        run_eval "$seed" pretrain base_model 0 "$BASE_SOURCE_ROOT"
+        ;;
+      *)
+        echo "ERROR: unsupported EVAL_MODELS entry: $model" >&2
+        exit 2
+        ;;
+    esac
+  done
 done
 
-echo "EVAL_SEED_SUITE_COMPLETE seeds=${SEEDS[*]}"
+echo "EVAL_SEED_SUITE_COMPLETE models=${SELECTED_MODELS[*]} seeds=${SEEDS[*]}"
 echo "STATUS_FILE=${STATUS_FILE}"
