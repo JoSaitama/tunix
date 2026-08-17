@@ -13,6 +13,7 @@ RUN_ROOT=""
 OUTPUT_DIR=""
 CHECKPOINT_STEP="314"
 CHECKPOINT_SOURCE="checkpoint"
+BASE_MODEL_LOAD_MODE="nnx_sync"
 EVAL_SEED="2026"
 LIMIT=""
 NUM_SAMPLES="16"
@@ -27,6 +28,7 @@ while [[ $# -gt 0 ]]; do
     --output-dir) OUTPUT_DIR="$2"; shift 2 ;;
     --checkpoint-step) CHECKPOINT_STEP="$2"; shift 2 ;;
     --checkpoint-source) CHECKPOINT_SOURCE="$2"; shift 2 ;;
+    --base-model-load-mode) BASE_MODEL_LOAD_MODE="$2"; shift 2 ;;
     --eval-seed) EVAL_SEED="$2"; shift 2 ;;
     --limit) LIMIT="$2"; shift 2 ;;
     --num-samples) NUM_SAMPLES="$2"; shift 2 ;;
@@ -46,6 +48,10 @@ if [[ "$CHECKPOINT_SOURCE" != "checkpoint" && "$CHECKPOINT_SOURCE" != "base_mode
   echo "--checkpoint-source must be checkpoint or base_model." >&2
   exit 2
 fi
+if [[ "$BASE_MODEL_LOAD_MODE" != "nnx_sync" && "$BASE_MODEL_LOAD_MODE" != "direct_vllm" ]]; then
+  echo "--base-model-load-mode must be nnx_sync or direct_vllm" >&2
+  exit 2
+fi
 if [[ -z "$OUTPUT_DIR" ]]; then
   OUTPUT_DIR="${RUN_ROOT}/eval/final_actor_${CHECKPOINT_STEP}_k${NUM_SAMPLES}_seed${EVAL_SEED}_aime_full"
 fi
@@ -60,6 +66,7 @@ cat > "${OUTPUT_DIR}/eval_config.json" <<EOF
 {
   "run_root": "${RUN_ROOT}",
   "checkpoint_source": "${CHECKPOINT_SOURCE}",
+  "base_model_load_mode": "${BASE_MODEL_LOAD_MODE}",
   "checkpoint_step": "${CHECKPOINT_STEP}",
   "eval_seed": ${EVAL_SEED},
   "dataset": "${DATASET}",
@@ -81,6 +88,7 @@ EOF
 EVAL_ARGS=(
   --run_root "$RUN_ROOT"
   --checkpoint_source "$CHECKPOINT_SOURCE"
+  --base_model_load_mode "$BASE_MODEL_LOAD_MODE"
   --checkpoint_step "$CHECKPOINT_STEP"
   --dataset "$DATASET"
   --dataset_type aime

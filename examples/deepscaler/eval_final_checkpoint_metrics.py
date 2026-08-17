@@ -53,6 +53,8 @@ MODEL_CONFIGS = {
 
 CHECKPOINT_SOURCE_CHECKPOINT = "checkpoint"
 CHECKPOINT_SOURCE_BASE_MODEL = "base_model"
+BASE_MODEL_LOAD_MODE_NNX_SYNC = "nnx_sync"
+BASE_MODEL_LOAD_MODE_DIRECT_VLLM = "direct_vllm"
 
 
 def _parse_csv_tuple(value: str, *, item_type=str) -> tuple[Any, ...]:
@@ -441,6 +443,18 @@ def run_eval(args: argparse.Namespace) -> dict[str, Any]:
     model, model_config, actor_checkpoint_root, checkpoint_step = (
         _load_final_actor_model(args, mesh)
     )
+  elif args.base_model_load_mode == BASE_MODEL_LOAD_MODE_DIRECT_VLLM:
+    if args.sampler_type != "vllm":
+      raise ValueError(
+          "--base_model_load_mode=direct_vllm requires --sampler_type=vllm."
+      )
+    model = None
+    model_config = MODEL_CONFIGS[args.model_config]()
+    print(
+        "Direct-load mode: vLLM will load the frozen base model from "
+        f"{args.model_version}; NNX loading and update_params are bypassed.",
+        flush=True,
+    )
   else:
     model, model_config = _load_base_model(args, mesh)
   sampler = _create_sampler(args, model, model_config, tokenizer, mesh)
@@ -583,6 +597,20 @@ def parse_args() -> argparse.Namespace:
       "--checkpoint_source",
       choices=(CHECKPOINT_SOURCE_CHECKPOINT, CHECKPOINT_SOURCE_BASE_MODEL),
       default=CHECKPOINT_SOURCE_CHECKPOINT,
+  )
+  parser.add_argument(
+      "--base_model_load_mode",
+      choices=(
+          BASE_MODEL_LOAD_MODE_NNX_SYNC,
+          BASE_MODEL_LOAD_MODE_DIRECT_VLLM,
+      ),
+      default=BASE_MODEL_LOAD_MODE_NNX_SYNC,
+      help=(
+          "How a frozen base model enters vLLM. 'nnx_sync' preserves the "
+          "existing NNX-to-vLLM update_params path; 'direct_vllm' makes vLLM "
+          "load the Hugging Face safetensors directly. Ignored for actor "
+          "checkpoint evaluation."
+      ),
   )
   parser.add_argument("--checkpoint_step", default="latest")
   parser.add_argument(
