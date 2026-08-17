@@ -713,6 +713,13 @@ class GrpoPipeline(config.HyperParameters):
     from tunix.rl.agentic.agentic_grpo_learner import GRPOLearner  # pylint: disable=g-import-not-at-top
 
     self._setup_kubernetes()
+    diagnostic_path = os.getenv("TUNIX_ROLLOUT_DIAGNOSTIC_PATH")
+    diagnostic_groups = int(os.getenv("TUNIX_ROLLOUT_DIAGNOSTIC_GROUPS", "30"))
+    if diagnostic_path and os.getenv("TUNIX_SKIP_FINAL_CHECKPOINT") != "1":
+      raise ValueError(
+          "TUNIX_ROLLOUT_DIAGNOSTIC_PATH requires "
+          "TUNIX_SKIP_FINAL_CHECKPOINT=1."
+      )
 
     tokenizer = model_lib.create_tokenizer(
         self.config["tokenizer_config"],
@@ -825,10 +832,25 @@ class GrpoPipeline(config.HyperParameters):
       learner_kwargs["env_class"] = self._load_class_from_path(env_class_path)
       learner_kwargs["env_kwargs"] = dict(self.config.get("env_kwargs") or {})
 
+    learner = GRPOLearner(**learner_kwargs)
     logging.info("Starting agentic GRPO training...")
     try:
-      GRPOLearner(**learner_kwargs).train(dataset)
+      if diagnostic_path:
+        logging.info(
+            "Running frozen rollout-only diagnostic for %d groups; no "
+            "optimizer or checkpoint update will run.",
+            diagnostic_groups,
+        )
+        learner.run_rollout_diagnostic(
+            dataset,
+            output_path=diagnostic_path,
+            max_groups=diagnostic_groups,
+        )
+      else:
+        learner.train(dataset)
     finally:
+      if diagnostic_path:
+        rl_cluster.close()
       close_fn = getattr(rl_cluster.rollout, "close", None)
       if callable(close_fn):
         close_fn()

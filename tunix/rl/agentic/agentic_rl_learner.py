@@ -17,17 +17,19 @@
 from __future__ import annotations
 
 import abc
-import time
 import asyncio
+import collections
 from concurrent.futures import ThreadPoolExecutor
 import contextlib
 import copy
 import dataclasses
+import hashlib
 import itertools
 import json
 import os
 import queue
 import threading
+import time
 from typing import Any, AsyncIterator, Callable, Dict, Generic, Iterable, Iterator, List, Sequence, Type, TypeVar
 
 from absl import logging
@@ -534,6 +536,178 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
 
         cancellation_task = asyncio.create_task(await_cancellation())
         del cancellation_task
+
+  def run_rollout_diagnostic(
+      self,
+      dataset: Iterable[TrainingInputT],
+      *,
+      output_path: str,
+      max_groups: int,
+  ) -> dict[str, Any]:
+    """Collects real training-path rollouts without an optimizer update."""
+    if max_groups <= 0:
+      raise ValueError("max_groups must be positive.")
+
+    dataset_iterator = iter(dataset)
+    try:
+      first_batch = next(dataset_iterator)
+    except StopIteration as exc:
+      raise ValueError("Rollout diagnostic dataset is empty.") from exc
+
+    self._full_batch_size = len(next(iter(first_batch.values())))
+    prompt_iterator = self._create_micro_batch_iterator(
+        iter([first_batch]), 1
+    )
+    orchestrator = self._build_orchestrator()
+
+    def _first(value: Any) -> Any:
+      if isinstance(value, (np.ndarray, jax.Array, list, tuple)):
+        return value[0] if len(value) else ""
+      return value
+
+    async def _collect():
+      rows = []
+      group_count = 0
+      async for trajectories in self._orchestrator_producer(
+          orchestrator=orchestrator,
+          prompt_iterator=prompt_iterator,
+          num_generations=self.algo_config.num_generations,
+          collect_mode="Token",
+      ):
+        original_input = trajectories[0].traj["original_input"]
+        completions = []
+        for item in trajectories:
+          conversation = item.traj.get("conversation_text") or []
+          completions.append(next(
+              (
+                  message["content"]
+                  for message in conversation
+                  if message["role"] == "assistant"
+              ),
+              "",
+          ))
+
+        repeated_inputs = rl_utils.merge_micro_batches(
+            [original_input] * len(trajectories)
+        )
+        reward_kwargs = {
+            key: value
+            for key, value in repeated_inputs.items()
+            if key != "prompts"
+        }
+        reward_kwargs["trajectory_rewards"] = [
+            item.traj.get("trajectory_reward") for item in trajectories
+        ]
+        rewards = np.asarray(self._compute_rewards(
+            prompts=repeated_inputs["prompts"],
+            completions=completions,
+            mode=rl_cluster_lib.Mode.TRAIN,
+            expected_step=0,
+            **reward_kwargs,
+        ))
+
+        group_id = trajectories[0].traj.get("group_id", group_count)
+        for sample_index, (item, completion, reward_value) in enumerate(zip(
+            trajectories, completions, rewards
+        )):
+          tokens = np.asarray(item.traj.get("conversation_tokens"))
+          token_hash = hashlib.sha256(
+              ",".join(str(int(token)) for token in tokens).encode("utf-8")
+          ).hexdigest()
+          rows.append({
+              "group_id": int(group_id),
+              "sample_index": sample_index,
+              "question": str(_first(original_input.get("question", ""))),
+              "ground_truth": str(_first(original_input.get("answer", ""))),
+              "response": completion,
+              "reward": float(reward_value),
+              "token_count": int(len(tokens)),
+              "token_ids_sha256": token_hash,
+              "truncated": bool(
+                  len(tokens) >= self.algo_config.max_response_length
+              ),
+              "boxed": "\\boxed" in completion,
+              "trajectory_status": item.traj.get("status"),
+          })
+
+        group_count += 1
+        if group_count >= max_groups:
+          break
+      return rows
+
+    future = asyncio.run_coroutine_threadsafe(_collect(), self.loop)
+    rows = future.result()
+    if not rows:
+      raise RuntimeError("Rollout diagnostic collected no trajectories.")
+
+    grouped = collections.defaultdict(list)
+    for row in rows:
+      grouped[row["group_id"]].append(row)
+    unique_histogram = collections.Counter(
+        len({row["token_ids_sha256"] for row in group})
+        for group in grouped.values()
+    )
+    duplicate_groups = sum(
+        len({row["token_ids_sha256"] for row in group}) < len(group)
+        for group in grouped.values()
+    )
+    degenerate_groups = sum(
+        len({row["reward"] for row in group}) == 1
+        for group in grouped.values()
+    )
+    rollout_config = self.rl_cluster.cluster_config.rollout_config
+    if isinstance(rollout_config, dict):
+      rollout_config = rollout_config[rl_cluster_lib.Mode.TRAIN]
+    summary = {
+        "mode": "frozen_distributed_training_rollout_no_optimizer",
+        "optimizer_updates": 0,
+        "checkpoint_writes": 0,
+        "num_groups": len(grouped),
+        "num_samples": len(rows),
+        "samples_per_group": self.algo_config.num_generations,
+        "correct_count": sum(row["reward"] > 0 for row in rows),
+        "mean_reward": float(np.mean([row["reward"] for row in rows])),
+        "truncated_count": sum(row["truncated"] for row in rows),
+        "truncation_rate": float(np.mean([
+            row["truncated"] for row in rows
+        ])),
+        "boxed_count": sum(row["boxed"] for row in rows),
+        "duplicate_group_count": duplicate_groups,
+        "degenerate_reward_group_count": degenerate_groups,
+        "unique_outputs_per_group_histogram": {
+            str(key): value for key, value in sorted(unique_histogram.items())
+        },
+        "rollout_config": {
+            "temperature": rollout_config.temperature,
+            "top_p": rollout_config.top_p,
+            "top_k": rollout_config.top_k,
+            "max_prompt_length": rollout_config.max_prompt_length,
+            "max_tokens_to_generate": rollout_config.max_tokens_to_generate,
+            "tensor_parallel_size": rollout_config.tensor_parallel_size,
+            "data_parallel_size": rollout_config.data_parallel_size,
+            "server_mode": rollout_config.rollout_vllm_server_mode,
+            "async_scheduling": rollout_config.rollout_vllm_async_scheduling,
+            "hbm_utilization": (
+                rollout_config.rollout_vllm_hbm_utilization
+            ),
+            "max_num_seqs": rollout_config.rollout_vllm_max_num_seqs,
+            "prefix_caching": rollout_config.rollout_vllm_kwargs.get(
+                "enable_prefix_caching"
+            ),
+        },
+    }
+
+    absolute_path = os.path.abspath(output_path)
+    os.makedirs(os.path.dirname(absolute_path), exist_ok=True)
+    with open(absolute_path, "w", encoding="utf-8") as output:
+      for row in rows:
+        output.write(json.dumps(row, ensure_ascii=False) + "\n")
+    summary_path = os.path.splitext(absolute_path)[0] + ".summary.json"
+    with open(summary_path, "w", encoding="utf-8") as output:
+      json.dump(summary, output, indent=2, sort_keys=True)
+      output.write("\n")
+    logging.info("Frozen rollout diagnostic summary: %s", summary)
+    return summary
 
   def _batch_to_train_example(
       self,
