@@ -505,6 +505,20 @@ def run_eval(args: argparse.Namespace) -> dict[str, Any]:
         "status": "secondary_eval_done",
     }
 
+  math_eval_metrics_path = Path(math_eval_metrics.__file__).resolve()
+  print(
+      f"Using math evaluation metrics from {math_eval_metrics_path}.",
+      flush=True,
+  )
+  if not hasattr(math_eval_metrics, "is_valid_aime_answer"):
+    raise RuntimeError(
+        "The loaded tunix.utils.math_eval_metrics is older than this "
+        "evaluator and lacks is_valid_aime_answer. Ensure the repository "
+        "root is first on PYTHONPATH and deploy the same source revision to "
+        "both TPU workers. Loaded module: "
+        f"{math_eval_metrics_path}."
+    )
+
   mesh_shape = _parse_csv_tuple(args.mesh_shape, item_type=int)
   mesh_axes = _parse_csv_tuple(args.mesh_axes, item_type=str)
   mesh = _make_mesh(mesh_shape, mesh_axes)

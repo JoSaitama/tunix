@@ -165,7 +165,7 @@ fi
 printf -v EVAL_COMMAND '%q ' "${VENV}/bin/python" \
   "${REPO}/examples/deepscaler/eval_final_checkpoint_metrics.py" \
   "${EVAL_ARGS[@]}"
-WORKER_COMMAND="cd $(printf '%q' "$REPO") && export TUNIX_INIT_JAX_DISTRIBUTED=1 PYTHONUNBUFFERED=1; timeout --signal=TERM --kill-after=60s 86400s ${EVAL_COMMAND}"
+WORKER_COMMAND="cd $(printf '%q' "$REPO") && export PYTHONPATH=$(printf '%q' "$REPO") TUNIX_INIT_JAX_DISTRIBUTED=1 PYTHONUNBUFFERED=1; timeout --signal=TERM --kill-after=60s 86400s ${EVAL_COMMAND}"
 WORKER_LOG_DIR="${LOG_DIR}/workers"
 mkdir -p "$WORKER_LOG_DIR"
 
