@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Evaluate a DeepScaler final actor checkpoint with @16 math metrics."""
+"""Evaluate a DeepScaler final actor checkpoint with configurable @k metrics."""
 
 from __future__ import annotations
 
@@ -317,6 +317,12 @@ def _create_sampler(
         cache_config=cache_config,
     )
 
+  if args.vllm_async_scheduling and not args.vllm_server_mode:
+    raise ValueError(
+        "--vllm_async_scheduling requires --vllm_server_mode so the "
+        "evaluation path matches Agentic GRPO training."
+    )
+
   from tunix.generate import vllm_sampler as vllm_sampler_lib  # pylint: disable=g-import-not-at-top
 
   print("Creating vLLM sampler.", flush=True)
@@ -338,6 +344,8 @@ def _create_sampler(
       "max_num_seqs": args.max_num_seqs,
       "max_num_batched_tokens": args.max_num_batched_tokens,
       "disable_log_stats": True,
+      "async_scheduling": args.vllm_async_scheduling,
+      "enable_prefix_caching": args.vllm_enable_prefix_caching,
   }
   sampler = vllm_sampler_lib.VllmSampler(
       tokenizer=tokenizer,
@@ -411,6 +419,76 @@ def _generation_batches(
           start,
           min(start + problem_batch_size, num_problems),
       )
+
+
+def _sampling_diagnostics(
+    records: Sequence[dict[str, Any]], *, num_samples: int
+) -> dict[str, Any]:
+  """Summarizes independence, generation-cap hits, and accuracy by slot."""
+  grouped: dict[int, list[dict[str, Any]]] = {}
+  by_slot: dict[int, list[dict[str, Any]]] = {}
+  for record in records:
+    grouped.setdefault(int(record["problem_id"]), []).append(record)
+    by_slot.setdefault(int(record["sample_index"]), []).append(record)
+
+  duplicate_sets_by_problem = {}
+  unique_outputs_histogram: dict[str, int] = {}
+  duplicate_excess_sample_count = 0
+  for problem_id, group in sorted(grouped.items()):
+    by_hash: dict[str, list[int]] = {}
+    for record in group:
+      by_hash.setdefault(record["token_ids_sha256"], []).append(
+          int(record["sample_index"])
+      )
+    duplicate_sets = [
+        sorted(indices) for indices in by_hash.values() if len(indices) > 1
+    ]
+    if duplicate_sets:
+      duplicate_sets_by_problem[str(problem_id)] = duplicate_sets
+      duplicate_excess_sample_count += sum(
+          len(indices) - 1 for indices in duplicate_sets
+      )
+    unique_count = len(by_hash)
+    histogram_key = str(unique_count)
+    unique_outputs_histogram[histogram_key] = (
+        unique_outputs_histogram.get(histogram_key, 0) + 1
+    )
+
+  per_sample_slot = {}
+  for sample_index, slot_records in sorted(by_slot.items()):
+    slot_count = len(slot_records)
+    hit_generation_cap_count = sum(
+        bool(r.get("hit_generation_cap", r["truncated"]))
+        for r in slot_records
+    )
+    per_sample_slot[str(sample_index)] = {
+        "num_samples": slot_count,
+        "correct_count": sum(bool(r["is_correct"]) for r in slot_records),
+        # Keep truncated_count for compatibility with the completed 8K runs.
+        "truncated_count": hit_generation_cap_count,
+        "hit_generation_cap_count": hit_generation_cap_count,
+        "extractable_count": sum(
+            bool(r["answer_extracted"]) for r in slot_records
+        ),
+        "format_valid_count": sum(
+            bool(r["format_valid"]) for r in slot_records
+        ),
+        "avg_tokens": (
+            sum(int(r["token_count"]) for r in slot_records) / slot_count
+        ),
+    }
+
+  return {
+      "expected_samples_per_problem": num_samples,
+      "duplicate_problem_count": len(duplicate_sets_by_problem),
+      "duplicate_problem_rate": (
+          len(duplicate_sets_by_problem) / len(grouped) if grouped else 0.0
+      ),
+      "duplicate_excess_sample_count": duplicate_excess_sample_count,
+      "unique_outputs_per_problem_histogram": unique_outputs_histogram,
+      "duplicate_sample_sets_by_problem": duplicate_sets_by_problem,
+      "per_sample_slot": per_sample_slot,
+  }
 
 
 def run_eval(args: argparse.Namespace) -> dict[str, Any]:
@@ -551,6 +629,8 @@ def run_eval(args: argparse.Namespace) -> dict[str, Any]:
             ),
             "token_count": token_count,
             "token_ids_sha256": token_ids_sha256,
+            "hit_generation_cap": token_count >= args.max_generation_steps,
+            # Compatibility alias used by the existing 8K metric code/results.
             "truncated": token_count >= args.max_generation_steps,
         }
         records.append(record)
@@ -573,8 +653,22 @@ def run_eval(args: argparse.Namespace) -> dict[str, Any]:
       k=args.num_samples,
       max_generation_steps=args.max_generation_steps,
   )
+  hit_generation_cap_count = sum(
+      bool(record["hit_generation_cap"]) for record in records
+  )
   summary = {
+      "protocol_name": args.protocol_name,
       "metrics": metrics,
+      "generation_cap_diagnostics": {
+          "hit_generation_cap_count": hit_generation_cap_count,
+          "hit_generation_cap_rate": (
+              hit_generation_cap_count / len(records) if records else 0.0
+          ),
+          "legacy_truncated_field_is_generation_cap_hit": True,
+      },
+      "sampling_diagnostics": _sampling_diagnostics(
+          records, num_samples=args.num_samples
+      ),
       "dataset_validation": dataset_validation,
       "checkpoint_source": args.checkpoint_source,
       "checkpoint_root": (
@@ -591,8 +685,13 @@ def run_eval(args: argparse.Namespace) -> dict[str, Any]:
       "eval_seed": args.eval_seed,
       "engine_seed": args.eval_seed,
       "seed_semantics": (
-          "single vLLM engine seed with deterministic sample-slot-major "
-          "request order; JAX backend rejects per-request seeds"
+          "single vLLM engine seed with sample-slot-major request order; "
+          + (
+              "server mode assigns monotonically increasing request IDs"
+              if args.vllm_server_mode
+              else "offline mode makes repeated LLM.generate calls"
+          )
+          + "; JAX backend rejects per-request seeds"
       ),
       "problem_batch_size": problem_batch_size,
       "generation_wall_time_seconds": time.monotonic() - generation_started,
@@ -615,6 +714,14 @@ def parse_args() -> argparse.Namespace:
       description="Evaluate a final DeepScaler actor checkpoint."
   )
   parser.add_argument("--run_root", default=None)
+  parser.add_argument(
+      "--protocol_name",
+      default="aime2024_8k_constrained",
+      help=(
+          "Stable label recorded in summary.json. It does not silently alter "
+          "generation settings; launchers must pass every protocol parameter."
+      ),
+  )
   parser.add_argument("--checkpoint_root", default=None)
   parser.add_argument(
       "--checkpoint_source",
@@ -677,6 +784,8 @@ def parse_args() -> argparse.Namespace:
   parser.add_argument("--vllm_hbm_utilization", type=float, default=0.8)
   parser.add_argument("--tpu_backend_type", default="jax")
   parser.add_argument("--vllm_server_mode", action="store_true")
+  parser.add_argument("--vllm_async_scheduling", action="store_true")
+  parser.add_argument("--vllm_enable_prefix_caching", action="store_true")
   parser.add_argument("--tensor_parallel_size", type=int, default=-1)
   parser.add_argument("--data_parallel_size", type=int, default=-1)
   parser.add_argument("--max_num_seqs", type=int, default=16)

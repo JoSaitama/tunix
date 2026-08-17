@@ -77,6 +77,20 @@ class DeepScalerEvalTest(absltest.TestCase):
 
     self.assertEqual(args.eval_seed, 20260707)
     self.assertEqual(args.problem_batch_size, 16)
+    self.assertEqual(args.protocol_name, "aime2024_8k_constrained")
+
+  def test_training_path_vllm_flags_are_explicit(self):
+    with mock.patch("sys.argv", [
+        "eval",
+        "--vllm_server_mode",
+        "--vllm_async_scheduling",
+        "--vllm_enable_prefix_caching",
+    ]):
+      args = eval_final_checkpoint_metrics.parse_args()
+
+    self.assertTrue(args.vllm_server_mode)
+    self.assertTrue(args.vllm_async_scheduling)
+    self.assertTrue(args.vllm_enable_prefix_caching)
 
   def test_generation_schedule_is_sample_slot_major(self):
     batches = list(eval_final_checkpoint_metrics._generation_batches(
@@ -99,6 +113,41 @@ class DeepScalerEvalTest(absltest.TestCase):
     self.assertEqual(first, repeated)
     self.assertNotEqual(first, reordered)
     self.assertLen(first, 64)
+
+  def test_sampling_diagnostics_reports_duplicate_slots(self):
+    records = [
+        {
+            "problem_id": 0,
+            "sample_index": sample_index,
+            "token_ids_sha256": token_hash,
+            "is_correct": sample_index == 0,
+            "truncated": sample_index != 0,
+            "hit_generation_cap": sample_index != 0,
+            "answer_extracted": sample_index == 0,
+            "format_valid": sample_index == 0,
+            "token_count": 10 + sample_index,
+        }
+        for sample_index, token_hash in enumerate(("a", "b", "b", "b"))
+    ]
+
+    diagnostics = eval_final_checkpoint_metrics._sampling_diagnostics(
+        records, num_samples=4
+    )
+
+    self.assertEqual(diagnostics["duplicate_problem_count"], 1)
+    self.assertEqual(diagnostics["duplicate_excess_sample_count"], 2)
+    self.assertEqual(
+        diagnostics["duplicate_sample_sets_by_problem"], {"0": [[1, 2, 3]]}
+    )
+    self.assertEqual(
+        diagnostics["unique_outputs_per_problem_histogram"], {"2": 1}
+    )
+    self.assertEqual(
+        diagnostics["per_sample_slot"]["0"]["correct_count"], 1
+    )
+    self.assertEqual(
+        diagnostics["per_sample_slot"]["1"]["hit_generation_cap_count"], 1
+    )
 
 
 if __name__ == "__main__":

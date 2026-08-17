@@ -11,41 +11,61 @@ TOKENIZER_PATH="${TOKENIZER_PATH:-${MODEL_PATH}}"
 
 RUN_ROOT=""
 OUTPUT_DIR=""
+PROTOCOL_NAME="aime2024_8k_constrained"
 CHECKPOINT_STEP="314"
 CHECKPOINT_SOURCE="checkpoint"
 BASE_MODEL_LOAD_MODE="nnx_sync"
 EVAL_SEED="2026"
 LIMIT=""
 NUM_SAMPLES="16"
+MAX_PROMPT_LENGTH="2048"
 MAX_GENERATION_STEPS="8192"
+TEMPERATURE="0.6"
+TOP_P="0.95"
 PROBLEM_BATCH_SIZE="16"
 MAX_NUM_SEQS="16"
 MAX_NUM_BATCHED_TOKENS="38400"
 TENSOR_PARALLEL_SIZE="-1"
 DATA_PARALLEL_SIZE="-1"
+VLLM_HBM_UTILIZATION="0.8"
+VLLM_SERVER_MODE="false"
+VLLM_ASYNC_SCHEDULING="false"
+VLLM_ENABLE_PREFIX_CACHING="false"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --run-root) RUN_ROOT="$2"; shift 2 ;;
     --output-dir) OUTPUT_DIR="$2"; shift 2 ;;
+    --protocol-name) PROTOCOL_NAME="$2"; shift 2 ;;
     --checkpoint-step) CHECKPOINT_STEP="$2"; shift 2 ;;
     --checkpoint-source) CHECKPOINT_SOURCE="$2"; shift 2 ;;
     --base-model-load-mode) BASE_MODEL_LOAD_MODE="$2"; shift 2 ;;
     --eval-seed) EVAL_SEED="$2"; shift 2 ;;
     --limit) LIMIT="$2"; shift 2 ;;
     --num-samples) NUM_SAMPLES="$2"; shift 2 ;;
+    --max-prompt-length) MAX_PROMPT_LENGTH="$2"; shift 2 ;;
     --max-generation-steps) MAX_GENERATION_STEPS="$2"; shift 2 ;;
+    --temperature) TEMPERATURE="$2"; shift 2 ;;
+    --top-p) TOP_P="$2"; shift 2 ;;
     --problem-batch-size) PROBLEM_BATCH_SIZE="$2"; shift 2 ;;
     --max-num-seqs) MAX_NUM_SEQS="$2"; shift 2 ;;
     --max-num-batched-tokens) MAX_NUM_BATCHED_TOKENS="$2"; shift 2 ;;
     --tensor-parallel-size) TENSOR_PARALLEL_SIZE="$2"; shift 2 ;;
     --data-parallel-size) DATA_PARALLEL_SIZE="$2"; shift 2 ;;
+    --vllm-hbm-utilization) VLLM_HBM_UTILIZATION="$2"; shift 2 ;;
+    --vllm-server-mode) VLLM_SERVER_MODE="true"; shift ;;
+    --vllm-async-scheduling) VLLM_ASYNC_SCHEDULING="true"; shift ;;
+    --vllm-enable-prefix-caching) VLLM_ENABLE_PREFIX_CACHING="true"; shift ;;
     *) echo "Unknown argument: $1" >&2; exit 2 ;;
   esac
 done
 
 if [[ -z "$RUN_ROOT" ]]; then
   echo "--run-root is required." >&2
+  exit 2
+fi
+if [[ -z "$PROTOCOL_NAME" ]]; then
+  echo "--protocol-name must be non-empty." >&2
   exit 2
 fi
 if [[ "$CHECKPOINT_SOURCE" != "checkpoint" && "$CHECKPOINT_SOURCE" != "base_model" ]]; then
@@ -68,6 +88,7 @@ mkdir -p "$LOG_DIR"
 
 cat > "${OUTPUT_DIR}/eval_config.json" <<EOF
 {
+  "protocol_name": "${PROTOCOL_NAME}",
   "run_root": "${RUN_ROOT}",
   "checkpoint_source": "${CHECKPOINT_SOURCE}",
   "base_model_load_mode": "${BASE_MODEL_LOAD_MODE}",
@@ -78,21 +99,27 @@ cat > "${OUTPUT_DIR}/eval_config.json" <<EOF
   "tokenizer_path": "${TOKENIZER_PATH}",
   "num_problems": ${EXPECTED_PROBLEMS},
   "num_samples": ${NUM_SAMPLES},
+  "max_prompt_length": ${MAX_PROMPT_LENGTH},
   "max_generation_steps": ${MAX_GENERATION_STEPS},
-  "temperature": 0.6,
-  "top_p": 0.95,
+  "temperature": ${TEMPERATURE},
+  "top_p": ${TOP_P},
   "mesh_shape": "4,1",
   "mesh_axes": "fsdp,tp",
   "problem_batch_size": ${PROBLEM_BATCH_SIZE},
   "max_num_seqs": ${MAX_NUM_SEQS},
   "max_num_batched_tokens": ${MAX_NUM_BATCHED_TOKENS},
   "tensor_parallel_size": ${TENSOR_PARALLEL_SIZE},
-  "data_parallel_size": ${DATA_PARALLEL_SIZE}
+  "data_parallel_size": ${DATA_PARALLEL_SIZE},
+  "vllm_hbm_utilization": ${VLLM_HBM_UTILIZATION},
+  "vllm_server_mode": ${VLLM_SERVER_MODE},
+  "vllm_async_scheduling": ${VLLM_ASYNC_SCHEDULING},
+  "vllm_enable_prefix_caching": ${VLLM_ENABLE_PREFIX_CACHING}
 }
 EOF
 
 EVAL_ARGS=(
   --run_root "$RUN_ROOT"
+  --protocol_name "$PROTOCOL_NAME"
   --checkpoint_source "$CHECKPOINT_SOURCE"
   --base_model_load_mode "$BASE_MODEL_LOAD_MODE"
   --checkpoint_step "$CHECKPOINT_STEP"
@@ -109,17 +136,27 @@ EVAL_ARGS=(
   --batch_size 1
   --problem_batch_size "$PROBLEM_BATCH_SIZE"
   --eval_seed "$EVAL_SEED"
-  --max_prompt_length 2048
+  --max_prompt_length "$MAX_PROMPT_LENGTH"
   --max_generation_steps "$MAX_GENERATION_STEPS"
-  --temperature 0.6
-  --top_p 0.95
-  --vllm_hbm_utilization 0.8
+  --temperature "$TEMPERATURE"
+  --top_p "$TOP_P"
+  --vllm_hbm_utilization "$VLLM_HBM_UTILIZATION"
   --tpu_backend_type jax
   --max_num_seqs "$MAX_NUM_SEQS"
   --max_num_batched_tokens "$MAX_NUM_BATCHED_TOKENS"
   --tensor_parallel_size "$TENSOR_PARALLEL_SIZE"
   --data_parallel_size "$DATA_PARALLEL_SIZE"
 )
+
+if [[ "$VLLM_SERVER_MODE" == "true" ]]; then
+  EVAL_ARGS+=(--vllm_server_mode)
+fi
+if [[ "$VLLM_ASYNC_SCHEDULING" == "true" ]]; then
+  EVAL_ARGS+=(--vllm_async_scheduling)
+fi
+if [[ "$VLLM_ENABLE_PREFIX_CACHING" == "true" ]]; then
+  EVAL_ARGS+=(--vllm_enable_prefix_caching)
+fi
 
 if [[ -n "$LIMIT" ]]; then
   EVAL_ARGS+=(--limit "$LIMIT")

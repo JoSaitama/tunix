@@ -33,6 +33,7 @@ echo "  OUTPUT=${DEBUG_ROOT}"
 bash "${REPO}/runs_xuesong/scripts/run_aime_final_eval.sh" \
   --run-root "${DEBUG_ROOT}" \
   --output-dir "${DEBUG_ROOT}/direct_vllm_k${NUM_SAMPLES}" \
+  --protocol-name pretrain_direct_vllm_8k_diagnostic \
   --checkpoint-source base_model \
   --base-model-load-mode direct_vllm \
   --checkpoint-step 0 \
@@ -70,6 +71,16 @@ for key in (
 ):
   if key in metrics:
     print(f"{key}={metrics[key]}")
+diagnostics = value.get("sampling_diagnostics", {})
+for key in (
+    "duplicate_problem_count",
+    "duplicate_problem_rate",
+    "duplicate_excess_sample_count",
+    "unique_outputs_per_problem_histogram",
+    "per_sample_slot",
+):
+  if key in diagnostics:
+    print(f"{key}={diagnostics[key]}")
 print(json.dumps(value, indent=2, sort_keys=True))
 PY
 fi
