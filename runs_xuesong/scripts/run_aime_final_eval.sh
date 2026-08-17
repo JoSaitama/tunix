@@ -21,6 +21,8 @@ MAX_GENERATION_STEPS="8192"
 PROBLEM_BATCH_SIZE="16"
 MAX_NUM_SEQS="16"
 MAX_NUM_BATCHED_TOKENS="38400"
+TENSOR_PARALLEL_SIZE="-1"
+DATA_PARALLEL_SIZE="-1"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -36,6 +38,8 @@ while [[ $# -gt 0 ]]; do
     --problem-batch-size) PROBLEM_BATCH_SIZE="$2"; shift 2 ;;
     --max-num-seqs) MAX_NUM_SEQS="$2"; shift 2 ;;
     --max-num-batched-tokens) MAX_NUM_BATCHED_TOKENS="$2"; shift 2 ;;
+    --tensor-parallel-size) TENSOR_PARALLEL_SIZE="$2"; shift 2 ;;
+    --data-parallel-size) DATA_PARALLEL_SIZE="$2"; shift 2 ;;
     *) echo "Unknown argument: $1" >&2; exit 2 ;;
   esac
 done
@@ -81,7 +85,9 @@ cat > "${OUTPUT_DIR}/eval_config.json" <<EOF
   "mesh_axes": "fsdp,tp",
   "problem_batch_size": ${PROBLEM_BATCH_SIZE},
   "max_num_seqs": ${MAX_NUM_SEQS},
-  "max_num_batched_tokens": ${MAX_NUM_BATCHED_TOKENS}
+  "max_num_batched_tokens": ${MAX_NUM_BATCHED_TOKENS},
+  "tensor_parallel_size": ${TENSOR_PARALLEL_SIZE},
+  "data_parallel_size": ${DATA_PARALLEL_SIZE}
 }
 EOF
 
@@ -111,6 +117,8 @@ EVAL_ARGS=(
   --tpu_backend_type jax
   --max_num_seqs "$MAX_NUM_SEQS"
   --max_num_batched_tokens "$MAX_NUM_BATCHED_TOKENS"
+  --tensor_parallel_size "$TENSOR_PARALLEL_SIZE"
+  --data_parallel_size "$DATA_PARALLEL_SIZE"
 )
 
 if [[ -n "$LIMIT" ]]; then

@@ -450,6 +450,29 @@ def run_eval(args: argparse.Namespace) -> dict[str, Any]:
       )
     model = None
     model_config = MODEL_CONFIGS[args.model_config]()
+    mesh_device_count = math.prod(mesh_shape)
+    if args.tensor_parallel_size <= 0 or args.data_parallel_size <= 0:
+      raise ValueError(
+          "Direct vLLM loading requires explicit positive "
+          "--tensor_parallel_size and --data_parallel_size values. For the "
+          "DeepSeek-R1-Distill-Qwen-1.5B four-chip evaluator, use TP=2, DP=2."
+      )
+    if (
+        args.tensor_parallel_size * args.data_parallel_size
+        != mesh_device_count
+    ):
+      raise ValueError(
+          "Direct vLLM TP*DP must equal the evaluator mesh device count: "
+          f"{args.tensor_parallel_size}*{args.data_parallel_size} != "
+          f"{mesh_device_count}."
+      )
+    if model_config.num_kv_heads % args.tensor_parallel_size:
+      raise ValueError(
+          "The direct TPU vLLM loader requires num_kv_heads to be divisible "
+          "by tensor_parallel_size. Received "
+          f"num_kv_heads={model_config.num_kv_heads}, "
+          f"TP={args.tensor_parallel_size}."
+      )
     print(
         "Direct-load mode: vLLM will load the frozen base model from "
         f"{args.model_version}; NNX loading and update_params are bypassed.",

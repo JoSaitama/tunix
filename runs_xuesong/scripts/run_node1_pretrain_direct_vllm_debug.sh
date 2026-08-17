@@ -42,7 +42,9 @@ bash "${REPO}/runs_xuesong/scripts/run_aime_final_eval.sh" \
   --max-generation-steps 8192 \
   --problem-batch-size 16 \
   --max-num-seqs 16 \
-  --max-num-batched-tokens 38400
+  --max-num-batched-tokens 38400 \
+  --tensor-parallel-size 2 \
+  --data-parallel-size 2
 
 summary="${DEBUG_ROOT}/direct_vllm_k${NUM_SAMPLES}/summary.json"
 echo "DIRECT_VLLM_SUMMARY=${summary}"
