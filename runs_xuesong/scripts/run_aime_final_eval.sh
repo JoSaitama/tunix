@@ -22,6 +22,7 @@ MAX_PROMPT_LENGTH="2048"
 MAX_GENERATION_STEPS="8192"
 TEMPERATURE="0.6"
 TOP_P="0.95"
+AIME_PROMPT_STYLE="${EVAL_AIME_PROMPT_STYLE:-legacy}"
 PROBLEM_BATCH_SIZE="16"
 MAX_NUM_SEQS="16"
 MAX_NUM_BATCHED_TOKENS="38400"
@@ -47,6 +48,7 @@ while [[ $# -gt 0 ]]; do
     --max-generation-steps) MAX_GENERATION_STEPS="$2"; shift 2 ;;
     --temperature) TEMPERATURE="$2"; shift 2 ;;
     --top-p) TOP_P="$2"; shift 2 ;;
+    --aime-prompt-style) AIME_PROMPT_STYLE="$2"; shift 2 ;;
     --problem-batch-size) PROBLEM_BATCH_SIZE="$2"; shift 2 ;;
     --max-num-seqs) MAX_NUM_SEQS="$2"; shift 2 ;;
     --max-num-batched-tokens) MAX_NUM_BATCHED_TOKENS="$2"; shift 2 ;;
@@ -76,6 +78,10 @@ if [[ "$BASE_MODEL_LOAD_MODE" != "nnx_sync" && "$BASE_MODEL_LOAD_MODE" != "direc
   echo "--base-model-load-mode must be nnx_sync or direct_vllm" >&2
   exit 2
 fi
+if [[ "$AIME_PROMPT_STYLE" != "legacy" && "$AIME_PROMPT_STYLE" != "deepscaler_official" ]]; then
+  echo "--aime-prompt-style must be legacy or deepscaler_official" >&2
+  exit 2
+fi
 if [[ -z "$OUTPUT_DIR" ]]; then
   OUTPUT_DIR="${RUN_ROOT}/eval/final_actor_${CHECKPOINT_STEP}_k${NUM_SAMPLES}_seed${EVAL_SEED}_aime_full"
 fi
@@ -103,6 +109,7 @@ cat > "${OUTPUT_DIR}/eval_config.json" <<EOF
   "max_generation_steps": ${MAX_GENERATION_STEPS},
   "temperature": ${TEMPERATURE},
   "top_p": ${TOP_P},
+  "aime_prompt_style": "${AIME_PROMPT_STYLE}",
   "mesh_shape": "4,1",
   "mesh_axes": "fsdp,tp",
   "problem_batch_size": ${PROBLEM_BATCH_SIZE},
@@ -140,6 +147,7 @@ EVAL_ARGS=(
   --max_generation_steps "$MAX_GENERATION_STEPS"
   --temperature "$TEMPERATURE"
   --top_p "$TOP_P"
+  --aime_prompt_style "$AIME_PROMPT_STYLE"
   --vllm_hbm_utilization "$VLLM_HBM_UTILIZATION"
   --tpu_backend_type jax
   --max_num_seqs "$MAX_NUM_SEQS"

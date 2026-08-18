@@ -23,6 +23,7 @@ EVAL_MAX_PROMPT_LENGTH="${EVAL_MAX_PROMPT_LENGTH:-2048}"
 EVAL_MAX_GENERATION_STEPS="${EVAL_MAX_GENERATION_STEPS:-8192}"
 EVAL_TEMPERATURE="${EVAL_TEMPERATURE:-0.6}"
 EVAL_TOP_P="${EVAL_TOP_P:-0.95}"
+EVAL_AIME_PROMPT_STYLE="${EVAL_AIME_PROMPT_STYLE:-legacy}"
 EVAL_PROBLEM_BATCH_SIZE="${EVAL_PROBLEM_BATCH_SIZE:-16}"
 EVAL_MAX_NUM_SEQS="${EVAL_MAX_NUM_SEQS:-16}"
 EVAL_MAX_NUM_BATCHED_TOKENS="${EVAL_MAX_NUM_BATCHED_TOKENS:-38400}"
@@ -47,6 +48,10 @@ for value_name in \
 done
 if [[ -n "$EVAL_LIMIT" && ! "$EVAL_LIMIT" =~ ^[1-9][0-9]*$ ]]; then
   echo "ERROR: EVAL_LIMIT must be empty or a positive integer." >&2
+  exit 2
+fi
+if [[ "$EVAL_AIME_PROMPT_STYLE" != "legacy" && "$EVAL_AIME_PROMPT_STYLE" != "deepscaler_official" ]]; then
+  echo "ERROR: EVAL_AIME_PROMPT_STYLE must be legacy or deepscaler_official." >&2
   exit 2
 fi
 for value_name in \
@@ -138,6 +143,7 @@ completed_output() {
       "$EVAL_NUM_SAMPLES" \
       "$EVAL_MAX_PROMPT_LENGTH" \
       "$EVAL_MAX_GENERATION_STEPS" \
+      "$EVAL_AIME_PROMPT_STYLE" \
       "$EVAL_PROBLEM_BATCH_SIZE" \
       "$EVAL_MAX_NUM_SEQS" \
       "$EVAL_MAX_NUM_BATCHED_TOKENS" \
@@ -162,14 +168,15 @@ expected = {
     "num_samples": int(sys.argv[4]),
     "max_prompt_length": int(sys.argv[5]),
     "max_generation_steps": int(sys.argv[6]),
-    "problem_batch_size": int(sys.argv[7]),
-    "max_num_seqs": int(sys.argv[8]),
-    "max_num_batched_tokens": int(sys.argv[9]),
-    "tensor_parallel_size": int(sys.argv[10]),
-    "data_parallel_size": int(sys.argv[11]),
-    "vllm_server_mode": sys.argv[12] == "true",
-    "vllm_async_scheduling": sys.argv[13] == "true",
-    "vllm_enable_prefix_caching": sys.argv[14] == "true",
+    "aime_prompt_style": sys.argv[7],
+    "problem_batch_size": int(sys.argv[8]),
+    "max_num_seqs": int(sys.argv[9]),
+    "max_num_batched_tokens": int(sys.argv[10]),
+    "tensor_parallel_size": int(sys.argv[11]),
+    "data_parallel_size": int(sys.argv[12]),
+    "vllm_server_mode": sys.argv[13] == "true",
+    "vllm_async_scheduling": sys.argv[14] == "true",
+    "vllm_enable_prefix_caching": sys.argv[15] == "true",
 }
 # Results created before protocol_name/max_prompt_length were recorded belong
 # to the unchanged legacy 8K protocol.
@@ -177,6 +184,8 @@ if "protocol_name" not in config:
   config["protocol_name"] = "aime2024_8k_constrained"
 if "max_prompt_length" not in config:
   config["max_prompt_length"] = 2048
+if "aime_prompt_style" not in config:
+  config["aime_prompt_style"] = "legacy"
 for legacy_false_key in (
     "vllm_server_mode",
     "vllm_async_scheduling",
@@ -254,6 +263,7 @@ run_eval() {
       --max-generation-steps "$EVAL_MAX_GENERATION_STEPS" \
       --temperature "$EVAL_TEMPERATURE" \
       --top-p "$EVAL_TOP_P" \
+      --aime-prompt-style "$EVAL_AIME_PROMPT_STYLE" \
       --problem-batch-size "$EVAL_PROBLEM_BATCH_SIZE" \
       --max-num-seqs "$EVAL_MAX_NUM_SEQS" \
       --max-num-batched-tokens "$EVAL_MAX_NUM_BATCHED_TOKENS" \
@@ -290,6 +300,7 @@ echo "EVAL_MODELS=${SELECTED_MODELS[*]}"
 echo "EVAL_SEEDS=${SEEDS[*]}"
 echo "EVAL_CARDINALITY=${EXPECTED_PROBLEMS}x${EVAL_NUM_SAMPLES}=${EXPECTED_SAMPLES}"
 echo "EVAL_LENGTHS=prompt:${EVAL_MAX_PROMPT_LENGTH},generation:${EVAL_MAX_GENERATION_STEPS}"
+echo "EVAL_AIME_PROMPT_STYLE=${EVAL_AIME_PROMPT_STYLE}"
 echo "EVAL_EXECUTION=base_load:${EVAL_BASE_MODEL_LOAD_MODE},tp:${EVAL_TENSOR_PARALLEL_SIZE},dp:${EVAL_DATA_PARALLEL_SIZE},server:${EVAL_VLLM_SERVER_MODE},async:${EVAL_VLLM_ASYNC_SCHEDULING},prefix_cache:${EVAL_VLLM_ENABLE_PREFIX_CACHING}"
 
 for seed in "${SEEDS[@]}"; do

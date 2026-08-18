@@ -78,6 +78,52 @@ class DeepScalerEvalTest(absltest.TestCase):
     self.assertEqual(args.eval_seed, 20260707)
     self.assertEqual(args.problem_batch_size, 16)
     self.assertEqual(args.protocol_name, "aime2024_8k_constrained")
+    self.assertEqual(args.aime_prompt_style, "legacy")
+
+  def test_aime_prompt_style_is_explicit_and_legacy_default_is_unchanged(self):
+    tokenizer = mock.Mock()
+    tokenizer.apply_chat_template.return_value = "rendered"
+
+    result = eval_final_checkpoint_metrics._format_prompt(
+        tokenizer, "Question?", "aime"
+    )
+
+    self.assertEqual(result, "rendered")
+    tokenizer.apply_chat_template.assert_called_once_with(
+        [{
+            "role": "user",
+            "content": (
+                "Question? Let's think step by step, and put your final "
+                "answer within \\boxed{}."
+            ),
+        }],
+        tokenize=False,
+        add_generation_prompt=True,
+    )
+
+  def test_deepscaler_official_prompt_changes_only_instruction_wording(self):
+    tokenizer = mock.Mock()
+    tokenizer.apply_chat_template.return_value = "rendered"
+
+    result = eval_final_checkpoint_metrics._format_prompt(
+        tokenizer,
+        "Question?",
+        "aime",
+        "deepscaler_official",
+    )
+
+    self.assertEqual(result, "rendered")
+    tokenizer.apply_chat_template.assert_called_once_with(
+        [{
+            "role": "user",
+            "content": (
+                "Question? Please reason step by step, and put your final "
+                "answer within \\boxed{}."
+            ),
+        }],
+        tokenize=False,
+        add_generation_prompt=True,
+    )
 
   def test_training_path_vllm_flags_are_explicit(self):
     with mock.patch("sys.argv", [

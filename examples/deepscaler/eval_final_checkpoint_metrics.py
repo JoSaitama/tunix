@@ -236,11 +236,21 @@ def _format_prompt(
     tokenizer: transformers.PreTrainedTokenizerBase,
     question: str,
     dataset_type: str,
+    aime_prompt_style: str = "legacy",
 ) -> str:
   if dataset_type == "aime":
-    instruction = (
-        "Let's think step by step, and put your final answer within \\boxed{}."
-    )
+    if aime_prompt_style == "legacy":
+      instruction = (
+          "Let's think step by step, and put your final answer within"
+          " \\boxed{}."
+      )
+    elif aime_prompt_style == "deepscaler_official":
+      instruction = (
+          "Please reason step by step, and put your final answer within"
+          " \\boxed{}."
+      )
+    else:
+      raise ValueError(f"Unsupported AIME prompt style: {aime_prompt_style}")
     prompt = f"{question} {instruction}"
   else:
     instruction = (
@@ -606,7 +616,10 @@ def run_eval(args: argparse.Namespace) -> dict[str, Any]:
       )
       prompts = [
           _format_prompt(
-              tokenizer, str(row[args.question_col]), args.dataset_type
+              tokenizer,
+              str(row[args.question_col]),
+              args.dataset_type,
+              args.aime_prompt_style,
           )
           for _, row in batch_df.iterrows()
       ]
@@ -763,6 +776,16 @@ def parse_args() -> argparse.Namespace:
   parser.add_argument("--dataset_type", choices=("aime", "math"), default="aime")
   parser.add_argument("--question_col", default="problem")
   parser.add_argument("--answer_col", default="answer")
+  parser.add_argument(
+      "--aime_prompt_style",
+      choices=("legacy", "deepscaler_official"),
+      default="legacy",
+      help=(
+          "AIME instruction suffix. The legacy default preserves all existing "
+          "evaluation outputs; deepscaler_official changes only the wording to "
+          "the archived DeepScaleR evaluation instruction."
+      ),
+  )
   parser.add_argument("--limit", type=int, default=None)
   parser.add_argument("--output_dir", default=None)
 
