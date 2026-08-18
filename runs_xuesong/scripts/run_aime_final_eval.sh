@@ -78,10 +78,13 @@ if [[ "$BASE_MODEL_LOAD_MODE" != "nnx_sync" && "$BASE_MODEL_LOAD_MODE" != "direc
   echo "--base-model-load-mode must be nnx_sync or direct_vllm" >&2
   exit 2
 fi
-if [[ "$AIME_PROMPT_STYLE" != "legacy" && "$AIME_PROMPT_STYLE" != "deepscaler_official" ]]; then
-  echo "--aime-prompt-style must be legacy or deepscaler_official" >&2
-  exit 2
-fi
+case "$AIME_PROMPT_STYLE" in
+  legacy|deepscaler_official|deepscaler_repo) ;;
+  *)
+    echo "--aime-prompt-style must be legacy, deepscaler_official, or deepscaler_repo" >&2
+    exit 2
+    ;;
+esac
 if [[ -z "$OUTPUT_DIR" ]]; then
   OUTPUT_DIR="${RUN_ROOT}/eval/final_actor_${CHECKPOINT_STEP}_k${NUM_SAMPLES}_seed${EVAL_SEED}_aime_full"
 fi

@@ -50,10 +50,13 @@ if [[ -n "$EVAL_LIMIT" && ! "$EVAL_LIMIT" =~ ^[1-9][0-9]*$ ]]; then
   echo "ERROR: EVAL_LIMIT must be empty or a positive integer." >&2
   exit 2
 fi
-if [[ "$EVAL_AIME_PROMPT_STYLE" != "legacy" && "$EVAL_AIME_PROMPT_STYLE" != "deepscaler_official" ]]; then
-  echo "ERROR: EVAL_AIME_PROMPT_STYLE must be legacy or deepscaler_official." >&2
-  exit 2
-fi
+case "$EVAL_AIME_PROMPT_STYLE" in
+  legacy|deepscaler_official|deepscaler_repo) ;;
+  *)
+    echo "ERROR: EVAL_AIME_PROMPT_STYLE must be legacy, deepscaler_official, or deepscaler_repo." >&2
+    exit 2
+    ;;
+esac
 for value_name in \
   EVAL_VLLM_SERVER_MODE EVAL_VLLM_ASYNC_SCHEDULING \
   EVAL_VLLM_ENABLE_PREFIX_CACHING; do

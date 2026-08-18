@@ -125,6 +125,30 @@ class DeepScalerEvalTest(absltest.TestCase):
         add_generation_prompt=True,
     )
 
+  def test_deepscaler_repo_prompt_matches_archived_preprocessing(self):
+    tokenizer = mock.Mock()
+    tokenizer.apply_chat_template.return_value = "rendered"
+
+    result = eval_final_checkpoint_metrics._format_prompt(
+        tokenizer,
+        "Question?",
+        "aime",
+        "deepscaler_repo",
+    )
+
+    self.assertEqual(result, "rendered")
+    tokenizer.apply_chat_template.assert_called_once_with(
+        [{
+            "role": "user",
+            "content": (
+                "Question? Let's think step by step and output the final "
+                "answer within \\boxed{}."
+            ),
+        }],
+        tokenize=False,
+        add_generation_prompt=True,
+    )
+
   def test_training_path_vllm_flags_are_explicit(self):
     with mock.patch("sys.argv", [
         "eval",

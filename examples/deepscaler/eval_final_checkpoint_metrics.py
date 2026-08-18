@@ -249,6 +249,11 @@ def _format_prompt(
           "Please reason step by step, and put your final answer within"
           " \\boxed{}."
       )
+    elif aime_prompt_style == "deepscaler_repo":
+      instruction = (
+          "Let's think step by step and output the final answer within"
+          " \\boxed{}."
+      )
     else:
       raise ValueError(f"Unsupported AIME prompt style: {aime_prompt_style}")
     prompt = f"{question} {instruction}"
@@ -778,12 +783,13 @@ def parse_args() -> argparse.Namespace:
   parser.add_argument("--answer_col", default="answer")
   parser.add_argument(
       "--aime_prompt_style",
-      choices=("legacy", "deepscaler_official"),
+      choices=("legacy", "deepscaler_official", "deepscaler_repo"),
       default="legacy",
       help=(
           "AIME instruction suffix. The legacy default preserves all existing "
-          "evaluation outputs; deepscaler_official changes only the wording to "
-          "the archived DeepScaleR evaluation instruction."
+          "evaluation outputs; deepscaler_official is the backward-compatible "
+          "name for the DeepSeek-recommended wording; deepscaler_repo exactly "
+          "matches the archived DeepScaleR dataset preprocessing instruction."
       ),
   )
   parser.add_argument("--limit", type=int, default=None)
