@@ -18,6 +18,7 @@ RESUME_STEP="${RESUME_STEP:-314}"
 CONTINUATION_DATA_SEED="${CONTINUATION_DATA_SEED:-$((42 + SEED))}"
 CONSTANT_LR="${CONSTANT_LR:-1e-6}"
 MAX_RESPONSE_LENGTH="${MAX_RESPONSE_LENGTH:-16384}"
+TRAIN_MICRO_BATCH_SIZE="${TRAIN_MICRO_BATCH_SIZE:-2}"
 RESUME_RUN_ROOT="${RESUME_RUN_ROOT:-${REPO}/runs_xuesong/runs/grpo_aime_dtv_selfinf_group_loo_policy_seed0_clean_20260805_095513}"
 RESUME_ACTOR_CHECKPOINT_ROOT="${RESUME_RUN_ROOT}/checkpoints/actor"
 RANKMAP_POINTER="${REPO}/runs_xuesong/logs/latest_teardown_diagnostic_root.txt"
@@ -139,8 +140,12 @@ esac
   echo "BATCH_SIZE must be divisible by the eight generations per group" >&2
   exit 2
 }
-(( MINI_BATCH_SIZE % 2 == 0 )) || {
-  echo "MINI_BATCH_SIZE must be divisible by train_micro_batch_size=2" >&2
+[[ "$TRAIN_MICRO_BATCH_SIZE" =~ ^[1-9][0-9]*$ ]] || {
+  echo "TRAIN_MICRO_BATCH_SIZE must be a positive integer" >&2
+  exit 2
+}
+(( MINI_BATCH_SIZE % TRAIN_MICRO_BATCH_SIZE == 0 )) || {
+  echo "MINI_BATCH_SIZE must be divisible by TRAIN_MICRO_BATCH_SIZE=$TRAIN_MICRO_BATCH_SIZE" >&2
   exit 2
 }
 (( TARGET_STEP <= NUM_BATCHES * NUM_TRAIN_EPOCHS )) || {
@@ -174,7 +179,7 @@ echo "TARGET_STEP=$TARGET_STEP"
 echo "ADDITIONAL_STEPS=$ADDITIONAL_STEPS"
 echo "BATCH_SIZE=$BATCH_SIZE"
 echo "MINI_BATCH_SIZE=$MINI_BATCH_SIZE"
-echo "TRAIN_MICRO_BATCH_SIZE=2"
+echo "TRAIN_MICRO_BATCH_SIZE=$TRAIN_MICRO_BATCH_SIZE"
 echo "MAX_RESPONSE_LENGTH=$MAX_RESPONSE_LENGTH"
 echo "LR_SCHEDULE=constant_schedule"
 echo "LR=$CONSTANT_LR"
@@ -202,7 +207,7 @@ exec "${REPO}/runs_xuesong/scripts/run_aime_seeded_full.sh" \
   "rollout_config.max_tokens_to_generate=${MAX_RESPONSE_LENGTH}" \
   "agentic_grpo_config.max_response_length=${MAX_RESPONSE_LENGTH}" \
   "rl_training_config.mini_batch_size=${MINI_BATCH_SIZE}" \
-  rl_training_config.train_micro_batch_size=2 \
+  "rl_training_config.train_micro_batch_size=${TRAIN_MICRO_BATCH_SIZE}" \
   rl_training_config.actor_optimizer_config.learning_rate="$CONSTANT_LR" \
   rl_training_config.actor_optimizer_config.schedule_type=constant_schedule \
   rl_training_config.actor_optimizer_config.value="$CONSTANT_LR" \
