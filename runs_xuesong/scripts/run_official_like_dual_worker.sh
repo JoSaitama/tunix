@@ -39,7 +39,6 @@ TUNIX_DBC_SELF_INF_MIN_KEEP_FRACTION="${TUNIX_DBC_SELF_INF_MIN_KEEP_FRACTION:-0.
 TUNIX_DBC_DECISIONS_PATH="${TUNIX_DBC_DECISIONS_PATH:-}"
 TUNIX_POLICY_DTV_SCORE_BACKEND="${TUNIX_POLICY_DTV_SCORE_BACKEND:-vmap}"
 TUNIX_DISTRIBUTED_ROLLOUT_PORT="${TUNIX_DISTRIBUTED_ROLLOUT_PORT:-29600}"
-TUNIX_JAX_COORDINATOR_PORT="${TUNIX_JAX_COORDINATOR_PORT:-29599}"
 
 RUN_ROOT="${RUN_ROOT:-${REPO}/runs_xuesong/runs/${RUN_NAME}}"
 CACHE_ROOT="${CACHE_ROOT:-${REPO}/runs_xuesong/cache/${RUN_NAME}}"
@@ -79,11 +78,39 @@ if [[ "${#endpoint_ips[@]}" -ne 2 ]]; then
   exit 1
 fi
 
-LOCAL_HOST="${LOCAL_HOST:-${endpoint_ips[0]}}"
-REMOTE_HOST="${REMOTE_HOST:-${endpoint_ips[${REMOTE_WORKER_INDEX}]}}"
-PROCESS_HOSTS="${PROCESS_HOSTS:-$(IFS=,; echo "${endpoint_ips[*]}")}"
-TUNIX_JAX_COORDINATOR_ADDRESS="${TUNIX_JAX_COORDINATOR_ADDRESS:-${LOCAL_HOST}:${TUNIX_JAX_COORDINATOR_PORT}}"
-TUNIX_JAX_NUM_PROCESSES="${#endpoint_ips[@]}"
+local_endpoint=""
+read -r -a local_interface_ips <<< "$(hostname -I)"
+for endpoint_ip in "${endpoint_ips[@]}"; do
+  for interface_ip in "${local_interface_ips[@]}"; do
+    if [[ "${endpoint_ip}" == "${interface_ip}" ]]; then
+      local_endpoint="${endpoint_ip}"
+      break 2
+    fi
+  done
+done
+if [[ -z "${local_endpoint}" ]]; then
+  echo "None of the TPU endpoints belongs to the launcher host." >&2
+  exit 1
+fi
+
+remote_endpoint=""
+for endpoint_ip in "${endpoint_ips[@]}"; do
+  if [[ "${endpoint_ip}" != "${local_endpoint}" ]]; then
+    remote_endpoint="${endpoint_ip}"
+    break
+  fi
+done
+if [[ -z "${remote_endpoint}" ]]; then
+  echo "Could not identify the remote TPU endpoint." >&2
+  exit 1
+fi
+
+LOCAL_HOST="${LOCAL_HOST:-${local_endpoint}}"
+REMOTE_HOST="${REMOTE_HOST:-${remote_endpoint}}"
+# This order is intentional: the launcher host owns the actor/checkpoint mesh,
+# while the remote host owns the rollout mesh. grpo_main_distributed derives
+# each JAX process id from its own address in this ordered list.
+PROCESS_HOSTS="${PROCESS_HOSTS:-${LOCAL_HOST},${REMOTE_HOST}}"
 
 mkdir -p "${LOG_DIR}" "${TB_DIR}" "${CKPT_DIR}" "${TMP_DIR}"
 
@@ -150,8 +177,7 @@ echo "  TRAIN_DATA_PATH=${TRAIN_DATA_PATH}"
 echo "  EVAL_DATA_PATH=${EVAL_DATA_PATH}"
 echo "  NUM_BATCHES=${NUM_BATCHES:-<launcher-default>}"
 echo "  DISTRIBUTED_ROLLOUT_PORT=${TUNIX_DISTRIBUTED_ROLLOUT_PORT}"
-echo "  JAX_COORDINATOR_ADDRESS=${TUNIX_JAX_COORDINATOR_ADDRESS}"
-echo "  JAX_PROCESS_IDS=local:0,remote:${REMOTE_WORKER_INDEX}"
+echo "  PROCESS_HOSTS=${PROCESS_HOSTS}"
 echo "  COMMAND=${cmd_string}"
 
 run_worker() (
@@ -177,8 +203,6 @@ run_worker() (
   export TUNIX_DBC_SELF_INF_MIN_KEEP_FRACTION TUNIX_DBC_DECISIONS_PATH
   export TUNIX_POLICY_DTV_SCORE_BACKEND
   export TUNIX_DISTRIBUTED_ROLLOUT_PORT
-  export TUNIX_JAX_COORDINATOR_ADDRESS TUNIX_JAX_NUM_PROCESSES
-  export TUNIX_JAX_PROCESS_ID=0
   export TUNIX_FIXED_FILTER_METHOD TUNIX_FIXED_FILTER_SCOPE
   export TUNIX_FIXED_FILTER_RATIO
   if [[ -n "${NUM_BATCHES}" ]]; then
@@ -234,9 +258,6 @@ export TUNIX_DBC_SELF_INF_MIN_KEEP_FRACTION=${TUNIX_DBC_SELF_INF_MIN_KEEP_FRACTI
 export TUNIX_DBC_DECISIONS_PATH=${TUNIX_DBC_DECISIONS_PATH@Q}
 export TUNIX_POLICY_DTV_SCORE_BACKEND=${TUNIX_POLICY_DTV_SCORE_BACKEND@Q}
 export TUNIX_DISTRIBUTED_ROLLOUT_PORT=${TUNIX_DISTRIBUTED_ROLLOUT_PORT@Q}
-export TUNIX_JAX_COORDINATOR_ADDRESS=${TUNIX_JAX_COORDINATOR_ADDRESS@Q}
-export TUNIX_JAX_NUM_PROCESSES=${TUNIX_JAX_NUM_PROCESSES@Q}
-export TUNIX_JAX_PROCESS_ID=${REMOTE_WORKER_INDEX@Q}
 if [[ -n ${NUM_BATCHES@Q} ]]; then
   export num_batches=${NUM_BATCHES@Q}
 fi
