@@ -119,6 +119,7 @@ case "$MODE" in
     MINI_BATCH_SIZE="$BATCH_SIZE"
     NUM_BATCHES=314
     NUM_TRAIN_EPOCHS=2
+    CHECKPOINT_SAVE_INTERVAL=1000000
     export TUNIX_SKIP_FINAL_CHECKPOINT=1
     ;;
   formal)
@@ -132,6 +133,10 @@ case "$MODE" in
     # trains on the first 64 batches of epoch two.
     NUM_BATCHES=314
     NUM_TRAIN_EPOCHS=2
+    # PeftTrainer evaluates periodic checkpoint intervals against the absolute
+    # restored train step. Saving at the absolute target protects the formal
+    # result from a later distributed teardown failure.
+    CHECKPOINT_SAVE_INTERVAL="$TARGET_STEP"
     unset TUNIX_SKIP_FINAL_CHECKPOINT || true
     ;;
 esac
@@ -163,7 +168,7 @@ export TUNIX_RESUME_ACTOR_CHECKPOINT_ROOT="$RESUME_ACTOR_CHECKPOINT_ROOT"
 export TUNIX_RESUME_CHECKPOINT_STEP="$RESUME_STEP"
 export NUM_BATCHES
 export MAX_STEPS_OVERRIDE="$TARGET_STEP"
-export CHECKPOINT_INTERVAL=1000000
+export CHECKPOINT_INTERVAL="$CHECKPOINT_SAVE_INTERVAL"
 export TUNIX_DISABLE_TRAJECTORY_LOGGING=1
 
 mkdir -p "${REPO}/runs_xuesong/logs"
@@ -184,6 +189,7 @@ echo "MAX_RESPONSE_LENGTH=$MAX_RESPONSE_LENGTH"
 echo "LR_SCHEDULE=constant_schedule"
 echo "LR=$CONSTANT_LR"
 echo "CONTINUATION_DATA_SEED=$CONTINUATION_DATA_SEED"
+echo "CHECKPOINT_SAVE_INTERVAL=$CHECKPOINT_SAVE_INTERVAL"
 echo "PROCESS_HOSTS=$PROCESS_HOSTS"
 echo "ACTOR_PROCESS0_HOST=$RANK0_HOST"
 echo "ROLLOUT_PROCESS1_HOST=$RANK1_HOST"
@@ -213,5 +219,5 @@ exec "${REPO}/runs_xuesong/scripts/run_aime_seeded_full.sh" \
   rl_training_config.actor_optimizer_config.value="$CONSTANT_LR" \
   rl_training_config.actor_optimizer_config.init_value="$CONSTANT_LR" \
   "rl_training_config.actor_optimizer_config.decay_steps=${TARGET_STEP}" \
-  rl_training_config.checkpointing_options.save_interval_steps=1000000 \
+  "rl_training_config.checkpointing_options.save_interval_steps=${CHECKPOINT_SAVE_INTERVAL}" \
   rl_training_config.checkpointing_options.max_to_keep=2
