@@ -63,8 +63,43 @@ export TUNIX_TRAINING_SUMMARY_PATH="${LOG_ROOT}/training_summary.json"
 mkdir -p "$RUN_ROOT" "$LOG_ROOT" "$CACHE_ROOT"
 exec > >(tee "${LOG_ROOT}/nohup.log") 2>&1
 
+RESUME_ACTOR_CHECKPOINT_ROOT="${TUNIX_RESUME_ACTOR_CHECKPOINT_ROOT:-}"
+RESUME_CHECKPOINT_STEP="${TUNIX_RESUME_CHECKPOINT_STEP:-}"
+if [[ -n "$RESUME_ACTOR_CHECKPOINT_ROOT" || -n "$RESUME_CHECKPOINT_STEP" ]]; then
+  [[ -n "$RESUME_ACTOR_CHECKPOINT_ROOT" && -n "$RESUME_CHECKPOINT_STEP" ]] || {
+    echo "TUNIX_RESUME_ACTOR_CHECKPOINT_ROOT and TUNIX_RESUME_CHECKPOINT_STEP must be set together" >&2
+    exit 2
+  }
+  [[ "$RESUME_CHECKPOINT_STEP" =~ ^[1-9][0-9]*$ ]] || {
+    echo "invalid TUNIX_RESUME_CHECKPOINT_STEP=$RESUME_CHECKPOINT_STEP" >&2
+    exit 2
+  }
+
+  RESUME_SOURCE="${RESUME_ACTOR_CHECKPOINT_ROOT}/${RESUME_CHECKPOINT_STEP}"
+  RESUME_DEST_ROOT="${RUN_ROOT}/checkpoints/actor"
+  RESUME_DEST="${RESUME_DEST_ROOT}/${RESUME_CHECKPOINT_STEP}"
+  [[ -d "$RESUME_SOURCE" ]] || {
+    echo "resume checkpoint is missing: $RESUME_SOURCE" >&2
+    exit 1
+  }
+  mkdir -p "$RESUME_DEST_ROOT"
+  if [[ -e "$RESUME_DEST" || -L "$RESUME_DEST" ]]; then
+    [[ "$(realpath "$RESUME_DEST")" == "$(realpath "$RESUME_SOURCE")" ]] || {
+      echo "resume destination already points elsewhere: $RESUME_DEST" >&2
+      exit 1
+    }
+  else
+    ln -s "$RESUME_SOURCE" "$RESUME_DEST"
+  fi
+  echo "Resume checkpoint: $RESUME_DEST -> $(realpath "$RESUME_DEST")"
+fi
+
 SUMMARY_MINI_BATCH_SIZE=128
 SUMMARY_TRAIN_MICRO_BATCH_SIZE=2
+SUMMARY_MAX_RESPONSE_LENGTH=8192
+SUMMARY_LR_SCHEDULE=cosine_decay_schedule
+SUMMARY_LR_INIT=1e-6
+SUMMARY_LR_DECAY_STEPS="$MAX_STEPS_OVERRIDE"
 for override in "$@"; do
   case "$override" in
     rl_training_config.mini_batch_size=*)
@@ -72,6 +107,18 @@ for override in "$@"; do
       ;;
     rl_training_config.train_micro_batch_size=*)
       SUMMARY_TRAIN_MICRO_BATCH_SIZE="${override#*=}"
+      ;;
+    agentic_grpo_config.max_response_length=*)
+      SUMMARY_MAX_RESPONSE_LENGTH="${override#*=}"
+      ;;
+    rl_training_config.actor_optimizer_config.schedule_type=*)
+      SUMMARY_LR_SCHEDULE="${override#*=}"
+      ;;
+    rl_training_config.actor_optimizer_config.init_value=*)
+      SUMMARY_LR_INIT="${override#*=}"
+      ;;
+    rl_training_config.actor_optimizer_config.decay_steps=*)
+      SUMMARY_LR_DECAY_STEPS="${override#*=}"
       ;;
   esac
 done
@@ -125,14 +172,15 @@ RUN_ROOT=${RUN_ROOT}
 LOG_ROOT=${LOG_ROOT}
 NUM_BATCHES=${NUM_BATCHES}
 MAX_STEPS=${MAX_STEPS_OVERRIDE}
+RESUME_CHECKPOINT_STEP=${RESUME_CHECKPOINT_STEP:-none}
 GRADIENT_ACCUMULATION=${SUMMARY_GRADIENT_ACCUMULATION}
 NUM_GENERATIONS=8
-MAX_RESPONSE_LENGTH=8192
+MAX_RESPONSE_LENGTH=${SUMMARY_MAX_RESPONSE_LENGTH}
 BETA=0.001
 DOT_THRESHOLD=0.0
-LR_SCHEDULE=cosine_decay_schedule
-LR_INIT=1e-6
-LR_DECAY_STEPS=${MAX_STEPS_OVERRIDE}
+LR_SCHEDULE=${SUMMARY_LR_SCHEDULE}
+LR_INIT=${SUMMARY_LR_INIT}
+LR_DECAY_STEPS=${SUMMARY_LR_DECAY_STEPS}
 WARMUP=none
 EXIT_CODE=${status}
 EOF
