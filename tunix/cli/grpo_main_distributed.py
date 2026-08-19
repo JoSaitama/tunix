@@ -20,6 +20,8 @@ import runpy
 import socket
 
 import jax
+from jax.experimental import multihost_utils
+import numpy as np
 
 
 def _resolve_process_hosts() -> list[str] | None:
@@ -77,41 +79,77 @@ def _discover_local_process_host(process_hosts: list[str]) -> str:
   )
 
 
+def _rank_ordered_process_hosts(
+    local_host: str, candidate_hosts: list[str]
+) -> list[str]:
+  """Collects host addresses in the TPU backend's actual process-rank order."""
+  encoded_host = np.asarray(
+      [int(ipaddress.IPv4Address(local_host))], dtype=np.uint32
+  )
+  gathered_hosts = np.asarray(
+      multihost_utils.process_allgather(encoded_host, tiled=False)
+  ).reshape(-1)
+  process_hosts = [
+      str(ipaddress.IPv4Address(int(encoded))) for encoded in gathered_hosts
+  ]
+  if len(process_hosts) != jax.process_count():
+    raise RuntimeError(
+        "Distributed host discovery returned the wrong number of hosts:"
+        f" expected={jax.process_count()}, actual={len(process_hosts)},"
+        f" hosts={process_hosts}."
+    )
+  if len(set(process_hosts)) != len(process_hosts):
+    raise RuntimeError(
+        f"Distributed host discovery returned duplicate hosts: {process_hosts}."
+    )
+  if set(process_hosts) != set(candidate_hosts):
+    raise RuntimeError(
+        "Distributed host discovery does not match TUNIX_PROCESS_HOSTS:"
+        f" candidates={candidate_hosts}, discovered={process_hosts}."
+    )
+  return process_hosts
+
+
 def _initialize_jax_distributed() -> tuple[str | None, list[str] | None]:
-  """Initializes JAX with deterministic ranks when split-host routing is used."""
-  process_hosts = _resolve_process_hosts()
-  if process_hosts is None:
+  """Initializes JAX and discovers transport hosts in actual rank order."""
+  candidate_hosts = _resolve_process_hosts()
+  if candidate_hosts is None:
     if not jax.distributed.is_initialized():
       jax.distributed.initialize()
     return None, None
 
-  local_host = _discover_local_process_host(process_hosts)
-  expected_process_id = process_hosts.index(local_host)
-  rollout_port = int(os.getenv("TUNIX_DISTRIBUTED_ROLLOUT_PORT", "29600"))
-  coordinator_port = rollout_port - 1
-  if coordinator_port <= 0:
-    raise ValueError(
-        "TUNIX_DISTRIBUTED_ROLLOUT_PORT must be greater than 1 so the"
-        " preceding port can be used for JAX coordination."
+  local_host = _discover_local_process_host(candidate_hosts)
+  if not jax.distributed.is_initialized():
+    # TPU device process indices are assigned by the backend topology. Passing
+    # a coordination task id does not renumber those devices, so initialize
+    # natively and discover the resulting rank-to-host mapping afterwards.
+    jax.distributed.initialize()
+
+  if jax.process_count() != len(candidate_hosts):
+    raise RuntimeError(
+        "JAX process count does not match TUNIX_PROCESS_HOSTS:"
+        f" local_host={local_host}, candidate_hosts={candidate_hosts},"
+        f" expected_process_count={len(candidate_hosts)},"
+        f" actual_process_count={jax.process_count()}."
     )
 
-  if not jax.distributed.is_initialized():
-    jax.distributed.initialize(
-        coordinator_address=f"{process_hosts[0]}:{coordinator_port}",
-        num_processes=len(process_hosts),
-        process_id=expected_process_id,
+  process_hosts = _rank_ordered_process_hosts(local_host, candidate_hosts)
+  if process_hosts[jax.process_index()] != local_host:
+    raise RuntimeError(
+        "Rank-ordered host discovery assigned the wrong local host:"
+        f" process_index={jax.process_index()}, local_host={local_host},"
+        f" process_hosts={process_hosts}."
     )
 
   if (
-      jax.process_index() != expected_process_id
-      or jax.process_count() != len(process_hosts)
+      os.getenv("TUNIX_RESUME_ACTOR_CHECKPOINT_ROOT")
+      and process_hosts[0] != candidate_hosts[0]
   ):
     raise RuntimeError(
-        "JAX distributed identity does not match the resolved process hosts:"
-        f" local_host={local_host}, expected_process_id={expected_process_id},"
-        f" actual_process_id={jax.process_index()},"
-        f" expected_process_count={len(process_hosts)},"
-        f" actual_process_count={jax.process_count()}."
+        "Checkpoint continuation requires the launcher host to remain JAX"
+        " process 0 because process 0 owns the actor/checkpoint mesh:"
+        f" launcher_host={candidate_hosts[0]},"
+        f" process_hosts={process_hosts}."
     )
 
   normalized_hosts = ",".join(process_hosts)

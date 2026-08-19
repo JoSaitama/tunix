@@ -19,6 +19,7 @@ import socket
 from unittest import mock
 
 from absl.testing import absltest
+import numpy as np
 from tunix.cli import grpo_main_distributed
 
 
@@ -44,14 +45,34 @@ class GrpoMainDistributedTest(absltest.TestCase):
       with self.assertRaisesRegex(ValueError, "distinct IPv4"):
         grpo_main_distributed._resolve_process_hosts()
 
-  def test_initialize_derives_rank_from_local_address(self):
+  def test_rank_ordered_process_hosts_uses_backend_process_order(self):
+    candidates = ["10.128.0.25", "10.128.0.24"]
+    encoded = np.asarray(
+        [
+            [int(grpo_main_distributed.ipaddress.IPv4Address("10.128.0.24"))],
+            [int(grpo_main_distributed.ipaddress.IPv4Address("10.128.0.25"))],
+        ],
+        dtype=np.uint32,
+    )
+    with mock.patch.object(
+        grpo_main_distributed.multihost_utils,
+        "process_allgather",
+        return_value=encoded,
+    ), mock.patch.object(
+        grpo_main_distributed.jax, "process_count", return_value=2
+    ):
+      hosts = grpo_main_distributed._rank_ordered_process_hosts(
+          "10.128.0.24", candidates
+      )
+
+    self.assertEqual(hosts, ["10.128.0.24", "10.128.0.25"])
+
+  def test_initialize_accepts_backend_assigned_rank_order(self):
     hosts = ["10.128.0.25", "10.128.0.24"]
+    rank_ordered_hosts = ["10.128.0.24", "10.128.0.25"]
     with mock.patch.dict(
         os.environ,
-        {
-            "TUNIX_PROCESS_HOSTS": ",".join(hosts),
-            "TUNIX_DISTRIBUTED_ROLLOUT_PORT": "29600",
-        },
+        {"TUNIX_PROCESS_HOSTS": ",".join(hosts)},
     ), mock.patch.object(
         grpo_main_distributed, "_resolve_process_hosts", return_value=hosts
     ), mock.patch.object(
@@ -65,21 +86,23 @@ class GrpoMainDistributedTest(absltest.TestCase):
     ), mock.patch.object(
         grpo_main_distributed.jax.distributed, "initialize"
     ) as initialize, mock.patch.object(
-        grpo_main_distributed.jax, "process_index", return_value=1
+        grpo_main_distributed,
+        "_rank_ordered_process_hosts",
+        return_value=rank_ordered_hosts,
+    ), mock.patch.object(
+        grpo_main_distributed.jax, "process_index", return_value=0
     ), mock.patch.object(
         grpo_main_distributed.jax, "process_count", return_value=2
     ):
       local_host, resolved_hosts = (
           grpo_main_distributed._initialize_jax_distributed()
       )
+      normalized_hosts = os.environ["TUNIX_PROCESS_HOSTS"]
 
-    initialize.assert_called_once_with(
-        coordinator_address="10.128.0.25:29599",
-        num_processes=2,
-        process_id=1,
-    )
+    initialize.assert_called_once_with()
     self.assertEqual(local_host, "10.128.0.24")
-    self.assertEqual(resolved_hosts, hosts)
+    self.assertEqual(resolved_hosts, rank_ordered_hosts)
+    self.assertEqual(normalized_hosts, "10.128.0.24,10.128.0.25")
 
   def test_initialize_preserves_native_jax_fallback(self):
     with mock.patch.object(
@@ -98,6 +121,39 @@ class GrpoMainDistributedTest(absltest.TestCase):
     initialize.assert_called_once_with()
     self.assertIsNone(local_host)
     self.assertIsNone(process_hosts)
+
+  def test_resume_rejects_actor_host_rank_change(self):
+    candidates = ["10.128.0.25", "10.128.0.24"]
+    rank_ordered_hosts = ["10.128.0.24", "10.128.0.25"]
+    with mock.patch.dict(
+        os.environ,
+        {
+            "TUNIX_PROCESS_HOSTS": ",".join(candidates),
+            "TUNIX_RESUME_ACTOR_CHECKPOINT_ROOT": "/checkpoint/actor",
+        },
+    ), mock.patch.object(
+        grpo_main_distributed,
+        "_resolve_process_hosts",
+        return_value=candidates,
+    ), mock.patch.object(
+        grpo_main_distributed,
+        "_discover_local_process_host",
+        return_value="10.128.0.24",
+    ), mock.patch.object(
+        grpo_main_distributed.jax.distributed,
+        "is_initialized",
+        return_value=True,
+    ), mock.patch.object(
+        grpo_main_distributed,
+        "_rank_ordered_process_hosts",
+        return_value=rank_ordered_hosts,
+    ), mock.patch.object(
+        grpo_main_distributed.jax, "process_index", return_value=0
+    ), mock.patch.object(
+        grpo_main_distributed.jax, "process_count", return_value=2
+    ):
+      with self.assertRaisesRegex(RuntimeError, "actor/checkpoint mesh"):
+        grpo_main_distributed._initialize_jax_distributed()
 
 
 if __name__ == "__main__":
