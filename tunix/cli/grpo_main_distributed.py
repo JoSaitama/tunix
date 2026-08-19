@@ -14,14 +14,40 @@
 
 """GRPO entry point that initializes multi-host JAX before running training."""
 
+import os
 import runpy
+import socket
 
 import jax
 
 
 def main() -> None:
   if not jax.distributed.is_initialized():
-    jax.distributed.initialize()
+    coordinator_address = os.getenv("TUNIX_JAX_COORDINATOR_ADDRESS")
+    num_processes = os.getenv("TUNIX_JAX_NUM_PROCESSES")
+    process_id = os.getenv("TUNIX_JAX_PROCESS_ID")
+    explicit_values = (coordinator_address, num_processes, process_id)
+    if any(value is not None for value in explicit_values):
+      if not all(value is not None for value in explicit_values):
+        raise ValueError(
+            "TUNIX_JAX_COORDINATOR_ADDRESS, TUNIX_JAX_NUM_PROCESSES, and"
+            " TUNIX_JAX_PROCESS_ID must be set together."
+        )
+      jax.distributed.initialize(
+          coordinator_address=coordinator_address,
+          num_processes=int(num_processes),
+          process_id=int(process_id),
+      )
+    else:
+      jax.distributed.initialize()
+  print(
+      "JAX_DISTRIBUTED_IDENTITY"
+      f" hostname={socket.gethostname()}"
+      f" process_index={jax.process_index()}"
+      f" process_count={jax.process_count()}"
+      f" coordinator={os.getenv('TUNIX_JAX_COORDINATOR_ADDRESS', 'auto')}",
+      flush=True,
+  )
   runpy.run_module("tunix.cli.grpo_main", run_name="__main__")
 
 
