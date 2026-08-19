@@ -50,6 +50,39 @@ TB_DIR="${LOG_ROOT}/tensorboard"
 CKPT_DIR="${RUN_ROOT}/checkpoints"
 TMP_DIR="${CACHE_ROOT}/tmp"
 
+prepare_resume_checkpoint() {
+  local resume_source resume_dest_root resume_dest
+
+  if [[ -z "${TUNIX_RESUME_ACTOR_CHECKPOINT_ROOT}" &&
+        -z "${TUNIX_RESUME_CHECKPOINT_STEP}" ]]; then
+    return 0
+  fi
+  if [[ -z "${TUNIX_RESUME_ACTOR_CHECKPOINT_ROOT}" ||
+        -z "${TUNIX_RESUME_CHECKPOINT_STEP}" ]]; then
+    echo "TUNIX_RESUME_ACTOR_CHECKPOINT_ROOT and TUNIX_RESUME_CHECKPOINT_STEP must be set together" >&2
+    return 2
+  fi
+
+  resume_source="${TUNIX_RESUME_ACTOR_CHECKPOINT_ROOT}/${TUNIX_RESUME_CHECKPOINT_STEP}"
+  resume_dest_root="${CKPT_DIR}/actor"
+  resume_dest="${resume_dest_root}/${TUNIX_RESUME_CHECKPOINT_STEP}"
+  if [[ ! -d "${resume_source}" ]]; then
+    echo "resume checkpoint is missing on $(hostname): ${resume_source}" >&2
+    return 1
+  fi
+
+  mkdir -p "${resume_dest_root}"
+  if [[ -e "${resume_dest}" || -L "${resume_dest}" ]]; then
+    if [[ "$(realpath "${resume_dest}")" != "$(realpath "${resume_source}")" ]]; then
+      echo "resume destination already points elsewhere on $(hostname): ${resume_dest}" >&2
+      return 1
+    fi
+  else
+    ln -s "${resume_source}" "${resume_dest}"
+  fi
+  echo "Resume checkpoint on $(hostname): ${resume_dest} -> $(realpath "${resume_dest}")"
+}
+
 for required_file in \
   "${TRAIN_DATA_PATH}" \
   "${EVAL_DATA_PATH}" \
@@ -192,6 +225,7 @@ run_worker() (
   cd "${REPO}"
   source "${VENV}/bin/activate"
   mkdir -p "${LOG_DIR}" "${TB_DIR}" "${CKPT_DIR}" "${TMP_DIR}"
+  prepare_resume_checkpoint
   export HF_TOKEN="${HF_TOKEN_VALUE}"
   export HF_HOME="${CACHE_ROOT}/huggingface"
   export XDG_CACHE_HOME="${CACHE_ROOT}/xdg"
@@ -242,6 +276,31 @@ ulimit -c 0 || true
 cd ${REPO}
 source ${VENV}/bin/activate
 mkdir -p ${LOG_DIR} ${TB_DIR} ${CKPT_DIR} ${TMP_DIR}
+resume_actor_checkpoint_root=${TUNIX_RESUME_ACTOR_CHECKPOINT_ROOT@Q}
+resume_checkpoint_step=${TUNIX_RESUME_CHECKPOINT_STEP@Q}
+if [[ -n "\${resume_actor_checkpoint_root}" || -n "\${resume_checkpoint_step}" ]]; then
+  if [[ -z "\${resume_actor_checkpoint_root}" || -z "\${resume_checkpoint_step}" ]]; then
+    echo "TUNIX_RESUME_ACTOR_CHECKPOINT_ROOT and TUNIX_RESUME_CHECKPOINT_STEP must be set together" >&2
+    exit 2
+  fi
+  resume_source="\${resume_actor_checkpoint_root}/\${resume_checkpoint_step}"
+  resume_dest_root=${CKPT_DIR@Q}/actor
+  resume_dest="\${resume_dest_root}/\${resume_checkpoint_step}"
+  if [[ ! -d "\${resume_source}" ]]; then
+    echo "resume checkpoint is missing on \$(hostname): \${resume_source}" >&2
+    exit 1
+  fi
+  mkdir -p "\${resume_dest_root}"
+  if [[ -e "\${resume_dest}" || -L "\${resume_dest}" ]]; then
+    if [[ "\$(realpath "\${resume_dest}")" != "\$(realpath "\${resume_source}")" ]]; then
+      echo "resume destination already points elsewhere on \$(hostname): \${resume_dest}" >&2
+      exit 1
+    fi
+  else
+    ln -s "\${resume_source}" "\${resume_dest}"
+  fi
+  echo "Resume checkpoint on \$(hostname): \${resume_dest} -> \$(realpath "\${resume_dest}")"
+fi
 export HF_TOKEN=${HF_TOKEN_VALUE}
 export HF_HOME=${CACHE_ROOT}/huggingface
 export XDG_CACHE_HOME=${CACHE_ROOT}/xdg
