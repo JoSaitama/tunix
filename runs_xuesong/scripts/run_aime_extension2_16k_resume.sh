@@ -2,6 +2,8 @@
 set -euo pipefail
 
 REPO="${REPO:-/home/jason_chia925_gmail_com/Project/tunix}"
+TPU_NAME="${TPU_NAME:-node-v5p-16-ziao1}"
+ZONE="${ZONE:-us-central1-a}"
 MODE="${1:-}"
 if [[ "$MODE" != "smoke" && "$MODE" != "formal" ]]; then
   echo "usage: $0 {smoke|formal}" >&2
@@ -18,6 +20,79 @@ CONSTANT_LR="${CONSTANT_LR:-1e-6}"
 MAX_RESPONSE_LENGTH="${MAX_RESPONSE_LENGTH:-16384}"
 RESUME_RUN_ROOT="${RESUME_RUN_ROOT:-${REPO}/runs_xuesong/runs/grpo_aime_dtv_selfinf_group_loo_policy_seed0_clean_20260805_095513}"
 RESUME_ACTOR_CHECKPOINT_ROOT="${RESUME_RUN_ROOT}/checkpoints/actor"
+RANKMAP_POINTER="${REPO}/runs_xuesong/logs/latest_teardown_diagnostic_root.txt"
+
+# The TPU backend owns JAX process numbering; the VM used to invoke this
+# launcher is not necessarily process 0. Reuse the rank order observed by the
+# successful frozen distributed-rollout diagnostic, then reject it if its IP
+# set no longer matches the TPU's current endpoints. This only supplies routing
+# metadata to the existing launcher and never changes actor/rollout semantics.
+[[ -r "$RANKMAP_POINTER" ]] || {
+  echo "JAX rank-map pointer is missing: $RANKMAP_POINTER" >&2
+  exit 1
+}
+RANKMAP_ROOT="$(<"$RANKMAP_POINTER")"
+RANKMAP_LOG="${RANKMAP_ROOT}/launcher.nohup.log"
+[[ -r "$RANKMAP_LOG" ]] || {
+  echo "JAX rank-map log is missing: $RANKMAP_LOG" >&2
+  exit 1
+}
+
+RANKMAP_LINE="$({
+  tr -d '\000' < "$RANKMAP_LOG" |
+    grep -E \
+      'JAX_DISTRIBUTED_IDENTITY .*process_index=0 .*process_hosts=\[' || true
+} | tail -n 1)"
+[[ -n "$RANKMAP_LINE" ]] || {
+  echo "No process-0 JAX identity found in: $RANKMAP_LOG" >&2
+  exit 1
+}
+
+RANK0_HOST="$({
+  sed -n \
+    "s/.*process_hosts=\['\([^']*\)', '[^']*'\].*/\1/p" \
+    <<< "$RANKMAP_LINE"
+})"
+RANK1_HOST="$({
+  sed -n \
+    "s/.*process_hosts=\['[^']*', '\([^']*\)'\].*/\1/p" \
+    <<< "$RANKMAP_LINE"
+})"
+
+ipv4_regex='^([0-9]{1,3}\.){3}[0-9]{1,3}$'
+[[ "$RANK0_HOST" =~ $ipv4_regex && "$RANK1_HOST" =~ $ipv4_regex ]] || {
+  echo "Invalid JAX rank-map addresses: rank0=$RANK0_HOST rank1=$RANK1_HOST" >&2
+  exit 1
+}
+[[ "$RANK0_HOST" != "$RANK1_HOST" ]] || {
+  echo "JAX rank-map contains duplicate hosts: $RANK0_HOST" >&2
+  exit 1
+}
+
+mapfile -t CURRENT_ENDPOINTS < <(
+  gcloud alpha compute tpus tpu-vm describe "$TPU_NAME" \
+    --zone="$ZONE" \
+    --format='value(networkEndpoints[].ipAddress)' |
+    tr ';' '\n' |
+    sed '/^[[:space:]]*$/d' |
+    LC_ALL=C sort
+)
+mapfile -t RANKMAP_ENDPOINTS < <(
+  printf '%s\n' "$RANK0_HOST" "$RANK1_HOST" |
+    LC_ALL=C sort
+)
+[[ "${#CURRENT_ENDPOINTS[@]}" -eq 2 ]] || {
+  echo "Expected two current TPU endpoints; found ${#CURRENT_ENDPOINTS[@]}" >&2
+  exit 1
+}
+[[ "${CURRENT_ENDPOINTS[*]}" == "${RANKMAP_ENDPOINTS[*]}" ]] || {
+  echo "Refusing stale JAX rank map." >&2
+  echo "Current endpoints: ${CURRENT_ENDPOINTS[*]}" >&2
+  echo "Rank-map endpoints: ${RANKMAP_ENDPOINTS[*]}" >&2
+  exit 1
+}
+
+export PROCESS_HOSTS="${RANK0_HOST},${RANK1_HOST}"
 
 [[ "$RESUME_STEP" =~ ^[1-9][0-9]*$ ]] || {
   echo "invalid RESUME_STEP=$RESUME_STEP" >&2
@@ -104,6 +179,10 @@ echo "MAX_RESPONSE_LENGTH=$MAX_RESPONSE_LENGTH"
 echo "LR_SCHEDULE=constant_schedule"
 echo "LR=$CONSTANT_LR"
 echo "CONTINUATION_DATA_SEED=$CONTINUATION_DATA_SEED"
+echo "PROCESS_HOSTS=$PROCESS_HOSTS"
+echo "ACTOR_PROCESS0_HOST=$RANK0_HOST"
+echo "ROLLOUT_PROCESS1_HOST=$RANK1_HOST"
+echo "RANKMAP_LOG=$RANKMAP_LOG"
 echo "RUN_ROOT=$RUN_ROOT"
 echo "LOG_ROOT=$LOG_ROOT"
 
