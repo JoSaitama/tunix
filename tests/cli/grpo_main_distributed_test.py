@@ -14,6 +14,8 @@
 
 """Tests for deterministic multi-host GRPO process identity discovery."""
 
+from contextlib import redirect_stdout
+import io
 import os
 import socket
 from unittest import mock
@@ -154,6 +156,67 @@ class GrpoMainDistributedTest(absltest.TestCase):
     ):
       with self.assertRaisesRegex(RuntimeError, "actor/checkpoint mesh"):
         grpo_main_distributed._initialize_jax_distributed()
+
+  def test_main_emits_normal_teardown_boundaries(self):
+    registered_callbacks = []
+    with mock.patch.object(
+        grpo_main_distributed,
+        "_initialize_jax_distributed",
+        return_value=("10.0.0.2", ["10.0.0.2", "10.0.0.7"]),
+    ), mock.patch.object(
+        grpo_main_distributed.jax, "process_index", return_value=0
+    ), mock.patch.object(
+        grpo_main_distributed.jax, "process_count", return_value=2
+    ), mock.patch.object(
+        grpo_main_distributed.socket,
+        "gethostname",
+        return_value="actor-host",
+    ), mock.patch.object(
+        grpo_main_distributed.runpy, "run_module"
+    ) as run_module, mock.patch.object(
+        grpo_main_distributed.atexit,
+        "register",
+        side_effect=lambda callback, *args, **kwargs: registered_callbacks.append(
+            (callback, args, kwargs)
+        ),
+    ):
+      output = io.StringIO()
+      with redirect_stdout(output):
+        grpo_main_distributed.main()
+
+    run_module.assert_called_once_with(
+        "tunix.cli.grpo_main", run_name="__main__"
+    )
+    self.assertLen(registered_callbacks, 1)
+    self.assertIn("phase=runpy_start", output.getvalue())
+    self.assertIn("phase=runpy_return", output.getvalue())
+    self.assertIn("phase=runpy_finally", output.getvalue())
+
+  def test_main_records_system_exit_code(self):
+    with mock.patch.object(
+        grpo_main_distributed,
+        "_initialize_jax_distributed",
+        return_value=("10.0.0.2", ["10.0.0.2", "10.0.0.7"]),
+    ), mock.patch.object(
+        grpo_main_distributed.jax, "process_index", return_value=0
+    ), mock.patch.object(
+        grpo_main_distributed.jax, "process_count", return_value=2
+    ), mock.patch.object(
+        grpo_main_distributed.socket,
+        "gethostname",
+        return_value="actor-host",
+    ), mock.patch.object(
+        grpo_main_distributed.runpy,
+        "run_module",
+        side_effect=SystemExit(1),
+    ), mock.patch.object(grpo_main_distributed.atexit, "register"):
+      output = io.StringIO()
+      with redirect_stdout(output), self.assertRaises(SystemExit):
+        grpo_main_distributed.main()
+
+    self.assertIn("phase=runpy_system_exit", output.getvalue())
+    self.assertIn("exit_code=1", output.getvalue())
+    self.assertIn("phase=runpy_finally", output.getvalue())
 
 
 if __name__ == "__main__":

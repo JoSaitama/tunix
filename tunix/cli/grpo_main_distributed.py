@@ -14,6 +14,7 @@
 
 """GRPO entry point that initializes multi-host JAX before running training."""
 
+import atexit
 import ipaddress
 import os
 import runpy
@@ -159,16 +160,70 @@ def _initialize_jax_distributed() -> tuple[str | None, list[str] | None]:
 
 def main() -> None:
   local_host, process_hosts = _initialize_jax_distributed()
+  hostname = socket.gethostname()
+  process_index = jax.process_index()
   print(
       "JAX_DISTRIBUTED_IDENTITY"
-      f" hostname={socket.gethostname()}"
-      f" process_index={jax.process_index()}"
+      f" hostname={hostname}"
+      f" process_index={process_index}"
       f" process_count={jax.process_count()}"
       f" local_host={local_host or 'auto'}"
       f" process_hosts={process_hosts or 'auto'}",
       flush=True,
   )
-  runpy.run_module("tunix.cli.grpo_main", run_name="__main__")
+  atexit.register(
+      print,
+      "DISTRIBUTED_TEARDOWN"
+      " phase=python_atexit"
+      f" hostname={hostname}"
+      f" process={process_index}",
+      flush=True,
+  )
+  print(
+      "DISTRIBUTED_TEARDOWN"
+      " phase=runpy_start"
+      f" hostname={hostname}"
+      f" process={process_index}",
+      flush=True,
+  )
+  try:
+    runpy.run_module("tunix.cli.grpo_main", run_name="__main__")
+  except SystemExit as exc:
+    print(
+        "DISTRIBUTED_TEARDOWN"
+        " phase=runpy_system_exit"
+        f" hostname={hostname}"
+        f" process={process_index}"
+        f" exit_code={exc.code!r}",
+        flush=True,
+    )
+    raise
+  except BaseException as exc:
+    print(
+        "DISTRIBUTED_TEARDOWN"
+        " phase=runpy_exception"
+        f" hostname={hostname}"
+        f" process={process_index}"
+        f" exception_type={type(exc).__name__}",
+        flush=True,
+    )
+    raise
+  else:
+    print(
+        "DISTRIBUTED_TEARDOWN"
+        " phase=runpy_return"
+        f" hostname={hostname}"
+        f" process={process_index}",
+        flush=True,
+    )
+  finally:
+    print(
+        "DISTRIBUTED_TEARDOWN"
+        " phase=runpy_finally"
+        f" hostname={hostname}"
+        f" process={process_index}",
+        flush=True,
+    )
 
 
 if __name__ == "__main__":

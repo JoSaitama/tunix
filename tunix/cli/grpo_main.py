@@ -850,10 +850,30 @@ class GrpoPipeline(config.HyperParameters):
         learner.train(dataset)
     finally:
       if diagnostic_path:
+        logging.info(
+            "DISTRIBUTED_TEARDOWN phase=rl_cluster_close_start process=%d",
+            jax.process_index(),
+        )
         rl_cluster.close()
+        logging.info(
+            "DISTRIBUTED_TEARDOWN phase=rl_cluster_close_complete process=%d",
+            jax.process_index(),
+        )
       close_fn = getattr(rl_cluster.rollout, "close", None)
       if callable(close_fn):
+        logging.info(
+            "DISTRIBUTED_TEARDOWN phase=rollout_close_start process=%d",
+            jax.process_index(),
+        )
         close_fn()
+        logging.info(
+            "DISTRIBUTED_TEARDOWN phase=rollout_close_complete process=%d",
+            jax.process_index(),
+        )
+      logging.info(
+          "DISTRIBUTED_TEARDOWN phase=agentic_grpo_finally_complete process=%d",
+          jax.process_index(),
+      )
 
   # ------------------------------------------------------------------
   # Dispatcher
