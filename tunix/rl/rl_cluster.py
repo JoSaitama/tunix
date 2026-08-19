@@ -295,7 +295,12 @@ class RLCluster:
     self._external_metrics_logger = None
 
     self._init_cluster()
-    gc.collect()
+    # A split-host vLLM rollout owner performs this collection immediately
+    # before opening its listener. Repeating it here can finalize a stale
+    # transport object after the operating system has reused that object's
+    # descriptor number for the live listener.
+    if not getattr(self._rollout, "post_init_gc_completed", False):
+      gc.collect()
 
     # NB: global steps should be adjusted properly based on the actual RL
     # algorithm. E.g. when loading from a checkpoint with additional inner loops

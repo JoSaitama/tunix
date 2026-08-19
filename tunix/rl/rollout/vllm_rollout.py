@@ -15,6 +15,7 @@
 """vLLM rollout worker with Tunix sampler."""
 
 from absl import logging
+import gc
 import hashlib
 import os
 import pickle
@@ -278,6 +279,7 @@ class DistributedVllmRollout(base_rollout.BaseRollout):
     self._shutdown_event = threading.Event()
     self._close_lock = threading.Lock()
     self._closed = False
+    self._post_init_gc_completed = False
     self._latest_params_payload: list[tuple[Any, Any]] | None = None
     self._latest_filter_types: Optional[Tuple[Any, ...]] = None
     self._split_hosts = (
@@ -288,32 +290,74 @@ class DistributedVllmRollout(base_rollout.BaseRollout):
       self._local_rollout = self._create_local_rollout(
           load_initial_checkpoint=not self._split_hosts
       )
+      if self._split_hosts:
+        # vLLM startup can leave finalizable transport objects behind. Collect
+        # them before opening the cross-host socket so a stale finalizer cannot
+        # close a newly reused listener file descriptor.
+        gc.collect()
+        self._post_init_gc_completed = True
+        self.start_listener()
 
     if (
         self._split_hosts
-        and jax.process_index() == self._rollout_owner_process_index
+        and jax.process_index() == self._actor_owner_process_index
     ):
-      self._listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-      self._listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-      self._listener.bind(("", _host_transport_port()))
-      self._listener.listen(128)
-      self._listener.settimeout(None)
-      logging.info(
-          "Distributed rollout listener is ready on process %d at"
-          " 0.0.0.0:%d; process_hosts=%s",
-          jax.process_index(),
-          _host_transport_port(),
-          self._process_hosts,
-      )
-      self._listener_thread = threading.Thread(
-          target=self._serve_messages,
-          name="distributed-vllm-rollout-listener",
-          daemon=True,
-      )
-      self._listener_thread.start()
-
-    if self._split_hosts and jax.process_index() == self._actor_owner_process_index:
       self.update_params(nnx.state(model))
+
+  def start_listener(self) -> None:
+    """Starts the split-host listener after local vLLM initialization cleanup.
+
+    The rollout owner performs its normal post-initialization collection before
+    calling this method. Opening the listener afterwards keeps its file
+    descriptor outside that cleanup boundary.
+    """
+    if (
+        not self._split_hosts
+        or jax.process_index() != self._rollout_owner_process_index
+    ):
+      return
+
+    if self._listener is not None:
+      try:
+        if (
+            self._listener.fileno() >= 0
+            and self._listener.getsockopt(
+                socket.SOL_SOCKET, socket.SO_ACCEPTCONN
+            )
+        ):
+          return
+      except OSError:
+        pass
+      try:
+        self._listener.close()
+      except OSError:
+        pass
+      self._listener = None
+
+    self._listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    self._listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    self._listener.bind(("", _host_transport_port()))
+    self._listener.listen(128)
+    self._listener.settimeout(None)
+    logging.info(
+        "Distributed rollout listener is ready after cluster cleanup on"
+        " process %d at 0.0.0.0:%d (fd=%d); process_hosts=%s",
+        jax.process_index(),
+        _host_transport_port(),
+        self._listener.fileno(),
+        self._process_hosts,
+    )
+    self._listener_thread = threading.Thread(
+        target=self._serve_messages,
+        name="distributed-vllm-rollout-listener",
+        daemon=True,
+    )
+    self._listener_thread.start()
+
+  @property
+  def post_init_gc_completed(self) -> bool:
+    """Whether this rollout already ran RLCluster's post-init collection."""
+    return self._post_init_gc_completed
 
   def _create_local_rollout(
       self, *, load_initial_checkpoint: bool
@@ -430,6 +474,10 @@ class DistributedVllmRollout(base_rollout.BaseRollout):
   def serve_until_shutdown(self) -> None:
     if not self.should_serve_only():
       return
+    # Keep this idempotent check at the final service boundary as well. If a
+    # later initialization cleanup invalidates the first post-GC listener,
+    # recreate it before announcing service readiness.
+    self.start_listener()
     logging.info(
         "Process %d entering distributed rollout service mode.",
         jax.process_index(),
@@ -591,6 +639,12 @@ class DistributedVllmRollout(base_rollout.BaseRollout):
       except OSError:
         if self._shutdown_event.is_set():
           return
+        logging.exception(
+            "Distributed rollout listener failed while accepting a connection"
+            " on process %d (fd=%d).",
+            jax.process_index(),
+            self._listener.fileno(),
+        )
         raise
       threading.Thread(
           target=self._handle_message_connection,
