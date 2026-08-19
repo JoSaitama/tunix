@@ -152,6 +152,10 @@ echo "  COMMAND=${cmd_string}"
 run_worker() (
   local logfile="$1"
   echo "=== WORKER 0 LOG: $(hostname) ==="
+  # A distributed JAX peer failure aborts the surviving process. Large core
+  # dumps can otherwise consume most of a TPU VM boot disk without helping
+  # this experiment's normal diagnostics, which are already captured in logs.
+  ulimit -c 0 || true
   cd "${REPO}"
   source "${VENV}/bin/activate"
   mkdir -p "${LOG_DIR}" "${TB_DIR}" "${CKPT_DIR}" "${TMP_DIR}"
@@ -200,6 +204,7 @@ run_remote() {
   remote_script=$(cat <<EOF
 set -euo pipefail
 echo "=== WORKER 1 LOG: \$(hostname) ==="
+ulimit -c 0 || true
 cd ${REPO}
 source ${VENV}/bin/activate
 mkdir -p ${LOG_DIR} ${TB_DIR} ${CKPT_DIR} ${TMP_DIR}

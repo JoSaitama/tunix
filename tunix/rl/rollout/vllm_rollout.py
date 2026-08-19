@@ -298,6 +298,13 @@ class DistributedVllmRollout(base_rollout.BaseRollout):
       self._listener.bind(("", _host_transport_port()))
       self._listener.listen(128)
       self._listener.settimeout(None)
+      logging.info(
+          "Distributed rollout listener is ready on process %d at"
+          " 0.0.0.0:%d; process_hosts=%s",
+          jax.process_index(),
+          _host_transport_port(),
+          self._process_hosts,
+      )
       self._listener_thread = threading.Thread(
           target=self._serve_messages,
           name="distributed-vllm-rollout-listener",
@@ -374,16 +381,44 @@ class DistributedVllmRollout(base_rollout.BaseRollout):
   def _connect_to_process(self, process_index: int) -> socket.socket:
     last_error = None
     host = self._process_hosts[process_index]
-    for _ in range(60):
+    port = _host_transport_port()
+    max_attempts = int(
+        os.environ.get("TUNIX_DISTRIBUTED_ROLLOUT_CONNECT_ATTEMPTS", "300")
+    )
+    if max_attempts < 1:
+      raise ValueError(
+          "TUNIX_DISTRIBUTED_ROLLOUT_CONNECT_ATTEMPTS must be positive;"
+          f" got {max_attempts}."
+      )
+    for attempt in range(1, max_attempts + 1):
       try:
-        conn = socket.create_connection((host, _host_transport_port()), 5.0)
+        conn = socket.create_connection((host, port), 5.0)
         conn.settimeout(None)
+        logging.info(
+            "Connected to distributed rollout owner at %s:%d on attempt"
+            " %d/%d.",
+            host,
+            port,
+            attempt,
+            max_attempts,
+        )
         return conn
       except OSError as exc:  # pragma: no cover - runtime retry path
         last_error = exc
+        if attempt == 1 or attempt % 15 == 0:
+          logging.warning(
+              "Waiting for distributed rollout owner at %s:%d (attempt"
+              " %d/%d): %s",
+              host,
+              port,
+              attempt,
+              max_attempts,
+              exc,
+          )
         time.sleep(1.0)
     raise ConnectionError(
-        f"Failed to connect to rollout owner host {host!r}."
+        "Failed to connect to rollout owner at"
+        f" {host!r}:{port} after {max_attempts} attempts."
     ) from last_error
 
   def should_serve_only(self) -> bool:
