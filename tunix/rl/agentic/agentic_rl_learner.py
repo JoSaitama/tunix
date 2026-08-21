@@ -992,15 +992,16 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       # --- Weight Sync Logic ---
       micro_batches_since_last_sync += 1
       if micro_batches_since_last_sync == micro_batches_per_full_batch:
+        completed_global_step = self.rl_cluster.global_steps + 1
         global_step_time = time.time() - self._global_step_start_time
         logging.info(
-            f"Global step {self.rl_cluster.global_steps} completed in"
+            f"Global step {completed_global_step} completed in"
             f" {global_step_time:.2f} seconds."
         )
         self.rl_cluster.buffer_metrics_async(
             {"perf/global_step_time": (global_step_time, np.mean)},
             mode=rl_cluster_lib.Mode.TRAIN,
-            step=self.rl_cluster.global_steps,
+            step=completed_global_step,
         )
         if self.should_sync_weights:
           logging.info("Requesting sync lock to sync weights...")
