@@ -688,23 +688,5 @@ vllm_config:
         role_to_mesh[rl_cluster_lib.Role.ACTOR],
     )
 
-  def test_split_mesh_can_swap_actor_and_rollout_device_slices(self):
-    pipeline = self._split_mesh_pipeline()
-
-    with mock.patch.dict(
-        os.environ, {"TUNIX_SWAP_ACTOR_ROLLOUT_MESHES": "1"}
-    ):
-      role_to_mesh = self._create_fake_role_to_mesh(pipeline)
-
-    self.assertSequenceEqual(
-        role_to_mesh[rl_cluster_lib.Role.ROLLOUT].devices.flatten().tolist(),
-        [0, 1],
-    )
-    self.assertSequenceEqual(
-        role_to_mesh[rl_cluster_lib.Role.ACTOR].devices.flatten().tolist(),
-        [2, 3],
-    )
-
-
 if __name__ == "__main__":
   absltest.main()

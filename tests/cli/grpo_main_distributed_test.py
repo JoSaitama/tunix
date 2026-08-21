@@ -124,7 +124,7 @@ class GrpoMainDistributedTest(absltest.TestCase):
     self.assertIsNone(local_host)
     self.assertIsNone(process_hosts)
 
-  def test_resume_rejects_actor_host_rank_change(self):
+  def test_resume_accepts_backend_actor_host_rank_change(self):
     candidates = ["10.128.0.25", "10.128.0.24"]
     rank_ordered_hosts = ["10.128.0.24", "10.128.0.25"]
     with mock.patch.dict(
@@ -154,8 +154,12 @@ class GrpoMainDistributedTest(absltest.TestCase):
     ), mock.patch.object(
         grpo_main_distributed.jax, "process_count", return_value=2
     ):
-      with self.assertRaisesRegex(RuntimeError, "actor/checkpoint mesh"):
-        grpo_main_distributed._initialize_jax_distributed()
+      local_host, resolved_hosts = (
+          grpo_main_distributed._initialize_jax_distributed()
+      )
+
+    self.assertEqual(local_host, "10.128.0.24")
+    self.assertEqual(resolved_hosts, rank_ordered_hosts)
 
   def test_main_emits_normal_teardown_boundaries(self):
     registered_callbacks = []

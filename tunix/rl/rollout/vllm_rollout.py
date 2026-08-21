@@ -360,7 +360,7 @@ class DistributedVllmRollout(base_rollout.BaseRollout):
     )
 
   def _is_driver_shutdown_error(self, exc: Exception) -> bool:
-    return "Driver shut down." in str(exc)
+    return "Driver shut down" in str(exc)
 
   def _restart_local_rollout(
       self,
@@ -502,7 +502,7 @@ class DistributedVllmRollout(base_rollout.BaseRollout):
         return response
 
       error_text = str(response.get("error", ""))
-      if attempt == 0 and "Driver shut down." in error_text:
+      if attempt == 0 and "Driver shut down" in error_text:
         logging.warning(
             "Distributed rollout request %s hit a shut down vLLM driver on"
             " the rollout owner; retrying once.",

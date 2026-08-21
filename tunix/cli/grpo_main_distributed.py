@@ -142,17 +142,6 @@ def _initialize_jax_distributed() -> tuple[str | None, list[str] | None]:
         f" process_hosts={process_hosts}."
     )
 
-  if (
-      os.getenv("TUNIX_RESUME_ACTOR_CHECKPOINT_ROOT")
-      and process_hosts[0] != candidate_hosts[0]
-  ):
-    raise RuntimeError(
-        "Checkpoint continuation requires the launcher host to remain JAX"
-        " process 0 because process 0 owns the actor/checkpoint mesh:"
-        f" launcher_host={candidate_hosts[0]},"
-        f" process_hosts={process_hosts}."
-    )
-
   normalized_hosts = ",".join(process_hosts)
   os.environ["TUNIX_PROCESS_HOSTS"] = normalized_hosts
   return local_host, process_hosts

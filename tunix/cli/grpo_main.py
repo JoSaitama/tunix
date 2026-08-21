@@ -198,39 +198,6 @@ class GrpoPipeline(config.HyperParameters):
       if owner not in owner_order:
         owner_order.append(owner)
 
-    swap_actor_rollout = os.getenv(
-        "TUNIX_SWAP_ACTOR_ROLLOUT_MESHES", "0"
-    )
-    if swap_actor_rollout not in ("0", "1"):
-      raise ValueError(
-          "TUNIX_SWAP_ACTOR_ROLLOUT_MESHES must be 0 or 1; got"
-          f" {swap_actor_rollout!r}."
-      )
-    if swap_actor_rollout == "1":
-      actor_owner = role_to_owner.get(rl_cluster_lib.Role.ACTOR)
-      rollout_owner = role_to_owner.get(rl_cluster_lib.Role.ROLLOUT)
-      if actor_owner is None or rollout_owner is None:
-        raise ValueError(
-            "TUNIX_SWAP_ACTOR_ROLLOUT_MESHES requires active actor and rollout"
-            " roles."
-        )
-      if actor_owner == rollout_owner:
-        raise ValueError(
-            "TUNIX_SWAP_ACTOR_ROLLOUT_MESHES requires separate actor and rollout"
-            " meshes."
-        )
-      actor_position = owner_order.index(actor_owner)
-      rollout_position = owner_order.index(rollout_owner)
-      owner_order[actor_position], owner_order[rollout_position] = (
-          owner_order[rollout_position],
-          owner_order[actor_position],
-      )
-      logging.warning(
-          "Swapping actor/rollout device-slice allocation for physical-role"
-          " diagnosis; owner_order=%s",
-          [owner.value for owner in owner_order],
-      )
-
     owner_to_mesh = {}
     owner_to_device_slice = {}
     device_offset = 0
