@@ -36,6 +36,18 @@ CONSTANT_LR="${CONSTANT_LR:-1e-6}"
 MAX_RESPONSE_LENGTH="${MAX_RESPONSE_LENGTH:-16384}"
 TRAIN_MICRO_BATCH_SIZE="${TRAIN_MICRO_BATCH_SIZE:-2}"
 MAX_CONCURRENCY="${MAX_CONCURRENCY:-1024}"
+# Preserve the original August 5 runtime setting by default. Setting this to
+# false is an explicit diagnostic/mitigation for a suspected vLLM asynchronous
+# DP scheduling deadlock, not part of the historical training configuration.
+VLLM_ASYNC_SCHEDULING="${VLLM_ASYNC_SCHEDULING:-true}"
+case "$VLLM_ASYNC_SCHEDULING" in
+  true|false) ;;
+  *)
+    echo "VLLM_ASYNC_SCHEDULING must be true or false; got $VLLM_ASYNC_SCHEDULING" >&2
+    exit 2
+    ;;
+esac
+export VLLM_ASYNC_SCHEDULING
 if [[ -z "${RESUME_RUN_ROOT:-}" ]]; then
   if [[ "$METHOD" != "group_loo_policy" ]]; then
     echo "RESUME_RUN_ROOT is required when METHOD=$METHOD" >&2
@@ -161,6 +173,7 @@ echo "MINI_BATCH_SIZE=$MINI_BATCH_SIZE"
 echo "TRAIN_MICRO_BATCH_SIZE=$TRAIN_MICRO_BATCH_SIZE"
 echo "MAX_CONCURRENCY=$MAX_CONCURRENCY"
 echo "MAX_RESPONSE_LENGTH=$MAX_RESPONSE_LENGTH"
+echo "VLLM_ASYNC_SCHEDULING=$VLLM_ASYNC_SCHEDULING"
 echo "LR_SCHEDULE=constant_schedule"
 echo "LR=$CONSTANT_LR"
 echo "CONTINUATION_DATA_SEED=$CONTINUATION_DATA_SEED"

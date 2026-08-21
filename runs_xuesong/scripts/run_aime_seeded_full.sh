@@ -60,6 +60,14 @@ export TUNIX_GRPO_NUM_GENERATIONS=8
 export TUNIX_DBC_DECISIONS_PATH="${LOG_ROOT}/selection.jsonl"
 export TUNIX_DATA_MANIFEST_PATH="${LOG_ROOT}/data_manifest.json"
 export TUNIX_TRAINING_SUMMARY_PATH="${LOG_ROOT}/training_summary.json"
+VLLM_ASYNC_SCHEDULING="${VLLM_ASYNC_SCHEDULING:-true}"
+case "$VLLM_ASYNC_SCHEDULING" in
+  true|false) ;;
+  *)
+    echo "VLLM_ASYNC_SCHEDULING must be true or false; got $VLLM_ASYNC_SCHEDULING" >&2
+    exit 2
+    ;;
+esac
 mkdir -p "$RUN_ROOT" "$LOG_ROOT" "$CACHE_ROOT"
 exec > >(tee "${LOG_ROOT}/nohup.log") 2>&1
 
@@ -150,6 +158,7 @@ ARGS=(
   agentic_grpo_config.beta=0.001
   agentic_grpo_config.loss_agg_mode=sequence-mean-token-mean
   agentic_grpo_config.degenerate_group_masking=true
+  "vllm_config.async_scheduling=${VLLM_ASYNC_SCHEDULING}"
   "rl_training_config.checkpointing_options.save_interval_steps=${CHECKPOINT_INTERVAL}"
   rl_training_config.checkpointing_options.max_to_keep=1
 )
@@ -158,6 +167,7 @@ ARGS=(
 echo "Method: $METHOD"
 echo "Run: $RUN_ROOT"
 echo "Logs: $LOG_ROOT"
+echo "vLLM async scheduling: $VLLM_ASYNC_SCHEDULING"
 set +e
 bash "${REPO}/runs_xuesong/scripts/run_official_like_dual_worker.sh" "${ARGS[@]}" "$@"
 status=$?
@@ -182,6 +192,7 @@ LR_SCHEDULE=${SUMMARY_LR_SCHEDULE}
 LR_INIT=${SUMMARY_LR_INIT}
 LR_DECAY_STEPS=${SUMMARY_LR_DECAY_STEPS}
 WARMUP=none
+VLLM_ASYNC_SCHEDULING=${VLLM_ASYNC_SCHEDULING}
 EXIT_CODE=${status}
 EOF
 exit "$status"
