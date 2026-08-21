@@ -25,7 +25,7 @@ from concurrent.futures import Future
 import os
 import threading
 import time
-from typing import Any, Callable, Dict, Optional, Union
+from typing import Any, Callable, Dict, Optional, TypeVar, Union
 
 from absl import logging
 from vllm import envs
@@ -47,6 +47,7 @@ envs.VLLM_ENABLE_V1_MULTIPROCESSING = False
 
 StreamCallback = Callable[[Union[RequestOutput, PoolingRequestOutput]], None]
 RequestFuture = Future[Union[RequestOutput, PoolingRequestOutput]]
+_T = TypeVar("_T")
 
 
 class VLLMInProcessDriver:
@@ -74,6 +75,10 @@ class VLLMInProcessDriver:
 
     self._pending: Dict[str, RequestFuture] = {}
     self._last_error: Optional[Exception] = None
+    self._last_progress_time = time.monotonic()
+    self._last_output_time = self._last_progress_time
+    self._completed_request_count = 0
+    self._last_health_log_time = 0.0
 
     if auto_start:
       self.start()
@@ -119,6 +124,12 @@ class VLLMInProcessDriver:
   ) -> RequestFuture:
     future: RequestFuture = Future()
     with self._engine_lock:
+      if self._last_error is not None:
+        raise RuntimeError(
+            "Driver shut down after its engine loop failed."
+        ) from self._last_error
+      if self._loop_thread is None or not self._loop_thread.is_alive():
+        raise RuntimeError("Driver shut down because its engine loop is not running.")
       if request_id in self._pending:
         raise ValueError(f"Request {request_id} already pending.")
       self._pending[request_id] = future
@@ -155,11 +166,75 @@ class VLLMInProcessDriver:
 
   def _log_loop(self) -> None:
     while not self._stop_event.is_set():
+      acquired = self._engine_lock.acquire(timeout=1.0)
       try:
-        self._llm_engine.do_log_stats()
+        if acquired:
+          self._llm_engine.do_log_stats()
+        self._maybe_log_health(engine_lock_busy=not acquired)
       except Exception:  # pylint: disable=broad-exception-caught
         logging.exception("log_stats failed")
+      finally:
+        if acquired:
+          self._engine_lock.release()
       self._stop_event.wait(self._log_stats_interval_s)
+
+  def _maybe_log_health(self, *, engine_lock_busy: bool) -> None:
+    """Emits one bounded heartbeat that distinguishes a stuck engine step."""
+    now = time.monotonic()
+    if now - self._last_health_log_time < 60.0:
+      return
+    self._last_health_log_time = now
+    logging.info(
+        "VLLM_DRIVER_HEALTH loop_alive=%s engine_lock_busy=%s pending=%d"
+        " last_step_return_age_s=%.1f last_output_age_s=%.1f completed=%d"
+        " last_error=%r",
+        self._loop_thread is not None and self._loop_thread.is_alive(),
+        engine_lock_busy,
+        len(self._pending),
+        now - self._last_progress_time,
+        now - self._last_output_time,
+        self._completed_request_count,
+        self._last_error,
+    )
+
+  def run_engine_maintenance(
+      self, operation_name: str, operation: Callable[[], _T]
+  ) -> _T:
+    """Runs a cache/weight operation exclusively against an idle engine.
+
+    The engine loop and stats thread otherwise call into the same ``LLMEngine``
+    concurrently.  KV-cache deletion/reinitialization and weight replacement are
+    control-plane operations and must not overlap either of those calls.
+    """
+    wait_start = time.monotonic()
+    logging.info(
+        "VLLM_ENGINE_MAINTENANCE phase=lock_wait operation=%s", operation_name
+    )
+    with self._engine_lock:
+      wait_seconds = time.monotonic() - wait_start
+      unfinished = self._llm_engine.has_unfinished_requests()
+      if self._pending or unfinished:
+        raise RuntimeError(
+            "Cannot run vLLM engine maintenance while requests are pending:"
+            f" operation={operation_name!r}, pending_futures={len(self._pending)},"
+            f" engine_has_unfinished_requests={unfinished}."
+        )
+      logging.info(
+          "VLLM_ENGINE_MAINTENANCE phase=lock_acquired operation=%s"
+          " wait_s=%.3f",
+          operation_name,
+          wait_seconds,
+      )
+      operation_start = time.monotonic()
+      try:
+        return operation()
+      finally:
+        self._last_progress_time = time.monotonic()
+        logging.info(
+            "VLLM_ENGINE_MAINTENANCE phase=complete operation=%s elapsed_s=%.3f",
+            operation_name,
+            self._last_progress_time - operation_start,
+        )
 
   def cancel(self, request_id: str) -> None:
     with self._engine_lock:
@@ -244,7 +319,9 @@ class VLLMInProcessDriver:
           100,
       )
       if self._llm_engine.has_unfinished_requests():
-        return self._llm_engine.step()
+        outputs = self._llm_engine.step()
+        self._last_progress_time = time.monotonic()
+        return outputs
       return []
 
   def _handle_output(
@@ -262,11 +339,18 @@ class VLLMInProcessDriver:
     logging.debug(
         f"VLLMInProcessDriver completed request id: {output.request_id}."
     )
+    self._last_output_time = time.monotonic()
+    self._completed_request_count += 1
     future.set_result(output)
 
   def _record_error(self, exc: Exception) -> None:
-    logging.debug("VLLMInProcessDriver encountered an error: %s", exc)
+    logging.error(
+        "VLLMInProcessDriver engine loop terminated: %s",
+        exc,
+        exc_info=(type(exc), exc, exc.__traceback__),
+    )
     self._last_error = exc
+    self._last_progress_time = time.monotonic()
     with self._engine_lock:
       pending = list(self._pending.values())
       self._pending.clear()

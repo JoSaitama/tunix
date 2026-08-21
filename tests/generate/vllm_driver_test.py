@@ -156,6 +156,45 @@ class VllmDriverAsyncTest(absltest.TestCase):
     # Wait for the log thread to call into the engine's do_log_stats.
     self.assertTrue(engine.log_called.wait(timeout=1.0))
 
+  def test_engine_maintenance_runs_exclusively_when_idle(self):
+    engine = _FakeLLMEngine([])
+    driver = VLLMInProcessDriver(llm_engine=engine, auto_start=False)
+    self.addCleanup(driver.shutdown)
+
+    observed = []
+    result = driver.run_engine_maintenance(
+        "test", lambda: observed.append("ran") or "complete"
+    )
+
+    self.assertEqual(result, "complete")
+    self.assertEqual(observed, ["ran"])
+
+  def test_engine_maintenance_rejects_pending_requests(self):
+    engine = _FakeLLMEngine([])
+    driver = VLLMInProcessDriver(llm_engine=engine, auto_start=True)
+    self.addCleanup(driver.shutdown)
+    driver.submit_request(
+        request_id="req-0",
+        prompt={"prompt_token_ids": [1]},
+        params=object(),
+    )
+
+    with self.assertRaisesRegex(RuntimeError, "requests are pending"):
+      driver.run_engine_maintenance("test", lambda: None)
+
+  def test_submit_fails_fast_after_engine_loop_error(self):
+    engine = _FakeLLMEngine([])
+    driver = VLLMInProcessDriver(llm_engine=engine, auto_start=False)
+    self.addCleanup(driver.shutdown)
+    driver._record_error(ValueError("engine failed"))
+
+    with self.assertRaisesRegex(RuntimeError, "Driver shut down"):
+      driver.submit_request(
+          request_id="req-after-failure",
+          prompt={"prompt_token_ids": [1]},
+          params=object(),
+      )
+
 
 if __name__ == "__main__":
   absltest.main()

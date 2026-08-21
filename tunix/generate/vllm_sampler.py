@@ -183,18 +183,37 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
   ):
     del filter_types
 
+    if self._driver is not None:
+      self._driver.run_engine_maintenance(
+          "update_params",
+          lambda: self._update_params_on_idle_engine(updated_weights),
+      )
+      return
+
+    self._update_params_on_idle_engine(updated_weights)
+
+  def _update_params_on_idle_engine(
+      self, updated_weights: jaxtyping.PyTree
+  ) -> None:
+    """Replaces weights and KV cache while the vLLM engine is idle."""
+
+    logging.info("VLLM_WEIGHT_SYNC phase=cache_delete_start")
     if self.llm is not None:
       self.llm.reset_prefix_cache()
       self.llm.collective_rpc("delete_kv_cache") # will free hbm
     elif self._driver is not None:
       self._driver.llm_engine.reset_prefix_cache()
       self._driver.llm_engine.collective_rpc("delete_kv_cache")
-    
+    logging.info("VLLM_WEIGHT_SYNC phase=cache_delete_complete")
+
     # Perform explicit garbage collection and synchronization to free up HBM memory before loading new weights
+    logging.info("VLLM_WEIGHT_SYNC phase=jax_cache_clear_start")
     gc.collect()
     jax.clear_caches()
     jax.effects_barrier()
+    logging.info("VLLM_WEIGHT_SYNC phase=jax_cache_clear_complete")
 
+    logging.info("VLLM_WEIGHT_SYNC phase=weight_transfer_start")
     if self.to_hf_key_mappings:
       # Mapped Weight Sync (e.g. Vanilla -> vLLM)
       utils.transfer_state_with_mappings(
@@ -237,11 +256,14 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
           reshard_fn=reshard.reshard_pytree,
           delete_dst_buffers=True,  # Ensure old weights are deleted to free up HBM memory
       )
-    
+    logging.info("VLLM_WEIGHT_SYNC phase=weight_transfer_complete")
+
+    logging.info("VLLM_WEIGHT_SYNC phase=cache_reinitialize_start")
     if self.llm is not None:
       self.llm.collective_rpc("reinitialize_kv_cache")
     elif self._driver is not None:
       self._driver.llm_engine.collective_rpc("reinitialize_kv_cache")
+    logging.info("VLLM_WEIGHT_SYNC phase=cache_reinitialize_complete")
 
   def load_checkpoint(self, path_or_weights: str | jaxtyping.PyTree):
     # TODO(b/434741253): Consider support orbax checkpoint loading

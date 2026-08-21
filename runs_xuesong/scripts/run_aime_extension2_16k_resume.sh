@@ -5,8 +5,8 @@ REPO="${REPO:-/home/jason_chia925_gmail_com/Project/tunix}"
 TPU_NAME="${TPU_NAME:-node-v5p-16-ziao1}"
 ZONE="${ZONE:-us-central1-a}"
 MODE="${1:-}"
-if [[ "$MODE" != "smoke" && "$MODE" != "formal" ]]; then
-  echo "usage: $0 {smoke|formal}" >&2
+if [[ "$MODE" != "smoke" && "$MODE" != "transition" && "$MODE" != "formal" ]]; then
+  echo "usage: $0 {smoke|transition|formal}" >&2
   exit 2
 fi
 
@@ -19,6 +19,7 @@ CONTINUATION_DATA_SEED="${CONTINUATION_DATA_SEED:-$((42 + SEED))}"
 CONSTANT_LR="${CONSTANT_LR:-1e-6}"
 MAX_RESPONSE_LENGTH="${MAX_RESPONSE_LENGTH:-16384}"
 TRAIN_MICRO_BATCH_SIZE="${TRAIN_MICRO_BATCH_SIZE:-2}"
+MAX_CONCURRENCY="${MAX_CONCURRENCY:-1024}"
 RESUME_RUN_ROOT="${RESUME_RUN_ROOT:-${REPO}/runs_xuesong/runs/grpo_aime_dtv_selfinf_group_loo_policy_seed0_clean_20260805_095513}"
 RESUME_ACTOR_CHECKPOINT_ROOT="${RESUME_RUN_ROOT}/checkpoints/actor"
 RANKMAP_POINTER="${REPO}/runs_xuesong/logs/latest_teardown_diagnostic_root.txt"
@@ -122,6 +123,19 @@ case "$MODE" in
     CHECKPOINT_SAVE_INTERVAL=1000000
     export TUNIX_SKIP_FINAL_CHECKPOINT=1
     ;;
+  transition)
+    # The one-step smoke exits immediately after the first restored update and
+    # cannot detect a post-update rollout freeze.  This gate deliberately runs
+    # two full-size updates so it must enter the next rollout after step 315.
+    ADDITIONAL_STEPS=2
+    TARGET_STEP=$((RESUME_STEP + ADDITIONAL_STEPS))
+    BATCH_SIZE="${TRANSITION_BATCH_SIZE:-128}"
+    MINI_BATCH_SIZE="$BATCH_SIZE"
+    NUM_BATCHES=314
+    NUM_TRAIN_EPOCHS=2
+    CHECKPOINT_SAVE_INTERVAL=1000000
+    export TUNIX_SKIP_FINAL_CHECKPOINT=1
+    ;;
   formal)
     ADDITIONAL_STEPS=64
     TARGET_STEP=$((RESUME_STEP + ADDITIONAL_STEPS))
@@ -147,6 +161,10 @@ esac
 }
 [[ "$TRAIN_MICRO_BATCH_SIZE" =~ ^[1-9][0-9]*$ ]] || {
   echo "TRAIN_MICRO_BATCH_SIZE must be a positive integer" >&2
+  exit 2
+}
+[[ "$MAX_CONCURRENCY" =~ ^[1-9][0-9]*$ ]] || {
+  echo "MAX_CONCURRENCY must be a positive integer" >&2
   exit 2
 }
 (( MINI_BATCH_SIZE % TRAIN_MICRO_BATCH_SIZE == 0 )) || {
@@ -185,6 +203,7 @@ echo "ADDITIONAL_STEPS=$ADDITIONAL_STEPS"
 echo "BATCH_SIZE=$BATCH_SIZE"
 echo "MINI_BATCH_SIZE=$MINI_BATCH_SIZE"
 echo "TRAIN_MICRO_BATCH_SIZE=$TRAIN_MICRO_BATCH_SIZE"
+echo "MAX_CONCURRENCY=$MAX_CONCURRENCY"
 echo "MAX_RESPONSE_LENGTH=$MAX_RESPONSE_LENGTH"
 echo "LR_SCHEDULE=constant_schedule"
 echo "LR=$CONSTANT_LR"
@@ -212,6 +231,7 @@ exec "${REPO}/runs_xuesong/scripts/run_aime_seeded_full.sh" \
   "rollout_config.total_generation_steps=${MAX_RESPONSE_LENGTH}" \
   "rollout_config.max_tokens_to_generate=${MAX_RESPONSE_LENGTH}" \
   "agentic_grpo_config.max_response_length=${MAX_RESPONSE_LENGTH}" \
+  "agentic_grpo_config.max_concurrency=${MAX_CONCURRENCY}" \
   "rl_training_config.mini_batch_size=${MINI_BATCH_SIZE}" \
   "rl_training_config.train_micro_batch_size=${TRAIN_MICRO_BATCH_SIZE}" \
   rl_training_config.actor_optimizer_config.learning_rate="$CONSTANT_LR" \

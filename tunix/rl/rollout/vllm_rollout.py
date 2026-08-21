@@ -277,6 +277,7 @@ class DistributedVllmRollout(base_rollout.BaseRollout):
     self._listener_thread: threading.Thread | None = None
     self._shutdown_event = threading.Event()
     self._close_lock = threading.Lock()
+    self._restart_lock = threading.Lock()
     self._closed = False
     self._latest_params_payload: list[tuple[Any, Any]] | None = None
     self._latest_filter_types: Optional[Tuple[Any, ...]] = None
@@ -538,9 +539,17 @@ class DistributedVllmRollout(base_rollout.BaseRollout):
 
       if message_type == "generate_request":
         request_id = message["request_id"]
+        logging.info(
+            "DISTRIBUTED_ROLLOUT_REQUEST phase=local_generate_start"
+            " request_id=%s prompts=%d process=%d",
+            request_id,
+            len(message["prompts"]),
+            jax.process_index(),
+        )
+        request_rollout = self._local_rollout
         try:
           try:
-            output = self._local_rollout.generate(
+            output = request_rollout.generate(
                 message["prompts"],
                 message["rollout_config"],
                 **message["kwargs"],
@@ -548,7 +557,9 @@ class DistributedVllmRollout(base_rollout.BaseRollout):
           except RuntimeError as exc:
             if not self._is_driver_shutdown_error(exc):
               raise
-            self._restart_local_rollout()
+            with self._restart_lock:
+              if self._local_rollout is request_rollout:
+                self._restart_local_rollout()
             output = self._local_rollout.generate(
                 message["prompts"],
                 message["rollout_config"],
@@ -568,6 +579,12 @@ class DistributedVllmRollout(base_rollout.BaseRollout):
               },
           )
           return
+        logging.info(
+            "DISTRIBUTED_ROLLOUT_REQUEST phase=local_generate_complete"
+            " request_id=%s process=%d",
+            request_id,
+            jax.process_index(),
+        )
         _send_message(
             conn,
             {
@@ -590,10 +607,11 @@ class DistributedVllmRollout(base_rollout.BaseRollout):
           except RuntimeError as exc:
             if not self._is_driver_shutdown_error(exc):
               raise
-            self._restart_local_rollout(
-                params_payload=message["params"],
-                filter_types=message.get("filter_types"),
-            )
+            with self._restart_lock:
+              self._restart_local_rollout(
+                  params_payload=message["params"],
+                  filter_types=message.get("filter_types"),
+              )
         except Exception as exc:
           logging.exception("Distributed rollout weight sync failed.")
           _send_message(conn, {"status": "error", "error": repr(exc)})

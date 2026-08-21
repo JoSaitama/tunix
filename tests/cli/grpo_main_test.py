@@ -596,7 +596,8 @@ class RLTrainingConfigTest(absltest.TestCase):
 
 class SplitMeshConfigTest(absltest.TestCase):
 
-  def test_split_mesh_uses_explicit_role_meshes(self):
+  @staticmethod
+  def _split_mesh_pipeline():
     extra = """
 training_mode: "agentic_grpo"
 data_module: "tunix.cli.recipes.deepscaler_data"
@@ -643,7 +644,10 @@ vllm_config:
           "shape": "(1,2)",
           "axis_names": "('fsdp','tp')",
       }
+    return pipeline
 
+  @staticmethod
+  def _create_fake_role_to_mesh(pipeline):
     fake_devices = list(range(4))
 
     class FakeMesh:
@@ -657,7 +661,11 @@ vllm_config:
       with mock.patch.object(
           grpo_main.jax.sharding, "Mesh", side_effect=FakeMesh
       ):
-        role_to_mesh = pipeline.create_role_to_mesh()
+        return pipeline.create_role_to_mesh()
+
+  def test_split_mesh_uses_explicit_role_meshes(self):
+    pipeline = self._split_mesh_pipeline()
+    role_to_mesh = self._create_fake_role_to_mesh(pipeline)
 
     self.assertSequenceEqual(
         role_to_mesh[rl_cluster_lib.Role.ACTOR].devices.flatten().tolist(),
@@ -678,6 +686,23 @@ vllm_config:
     self.assertIs(
         role_to_mesh[rl_cluster_lib.Role.REFERENCE],
         role_to_mesh[rl_cluster_lib.Role.ACTOR],
+    )
+
+  def test_split_mesh_can_swap_actor_and_rollout_device_slices(self):
+    pipeline = self._split_mesh_pipeline()
+
+    with mock.patch.dict(
+        os.environ, {"TUNIX_SWAP_ACTOR_ROLLOUT_MESHES": "1"}
+    ):
+      role_to_mesh = self._create_fake_role_to_mesh(pipeline)
+
+    self.assertSequenceEqual(
+        role_to_mesh[rl_cluster_lib.Role.ROLLOUT].devices.flatten().tolist(),
+        [0, 1],
+    )
+    self.assertSequenceEqual(
+        role_to_mesh[rl_cluster_lib.Role.ACTOR].devices.flatten().tolist(),
+        [2, 3],
     )
 
 
