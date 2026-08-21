@@ -2,6 +2,9 @@
 set -euo pipefail
 
 REPO="${REPO:-/home/jason_chia925_gmail_com/Project/tunix}"
+TPU_NAME="${TPU_NAME:-node-v5p-16-ziao1}"
+ZONE="${ZONE:-us-central1-a}"
+export TPU_NAME ZONE
 MODE="${1:-}"
 if [[ "$MODE" != "smoke" && "$MODE" != "transition" && "$MODE" != "formal" ]]; then
   echo "usage: $0 {smoke|transition|formal}" >&2
@@ -147,6 +150,8 @@ printf '%s\n' "$RUN_ROOT" > \
 echo "EXTENSION=2"
 echo "MODE=$MODE"
 echo "METHOD=$METHOD"
+echo "TPU_NAME=$TPU_NAME"
+echo "ZONE=$ZONE"
 echo "SEED=$SEED"
 echo "RESUME_STEP=$RESUME_STEP"
 echo "TARGET_STEP=$TARGET_STEP"
