@@ -22,7 +22,9 @@ where multiprocessing is undesirable (e.g. JAX integration).
 from __future__ import annotations
 
 from concurrent.futures import Future
+import faulthandler
 import os
+import sys
 import threading
 import time
 from typing import Any, Callable, Dict, Optional, TypeVar, Union
@@ -79,6 +81,10 @@ class VLLMInProcessDriver:
     self._last_output_time = self._last_progress_time
     self._completed_request_count = 0
     self._last_health_log_time = 0.0
+    self._stuck_stack_dump_threshold_s = float(
+        os.environ.get("TUNIX_VLLM_STUCK_STACK_DUMP_SECONDS", "300")
+    )
+    self._stack_dumped_for_progress_time: float | None = None
 
     if auto_start:
       self.start()
@@ -181,6 +187,7 @@ class VLLMInProcessDriver:
   def _maybe_log_health(self, *, engine_lock_busy: bool) -> None:
     """Emits one bounded heartbeat that distinguishes a stuck engine step."""
     now = time.monotonic()
+    step_return_age_s = now - self._last_progress_time
     if now - self._last_health_log_time < 60.0:
       return
     self._last_health_log_time = now
@@ -191,11 +198,27 @@ class VLLMInProcessDriver:
         self._loop_thread is not None and self._loop_thread.is_alive(),
         engine_lock_busy,
         len(self._pending),
-        now - self._last_progress_time,
+        step_return_age_s,
         now - self._last_output_time,
         self._completed_request_count,
         self._last_error,
     )
+    if (
+        self._stuck_stack_dump_threshold_s > 0
+        and engine_lock_busy
+        and self._pending
+        and step_return_age_s >= self._stuck_stack_dump_threshold_s
+        and self._stack_dumped_for_progress_time != self._last_progress_time
+    ):
+      self._stack_dumped_for_progress_time = self._last_progress_time
+      logging.error(
+          "VLLM_DRIVER_STUCK_STACK_DUMP pending=%d"
+          " last_step_return_age_s=%.1f threshold_s=%.1f",
+          len(self._pending),
+          step_return_age_s,
+          self._stuck_stack_dump_threshold_s,
+      )
+      faulthandler.dump_traceback(file=sys.stderr, all_threads=True)
 
   def run_engine_maintenance(
       self, operation_name: str, operation: Callable[[], _T]

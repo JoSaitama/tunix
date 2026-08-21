@@ -209,7 +209,21 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
     # Perform explicit garbage collection and synchronization to free up HBM memory before loading new weights
     logging.info("VLLM_WEIGHT_SYNC phase=jax_cache_clear_start")
     gc.collect()
-    jax.clear_caches()
+    clear_jax_caches = os.environ.get(
+        "TUNIX_VLLM_CLEAR_JAX_CACHES", "true"
+    ).strip().lower()
+    if clear_jax_caches not in ("true", "false"):
+      raise ValueError(
+          "TUNIX_VLLM_CLEAR_JAX_CACHES must be true or false; got"
+          f" {clear_jax_caches!r}."
+      )
+    if clear_jax_caches == "true":
+      jax.clear_caches()
+    else:
+      logging.warning(
+          "VLLM_WEIGHT_SYNC phase=jax_clear_caches_skipped"
+          " reason=TUNIX_VLLM_CLEAR_JAX_CACHES_false"
+      )
     jax.effects_barrier()
     logging.info("VLLM_WEIGHT_SYNC phase=jax_cache_clear_complete")
 
