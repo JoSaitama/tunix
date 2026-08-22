@@ -137,6 +137,15 @@ def parse_args() -> argparse.Namespace:
         help="Figure 01 uncertainty band (default: std).",
     )
     parser.add_argument(
+        "--completion-central-coverage",
+        type=float,
+        default=0.98,
+        help=(
+            "Global completion-level diagnostic coverage. Its upper bound "
+            "is also used for the one-sided Self/DTV trend mask."
+        ),
+    )
+    parser.add_argument(
         "--overflow-bin-size",
         type=int,
         default=50,
@@ -152,9 +161,9 @@ def parse_args() -> argparse.Namespace:
         "--conflict-y-limits",
         nargs=2,
         type=float,
-        default=(-20.0, 1000.0),
+        default=None,
         metavar=("YMIN", "YMAX"),
-        help="Y limits for figure 04 (default: -20 1000).",
+        help="Explicit Figure 04 limits; default uses conflict quantiles.",
     )
     parser.add_argument(
         "--conflict-band-mode",
@@ -166,17 +175,17 @@ def parse_args() -> argparse.Namespace:
         "--decision-x-limits",
         nargs=2,
         type=float,
-        default=(-45.0, 90.0),
+        default=(-250.0, 450.0),
         metavar=("XMIN", "XMAX"),
-        help="Decision-region x-axis display limits (default: -45 90).",
+        help="Decision-region x-axis display limits (default: -250 450).",
     )
     parser.add_argument(
         "--decision-y-limits",
         nargs=2,
         type=float,
-        default=(0.0, 500.0),
+        default=(0.0, 850.0),
         metavar=("YMIN", "YMAX"),
-        help="Decision-region y-axis display limits (default: 0 500).",
+        help="Decision-region y-axis display limits (default: 0 850).",
     )
     parser.add_argument(
         "--drop-bin-size",
@@ -218,6 +227,8 @@ def parse_args() -> argparse.Namespace:
         parser.error("--overflow-bin-size must be positive")
     if not 0.0 <= args.overflow_label_threshold <= 1.0:
         parser.error("--overflow-label-threshold must be in [0, 1]")
+    if not 0.0 < args.completion_central_coverage <= 1.0:
+        parser.error("--completion-central-coverage must be in (0, 1]")
     if not 0.0 <= args.decomposition_lower_quantile < 0.5:
         parser.error("--decomposition-lower-quantile must be in [0, 0.5)")
     if not 0.5 < args.decomposition_upper_quantile <= 1.0:
@@ -463,13 +474,13 @@ def validate_seed_alignment(samples: pd.DataFrame) -> None:
 
 
 def build_per_seed_step(samples: pd.DataFrame) -> pd.DataFrame:
-    samples = samples[samples["active_gradient"]].copy()
     if samples.empty:
-        raise ValueError("no samples with nonzero policy-gradient signal")
+        raise ValueError("no completion samples available for aggregation")
     per_step = (
         samples.groupby(["seed", "step"], as_index=False, sort=True)
         .agg(
-            active_count=("active_gradient", "size"),
+            completion_count=("dtv_score", "size"),
+            active_policy_gradient_count=("active_gradient", "sum"),
             dtv_mean=("dtv_score", "mean"),
             cross_mean=("cross_term", "mean"),
             self_mean=("self_term", "mean"),
@@ -489,7 +500,7 @@ def build_per_seed_step(samples: pd.DataFrame) -> pd.DataFrame:
         conflict_counts.reindex(index, fill_value=0).to_numpy(dtype=np.int64)
     )
     per_step["self_protected_conflict_ratio"] = (
-        per_step["self_protected_count"] / per_step["active_count"]
+        per_step["self_protected_count"] / per_step["completion_count"]
     )
     return per_step
 
@@ -498,8 +509,9 @@ def aggregate_over_seeds(per_seed_step: pd.DataFrame) -> pd.DataFrame:
     grouped = (
         per_seed_step.groupby("step", as_index=False, sort=True)
         .agg(
-            active_seed_count=("seed", "nunique"),
-            active_count=("active_count", "sum"),
+            contributing_seed_count=("seed", "nunique"),
+            completion_count=("completion_count", "sum"),
+            active_policy_gradient_count=("active_policy_gradient_count", "sum"),
             dtv_mean=("dtv_mean", "mean"),
             dtv_std=("dtv_mean", "std"),
             cross_mean=("cross_mean", "mean"),
@@ -526,12 +538,19 @@ def aggregate_over_seeds(per_seed_step: pd.DataFrame) -> pd.DataFrame:
     return grouped
 
 
-def build_conflict_summary(samples: pd.DataFrame) -> pd.DataFrame:
+def build_conflict_summary(
+    samples: pd.DataFrame,
+    coverage: float,
+) -> tuple[pd.DataFrame, dict[str, tuple[float, float]], float]:
     conflicts = samples[
         samples["active_gradient"] & samples["kept_dtv"] & ~samples["kept_loo"]
     ].copy()
     if conflicts.empty:
         raise ValueError("no self-protected conflict samples were found")
+    bounds = completion_quantile_bounds(conflicts, coverage)
+    conflicts = apply_threshold_faithful_trend_mask(conflicts, bounds)
+    retained_fraction = float(conflicts["trend_inlier"].mean())
+    conflicts = conflicts[conflicts["trend_inlier"]].copy()
 
     per_seed_step = (
         conflicts.groupby(["seed", "step"], as_index=False, sort=True)
@@ -557,7 +576,45 @@ def build_conflict_summary(samples: pd.DataFrame) -> pd.DataFrame:
     grouped[["self_std", "cross_std"]] = grouped[
         ["self_std", "cross_std"]
     ].fillna(0.0)
-    return grouped
+    return grouped, bounds, retained_fraction
+
+
+def completion_quantile_bounds(
+    samples: pd.DataFrame,
+    coverage: float,
+) -> dict[str, tuple[float, float]]:
+    tail = (1.0 - coverage) / 2.0
+    columns = {
+        "dtv": "dtv_score",
+        "self": "self_term",
+        "cross": "cross_term",
+    }
+    return {
+        component: (
+            float(samples[column].quantile(tail)),
+            float(samples[column].quantile(1.0 - tail)),
+        )
+        for component, column in columns.items()
+    }
+
+
+def apply_threshold_faithful_trend_mask(
+    samples: pd.DataFrame,
+    bounds: dict[str, tuple[float, float]],
+) -> pd.DataFrame:
+    """Keep zeros and remove only the extreme positive Self/DTV tail."""
+    result = samples.copy()
+    result["trend_self_upper_outlier"] = (
+        result["self_term"] > bounds["self"][1]
+    )
+    result["trend_dtv_upper_outlier"] = (
+        result["dtv_score"] > bounds["dtv"][1]
+    )
+    result["trend_inlier"] = ~(
+        result["trend_self_upper_outlier"]
+        | result["trend_dtv_upper_outlier"]
+    )
+    return result
 
 
 def _draw_mean_std(
@@ -573,7 +630,7 @@ def _draw_mean_std(
     band_mode: str = "std",
     sample_count: np.ndarray | None = None,
 ) -> None:
-    # Full, untrimmed active-gradient values feed both mean and sample std.
+    # Input values have already been selected using the documented trend mask.
     uncertainty = std.copy()
     if band_mode == "sem":
         if sample_count is None:
@@ -630,13 +687,24 @@ def _nice_quantile_limits(
     return float(padded_lower), float(padded_upper)
 
 
+def _nice_conflict_limits(summary: pd.DataFrame) -> tuple[float, float]:
+    columns = ("self_mean", "cross_mean")
+    lower = min(float(summary[column].quantile(0.005)) for column in columns)
+    upper = max(float(summary[column].quantile(0.95)) for column in columns)
+    magnitude = max(abs(lower), abs(upper), 1.0)
+    unit = 10.0 ** (math.floor(math.log10(magnitude)) - 1)
+    return (
+        float(math.floor(lower / unit) * unit),
+        float(math.ceil((1.05 * upper) / unit) * unit),
+    )
+
+
 def build_overflow_summary(
-    summary: pd.DataFrame,
-    y_limits: tuple[float, float],
+    samples: pd.DataFrame,
+    bounds: dict[str, tuple[float, float]],
     bin_size: int,
 ) -> pd.DataFrame:
-    lower, upper = y_limits
-    work = summary[["step", "dtv_mean", "self_mean", "cross_mean"]].copy()
+    work = samples[["step", "dtv_score", "self_term", "cross_term"]].copy()
     work["overflow_bin"] = (work["step"].astype(int) - 1) // bin_size
     rows = []
     for _, group in work.groupby("overflow_bin", sort=True):
@@ -646,8 +714,13 @@ def build_overflow_summary(
             "step_center": float(group["step"].mean()),
             "num_steps": int(len(group)),
         }
-        for component in ("dtv", "self", "cross"):
-            values = group[f"{component}_mean"]
+        for component, column in (
+            ("dtv", "dtv_score"),
+            ("self", "self_term"),
+            ("cross", "cross_term"),
+        ):
+            values = group[column]
+            lower, upper = bounds[component]
             row[f"{component}_upper_overflow_fraction"] = float(
                 (values > upper).mean()
             )
@@ -757,7 +830,7 @@ def plot_score_decomposition(
         5,
         y_limits,
         band_mode,
-        summary["active_seed_count"].to_numpy(dtype=np.float64),
+        summary["contributing_seed_count"].to_numpy(dtype=np.float64),
     )
     _draw_mean_std(
         ax,
@@ -770,7 +843,7 @@ def plot_score_decomposition(
         6,
         y_limits,
         band_mode,
-        summary["active_seed_count"].to_numpy(dtype=np.float64),
+        summary["contributing_seed_count"].to_numpy(dtype=np.float64),
     )
     _draw_mean_std(
         ax,
@@ -783,7 +856,7 @@ def plot_score_decomposition(
         4,
         y_limits,
         band_mode,
-        summary["active_seed_count"].to_numpy(dtype=np.float64),
+        summary["contributing_seed_count"].to_numpy(dtype=np.float64),
     )
     ax.axhline(0.0, color="black", linewidth=1.0, alpha=0.65)
     ax.set_xlabel("Training step", fontsize=LABEL_FS)
@@ -853,7 +926,7 @@ def plot_drop_ratio_story(
     if y_limits is None:
         observed = float(np.max(loo_drop))
         unit = 0.05
-        y_limits = (0.0, math.ceil((observed + 0.02) / unit) * unit)
+        y_limits = (0.0, math.ceil(observed / unit) * unit + unit)
     ax.set_ylim(*y_limits)
     style_axes(ax)
     ax.legend(
@@ -891,7 +964,7 @@ def plot_decision_regions(
     y_limits: tuple[float, float],
     sampling_seed: int,
 ) -> dict[str, float | int]:
-    samples = samples[samples["active_gradient"]].copy()
+    samples = samples.copy()
     x_min, x_max = x_limits
     y_min, y_max = y_limits
 
@@ -961,8 +1034,8 @@ def plot_decision_regions(
     )
     ax.set_xlim(x_min, x_max)
     ax.set_ylim(y_min, y_max)
-    ax.xaxis.set_major_locator(MaxNLocator(nbins=7))
-    ax.yaxis.set_major_locator(MaxNLocator(nbins=6))
+    ax.set_xticks(np.arange(-200.0, 401.0, 100.0))
+    ax.set_yticks(np.arange(0.0, 801.0, 200.0))
     ax.set_xlabel("Cross-term score", fontsize=LABEL_FS)
     ax.set_ylabel("Self-term score", labelpad=8, fontsize=LABEL_FS)
     style_axes(ax)
@@ -1172,32 +1245,16 @@ def write_validation_report(
 ) -> None:
     decisions = {
         "both_keep": int(
-            (
-                samples["active_gradient"]
-                & samples["kept_dtv"]
-                & samples["kept_loo"]
-            ).sum()
+            (samples["kept_dtv"] & samples["kept_loo"]).sum()
         ),
         "dtv_keeps_only": int(
-            (
-                samples["active_gradient"]
-                & samples["kept_dtv"]
-                & ~samples["kept_loo"]
-            ).sum()
+            (samples["kept_dtv"] & ~samples["kept_loo"]).sum()
         ),
         "both_drop": int(
-            (
-                samples["active_gradient"]
-                & ~samples["kept_dtv"]
-                & ~samples["kept_loo"]
-            ).sum()
+            (~samples["kept_dtv"] & ~samples["kept_loo"]).sum()
         ),
         "loo_keeps_only": int(
-            (
-                samples["active_gradient"]
-                & ~samples["kept_dtv"]
-                & samples["kept_loo"]
-            ).sum()
+            (~samples["kept_dtv"] & samples["kept_loo"]).sum()
         ),
     }
     report = {
@@ -1219,11 +1276,12 @@ def write_validation_report(
         **log_scatter_report,
         "plot_config": plot_config,
         "notes": [
-            "All active-gradient score means/std use full untrimmed values.",
+            "Threshold-faithful statistics include finite exact-zero scores.",
+            "Trend means/std use a common one-sided Self/DTV upper-tail mask.",
             "Fixed score/scatter axis limits affect display only.",
             "Drop-ratio bars average adjacent steps for display only.",
             "Optional centered smoothing affects plotted mean/std curves only.",
-            "Effective score/drop statistics exclude raw_self == 0 samples.",
+            "Drop ratios and decision counts use untrimmed threshold decisions.",
             "LOO decisions use the raw zero-score threshold, not the final cap mask.",
             "No advantage or reward fields are loaded or analyzed.",
         ],
@@ -1237,13 +1295,12 @@ def write_overall_summary(samples: pd.DataFrame, output_dir: Path) -> None:
     rows = []
     for seed, group in samples.groupby("seed", sort=False):
         total_samples = len(group)
-        group = group[group["active_gradient"]]
         rows.append(
             {
                 "seed": seed,
                 "total_samples": total_samples,
-                "active_gradient_samples": len(group),
-                "inactive_zero_gradient_samples": total_samples - len(group),
+                "active_gradient_samples": int(group["active_gradient"].sum()),
+                "inactive_zero_gradient_samples": int((~group["active_gradient"]).sum()),
                 "self_mean": group["self_term"].mean(),
                 "cross_mean": group["cross_term"].mean(),
                 "dtv_mean": group["dtv_score"].mean(),
@@ -1262,8 +1319,10 @@ def write_overall_summary(samples: pd.DataFrame, output_dir: Path) -> None:
 
 def write_distribution_statistics(
     samples: pd.DataFrame,
-    per_seed_step: pd.DataFrame,
-    summary: pd.DataFrame,
+    trend_samples: pd.DataFrame,
+    trend_per_seed_step: pd.DataFrame,
+    trend_summary: pd.DataFrame,
+    bounds: dict[str, tuple[float, float]],
     output_dir: Path,
 ) -> None:
     quantiles = {
@@ -1293,18 +1352,23 @@ def write_distribution_statistics(
             result["components"][component] = component_stats
         return result
 
-    active = samples[samples["active_gradient"]]
     report = {
-        "completion_level_active_gradient": describe(
-            active,
+        "completion_level_threshold_population": describe(
+            samples,
             {
                 "dtv": "dtv_score",
                 "self": "self_term",
                 "cross": "cross_term",
             },
         ),
-        "per_seed_step_active_mean": describe(
-            per_seed_step,
+        "trend_quantile_bounds": bounds,
+        "trend_retained_fraction": float(len(trend_samples) / len(samples)),
+        "completion_level_trend_inliers": describe(
+            trend_samples,
+            {"dtv": "dtv_score", "self": "self_term", "cross": "cross_term"},
+        ),
+        "per_seed_step_trend_mean": describe(
+            trend_per_seed_step,
             {
                 "dtv": "dtv_mean",
                 "self": "self_mean",
@@ -1312,7 +1376,7 @@ def write_distribution_statistics(
             },
         ),
         "available_seed_aggregated_step_mean": describe(
-            summary,
+            trend_summary,
             {
                 "dtv": "dtv_mean",
                 "self": "self_mean",
@@ -1351,21 +1415,46 @@ def main() -> None:
     samples = pd.concat(frames, ignore_index=True)
     validate_seed_alignment(samples)
 
-    per_seed_step = build_per_seed_step(samples)
-    summary = aggregate_over_seeds(per_seed_step)
-    conflict_summary = build_conflict_summary(samples)
+    completion_bounds = completion_quantile_bounds(
+        samples, args.completion_central_coverage
+    )
+    samples = apply_threshold_faithful_trend_mask(samples, completion_bounds)
+    trend_samples = samples[samples["trend_inlier"]].copy()
+
+    threshold_per_seed_step = build_per_seed_step(samples)
+    threshold_summary = aggregate_over_seeds(threshold_per_seed_step)
+    trend_per_seed_step = build_per_seed_step(trend_samples)
+    trend_summary = aggregate_over_seeds(trend_per_seed_step)
+    conflict_summary, conflict_bounds, conflict_retained_fraction = (
+        build_conflict_summary(samples, args.completion_central_coverage)
+    )
 
     # CSVs retain every finite value; scatter display clipping is not applied.
     samples.to_csv(output_dir / "grpo_dtv_decomposition_samples.csv", index=False)
-    per_seed_step.to_csv(
+    threshold_per_seed_step.to_csv(
+        output_dir / "grpo_dtv_threshold_per_seed_step.csv", index=False
+    )
+    threshold_summary.to_csv(
+        output_dir / "grpo_dtv_threshold_per_step.csv", index=False
+    )
+    trend_per_seed_step.to_csv(
         output_dir / "grpo_dtv_decomposition_per_seed_step.csv", index=False
     )
-    summary.to_csv(output_dir / "grpo_dtv_decomposition_per_step.csv", index=False)
+    trend_summary.to_csv(
+        output_dir / "grpo_dtv_decomposition_per_step.csv", index=False
+    )
     conflict_summary.to_csv(
         output_dir / "grpo_dtv_self_protected_conflicts_per_step.csv", index=False
     )
     write_overall_summary(samples, output_dir)
-    write_distribution_statistics(samples, per_seed_step, summary, output_dir)
+    write_distribution_statistics(
+        samples,
+        trend_samples,
+        trend_per_seed_step,
+        trend_summary,
+        completion_bounds,
+        output_dir,
+    )
 
     if args.score_y_limits is not None:
         decomposition_y_limits = tuple(args.score_y_limits)
@@ -1379,20 +1468,24 @@ def main() -> None:
             tuple(args.decomposition_y_limits)
             if args.decomposition_y_limits is not None
             else _nice_quantile_limits(
-                summary,
+                trend_summary,
                 args.decomposition_lower_quantile,
                 args.decomposition_upper_quantile,
             )
         )
-        conflict_y_limits = tuple(args.conflict_y_limits)
+        conflict_y_limits = (
+            tuple(args.conflict_y_limits)
+            if args.conflict_y_limits is not None
+            else _nice_conflict_limits(conflict_summary)
+        )
     decision_x_limits = tuple(args.decision_x_limits)
     decision_y_limits = tuple(args.decision_y_limits)
     drop_y_limits = (
         tuple(args.drop_y_limits) if args.drop_y_limits is not None else None
     )
     overflow = build_overflow_summary(
-        summary,
-        decomposition_y_limits,
+        samples,
+        completion_bounds,
         args.overflow_bin_size,
     )
     overflow.to_csv(output_dir / "grpo_dtv_overflow_by_step_bin.csv", index=False)
@@ -1400,8 +1493,14 @@ def main() -> None:
         "[DISPLAY] decomposition ylim="
         f"({decomposition_y_limits[0]:.6g}, {decomposition_y_limits[1]:.6g})"
     )
+    print(
+        "[TREND] central coverage diagnostics="
+        f"{args.completion_central_coverage:.3f}; "
+        f"one-sided Self/DTV retained={len(trend_samples) / len(samples):.3%}; "
+        f"bounds={completion_bounds}"
+    )
     plot_score_decomposition(
-        summary,
+        trend_summary,
         output_dir,
         decomposition_y_limits,
         args.smooth_window,
@@ -1410,7 +1509,7 @@ def main() -> None:
         args.overflow_label_threshold,
     )
     _, actual_drop_y_limits = plot_drop_ratio_story(
-        summary,
+        threshold_summary,
         output_dir,
         args.drop_bin_size,
         drop_y_limits,
@@ -1442,9 +1541,14 @@ def main() -> None:
         "decomposition_lower_quantile": args.decomposition_lower_quantile,
         "decomposition_upper_quantile": args.decomposition_upper_quantile,
         "decomposition_band_mode": args.decomposition_band_mode,
+        "completion_central_coverage": args.completion_central_coverage,
+        "completion_quantile_bounds": completion_bounds,
+        "trend_retained_fraction": len(trend_samples) / len(samples),
         "conflict_ymin": conflict_y_limits[0],
         "conflict_ymax": conflict_y_limits[1],
         "conflict_band_mode": args.conflict_band_mode,
+        "conflict_quantile_bounds": conflict_bounds,
+        "conflict_retained_fraction": conflict_retained_fraction,
         "overflow_bin_size": args.overflow_bin_size,
         "overflow_label_threshold": args.overflow_label_threshold,
         "drop_bin_size": args.drop_bin_size,
