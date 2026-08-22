@@ -114,9 +114,39 @@ def parse_args() -> argparse.Namespace:
         "--decomposition-y-limits",
         nargs=2,
         type=float,
-        default=(-10.0, 30.0),
+        default=None,
         metavar=("YMIN", "YMAX"),
-        help="Y limits for figure 01 (default: -10 30).",
+        help="Explicit Figure 01 limits; overrides automatic quantile limits.",
+    )
+    parser.add_argument(
+        "--decomposition-lower-quantile",
+        type=float,
+        default=0.005,
+        help="Automatic lower display quantile (default: 0.005).",
+    )
+    parser.add_argument(
+        "--decomposition-upper-quantile",
+        type=float,
+        default=0.95,
+        help="Automatic upper display quantile (default: 0.95).",
+    )
+    parser.add_argument(
+        "--decomposition-band-mode",
+        choices=("std", "sem", "none"),
+        default="std",
+        help="Figure 01 uncertainty band (default: std).",
+    )
+    parser.add_argument(
+        "--overflow-bin-size",
+        type=int,
+        default=50,
+        help="Temporal bin width for Figure 01 overflow markers.",
+    )
+    parser.add_argument(
+        "--overflow-label-threshold",
+        type=float,
+        default=0.05,
+        help="Minimum overflow fraction labeled as a percentage.",
     )
     parser.add_argument(
         "--conflict-y-limits",
@@ -125,6 +155,12 @@ def parse_args() -> argparse.Namespace:
         default=(-20.0, 1000.0),
         metavar=("YMIN", "YMAX"),
         help="Y limits for figure 04 (default: -20 1000).",
+    )
+    parser.add_argument(
+        "--conflict-band-mode",
+        choices=("std", "sem", "none"),
+        default="std",
+        help="Figure 04 uncertainty band (default: std).",
     )
     parser.add_argument(
         "--decision-x-limits",
@@ -149,6 +185,14 @@ def parse_args() -> argparse.Namespace:
         help="Number of training steps averaged into each drop-ratio bar.",
     )
     parser.add_argument(
+        "--drop-y-limits",
+        nargs=2,
+        type=float,
+        default=None,
+        metavar=("YMIN", "YMAX"),
+        help="Explicit drop-ratio limits; default chooses a non-clipping upper bound.",
+    )
+    parser.add_argument(
         "--smooth-window",
         type=int,
         default=1,
@@ -170,6 +214,16 @@ def parse_args() -> argparse.Namespace:
         parser.error("--scatter-quantile must be in (0.5, 1.0)")
     if args.drop_bin_size <= 0:
         parser.error("--drop-bin-size must be positive")
+    if args.overflow_bin_size <= 0:
+        parser.error("--overflow-bin-size must be positive")
+    if not 0.0 <= args.overflow_label_threshold <= 1.0:
+        parser.error("--overflow-label-threshold must be in [0, 1]")
+    if not 0.0 <= args.decomposition_lower_quantile < 0.5:
+        parser.error("--decomposition-lower-quantile must be in [0, 0.5)")
+    if not 0.5 < args.decomposition_upper_quantile <= 1.0:
+        parser.error("--decomposition-upper-quantile must be in (0.5, 1]")
+    if args.decomposition_lower_quantile >= args.decomposition_upper_quantile:
+        parser.error("decomposition lower quantile must be below upper quantile")
     if args.smooth_window <= 0:
         parser.error("--smooth-window must be positive")
     for option in (
@@ -178,6 +232,7 @@ def parse_args() -> argparse.Namespace:
         "conflict_y_limits",
         "decision_x_limits",
         "decision_y_limits",
+        "drop_y_limits",
     ):
         limits = getattr(args, option)
         if limits is None:
@@ -434,7 +489,7 @@ def build_per_seed_step(samples: pd.DataFrame) -> pd.DataFrame:
         conflict_counts.reindex(index, fill_value=0).to_numpy(dtype=np.int64)
     )
     per_step["self_protected_conflict_ratio"] = (
-        per_step["self_protected_count"] / 16.0
+        per_step["self_protected_count"] / per_step["active_count"]
     )
     return per_step
 
@@ -443,6 +498,7 @@ def aggregate_over_seeds(per_seed_step: pd.DataFrame) -> pd.DataFrame:
     grouped = (
         per_seed_step.groupby("step", as_index=False, sort=True)
         .agg(
+            active_seed_count=("seed", "nunique"),
             active_count=("active_count", "sum"),
             dtv_mean=("dtv_mean", "mean"),
             dtv_std=("dtv_mean", "std"),
@@ -513,25 +569,148 @@ def _draw_mean_std(
     fill_color: str,
     label: str,
     zorder: int,
+    y_limits: tuple[float, float] | None = None,
+    band_mode: str = "std",
+    sample_count: np.ndarray | None = None,
 ) -> None:
     # Full, untrimmed active-gradient values feed both mean and sample std.
-    ax.fill_between(
-        x,
-        mean - std,
-        mean + std,
-        color=fill_color,
-        alpha=0.35,
-        linewidth=0,
-        zorder=zorder - 1,
-    )
+    uncertainty = std.copy()
+    if band_mode == "sem":
+        if sample_count is None:
+            raise ValueError("SEM band requires sample counts")
+        uncertainty = uncertainty / np.sqrt(np.maximum(sample_count, 1.0))
+
+    visible_mean = mean.copy()
+    if y_limits is not None:
+        lower, upper = y_limits
+        visible_mean[(mean < lower) | (mean > upper)] = np.nan
+
+    if band_mode != "none":
+        band_lower = mean - uncertainty
+        band_upper = mean + uncertainty
+        if y_limits is not None:
+            valid_band = (
+                (band_lower >= y_limits[0])
+                & (band_upper <= y_limits[1])
+                & np.isfinite(visible_mean)
+            )
+            band_lower = np.where(valid_band, band_lower, np.nan)
+            band_upper = np.where(valid_band, band_upper, np.nan)
+        ax.fill_between(
+            x,
+            band_lower,
+            band_upper,
+            color=fill_color,
+            alpha=0.35,
+            linewidth=0,
+            zorder=zorder - 1,
+        )
     ax.plot(
         x,
-        mean,
+        visible_mean,
         color=line_color,
         linewidth=LINE_W,
         label=label,
         zorder=zorder,
     )
+
+
+def _nice_quantile_limits(
+    summary: pd.DataFrame,
+    lower_quantile: float,
+    upper_quantile: float,
+) -> tuple[float, float]:
+    columns = ("dtv_mean", "self_mean", "cross_mean")
+    lower = min(float(summary[column].quantile(lower_quantile)) for column in columns)
+    upper = max(float(summary[column].quantile(upper_quantile)) for column in columns)
+    magnitude = max(abs(lower), abs(upper), 1.0)
+    unit = 10.0 ** (math.floor(math.log10(magnitude)) - 1)
+    padded_lower = math.floor(lower / unit) * unit
+    padded_upper = math.ceil((1.05 * upper) / unit) * unit
+    return float(padded_lower), float(padded_upper)
+
+
+def build_overflow_summary(
+    summary: pd.DataFrame,
+    y_limits: tuple[float, float],
+    bin_size: int,
+) -> pd.DataFrame:
+    lower, upper = y_limits
+    work = summary[["step", "dtv_mean", "self_mean", "cross_mean"]].copy()
+    work["overflow_bin"] = (work["step"].astype(int) - 1) // bin_size
+    rows = []
+    for _, group in work.groupby("overflow_bin", sort=True):
+        row: dict[str, float | int] = {
+            "step_start": int(group["step"].min()),
+            "step_end": int(group["step"].max()),
+            "step_center": float(group["step"].mean()),
+            "num_steps": int(len(group)),
+        }
+        for component in ("dtv", "self", "cross"):
+            values = group[f"{component}_mean"]
+            row[f"{component}_upper_overflow_fraction"] = float(
+                (values > upper).mean()
+            )
+            row[f"{component}_lower_overflow_fraction"] = float(
+                (values < lower).mean()
+            )
+        rows.append(row)
+    return pd.DataFrame(rows)
+
+
+def _format_percent(fraction: float) -> str:
+    value = 100.0 * fraction
+    return f"{value:.1f}".rstrip("0").rstrip(".") + "%"
+
+
+def draw_overflow_markers(
+    ax: plt.Axes,
+    overflow: pd.DataFrame,
+    y_limits: tuple[float, float],
+    label_threshold: float,
+) -> None:
+    lower, upper = y_limits
+    span = upper - lower
+    components = (
+        ("dtv", COLOR_DTV),
+        ("self", COLOR_SELF),
+        ("cross", COLOR_LOO),
+    )
+    for index, (component, color) in enumerate(components):
+        upper_y = upper - span * (0.025 + 0.035 * index)
+        lower_y = lower + span * (0.025 + 0.035 * index)
+        for direction, marker, y_value in (
+            ("upper", "^", upper_y),
+            ("lower", "v", lower_y),
+        ):
+            fractions = overflow[f"{component}_{direction}_overflow_fraction"]
+            for step, fraction in zip(overflow["step_center"], fractions):
+                fraction = float(fraction)
+                if fraction <= 0.0:
+                    continue
+                size = 18.0 + 150.0 * min(fraction / 0.20, 1.0)
+                ax.scatter(
+                    [step],
+                    [y_value],
+                    marker=marker,
+                    s=size,
+                    color=color,
+                    edgecolors="none",
+                    zorder=20,
+                )
+                if fraction >= label_threshold:
+                    vertical = -8 if direction == "upper" else 8
+                    ax.annotate(
+                        _format_percent(fraction),
+                        (step, y_value),
+                        xytext=(0, vertical),
+                        textcoords="offset points",
+                        ha="center",
+                        va="top" if direction == "upper" else "bottom",
+                        fontsize=max(10, TICK_FS - 10),
+                        color=color,
+                        zorder=21,
+                    )
 
 
 def smooth_for_display(
@@ -551,23 +730,14 @@ def smooth_for_display(
     return smoothed
 
 
-def hide_highest_y_tick_label(ax: plt.Axes) -> None:
-    """Hide the highest visible y tick while retaining its grid line."""
-    lower, upper = ax.get_ylim()
-    ticks = [tick for tick in ax.get_yticks() if lower <= tick <= upper]
-    if not ticks:
-        return
-    labels = [f"{tick:g}" for tick in ticks]
-    labels[-1] = ""
-    ax.set_yticks(ticks)
-    ax.set_yticklabels(labels)
-
-
 def plot_score_decomposition(
     summary: pd.DataFrame,
     output_dir: Path,
     y_limits: tuple[float, float],
     smooth_window: int,
+    band_mode: str,
+    overflow: pd.DataFrame,
+    overflow_label_threshold: float,
 ) -> None:
     summary = smooth_for_display(
         summary,
@@ -585,6 +755,9 @@ def plot_score_decomposition(
         COLOR_DTV_FILL,
         "DTV",
         5,
+        y_limits,
+        band_mode,
+        summary["active_seed_count"].to_numpy(dtype=np.float64),
     )
     _draw_mean_std(
         ax,
@@ -595,6 +768,9 @@ def plot_score_decomposition(
         COLOR_LOO_FILL,
         "Cross-term",
         6,
+        y_limits,
+        band_mode,
+        summary["active_seed_count"].to_numpy(dtype=np.float64),
     )
     _draw_mean_std(
         ax,
@@ -605,6 +781,9 @@ def plot_score_decomposition(
         COLOR_SELF_FILL,
         "Self-term",
         4,
+        y_limits,
+        band_mode,
+        summary["active_seed_count"].to_numpy(dtype=np.float64),
     )
     ax.axhline(0.0, color="black", linewidth=1.0, alpha=0.65)
     ax.set_xlabel("Training step", fontsize=LABEL_FS)
@@ -612,7 +791,7 @@ def plot_score_decomposition(
     ax.set_ylim(*y_limits)
     ax.yaxis.set_major_locator(MaxNLocator(nbins=6))
     style_axes(ax)
-    hide_highest_y_tick_label(ax)
+    draw_overflow_markers(ax, overflow, y_limits, overflow_label_threshold)
     ax.legend(
         loc="upper center",
         bbox_to_anchor=(0.5, 1.0),
@@ -632,7 +811,8 @@ def plot_drop_ratio_story(
     summary: pd.DataFrame,
     output_dir: Path,
     bin_size: int,
-) -> None:
+    y_limits: tuple[float, float] | None,
+) -> tuple[pd.DataFrame, tuple[float, float]]:
     binned = summary.assign(
         step_bin=((summary["step"].astype(int) - 1) // bin_size)
     ).groupby("step_bin", as_index=False).agg(
@@ -670,9 +850,12 @@ def plot_drop_ratio_story(
     )
     ax.set_xlabel("Training step", fontsize=LABEL_FS)
     ax.set_ylabel("Drop ratio", labelpad=8, fontsize=LABEL_FS)
-    ax.set_ylim(0.0, 0.35)
+    if y_limits is None:
+        observed = float(np.max(loo_drop))
+        unit = 0.05
+        y_limits = (0.0, math.ceil((observed + 0.02) / unit) * unit)
+    ax.set_ylim(*y_limits)
     style_axes(ax)
-    hide_highest_y_tick_label(ax)
     ax.legend(
         loc="upper center",
         bbox_to_anchor=(0.5, 1.0),
@@ -685,6 +868,8 @@ def plot_drop_ratio_story(
         borderpad=0.0,
     )
     savefig(fig, output_dir / "02_drop_ratio_story.png")
+    binned.to_csv(output_dir / "grpo_dtv_drop_ratio_binned.csv", index=False)
+    return binned, y_limits
 
 
 def classify_decisions(samples: pd.DataFrame) -> pd.Series:
@@ -781,7 +966,6 @@ def plot_decision_regions(
     ax.set_xlabel("Cross-term score", fontsize=LABEL_FS)
     ax.set_ylabel("Self-term score", labelpad=8, fontsize=LABEL_FS)
     style_axes(ax)
-    hide_highest_y_tick_label(ax)
     legend = ax.legend(
         loc="upper right",
         bbox_to_anchor=(1.01, 1.01),
@@ -828,6 +1012,7 @@ def plot_conflict_means(
     output_dir: Path,
     y_limits: tuple[float, float],
     smooth_window: int,
+    band_mode: str,
 ) -> None:
     conflicts = smooth_for_display(
         conflicts,
@@ -836,6 +1021,11 @@ def plot_conflict_means(
     )
     x = conflicts["step"].to_numpy(dtype=np.float64)
     fig, ax = plt.subplots(figsize=MAIN_FIGSIZE)
+    suffix = {
+        "std": " mean ± 1 std",
+        "sem": " mean ± 1 SEM",
+        "none": " mean",
+    }[band_mode]
     _draw_mean_std(
         ax,
         x,
@@ -843,8 +1033,11 @@ def plot_conflict_means(
         conflicts["self_std"].to_numpy(),
         COLOR_SELF,
         COLOR_SELF_FILL,
-        "Self-term mean +/- 1 std",
+        "Self-term" + suffix,
         5,
+        y_limits,
+        band_mode,
+        conflicts["seeds_with_conflicts"].to_numpy(dtype=np.float64),
     )
     _draw_mean_std(
         ax,
@@ -853,8 +1046,11 @@ def plot_conflict_means(
         conflicts["cross_std"].to_numpy(),
         COLOR_LOO,
         COLOR_LOO_FILL,
-        "Cross-term mean +/- 1 std",
+        "Cross-term" + suffix,
         6,
+        y_limits,
+        band_mode,
+        conflicts["seeds_with_conflicts"].to_numpy(dtype=np.float64),
     )
     ax.axhline(0.0, color="black", linewidth=1.0, alpha=0.65)
     ax.set_xlabel("Training step", fontsize=LABEL_FS)
@@ -862,7 +1058,6 @@ def plot_conflict_means(
     ax.set_ylim(*y_limits)
     ax.yaxis.set_major_locator(MaxNLocator(nbins=6))
     style_axes(ax)
-    hide_highest_y_tick_label(ax)
     ax.legend(
         loc="upper center",
         bbox_to_anchor=(0.5, 1.03),
@@ -873,11 +1068,106 @@ def plot_conflict_means(
     savefig(fig, output_dir / "04_self_protected_conflict_means.png")
 
 
+def plot_log_log_self_protection(
+    samples: pd.DataFrame,
+    output_dir: Path,
+    sample_limit: int,
+    sampling_seed: int,
+) -> dict[str, float | int]:
+    conflicts = samples[
+        samples["active_gradient"] & (samples["cross_term"] < 0.0)
+    ].copy()
+    if conflicts.empty:
+        raise ValueError("no active-gradient samples with negative Cross-term")
+    conflicts["abs_cross_term"] = -conflicts["cross_term"]
+    conflicts["self_to_abs_cross_ratio"] = (
+        conflicts["self_term"] / conflicts["abs_cross_term"]
+    )
+    conflicts["decision"] = np.where(
+        conflicts["dtv_score"] >= 0.0,
+        "DTV keeps only",
+        "Both drop",
+    )
+    plotted = conflicts
+    if len(plotted) > sample_limit:
+        plotted = plotted.sample(n=sample_limit, random_state=sampling_seed)
+
+    fig, ax = plt.subplots(figsize=MAIN_FIGSIZE)
+    for label, color in (
+        ("DTV keeps only", COLOR_LOO),
+        ("Both drop", COLOR_DARK_GRAY),
+    ):
+        subset = plotted[plotted["decision"] == label]
+        ax.scatter(
+            subset["abs_cross_term"],
+            subset["self_term"],
+            s=8,
+            alpha=0.38,
+            color=color,
+            label=label,
+            edgecolors="none",
+            rasterized=True,
+        )
+    all_values = np.concatenate(
+        [
+            conflicts["abs_cross_term"].to_numpy(dtype=np.float64),
+            conflicts["self_term"].to_numpy(dtype=np.float64),
+        ]
+    )
+    boundary_min = 10.0 ** math.floor(math.log10(float(np.min(all_values))))
+    boundary_max = 10.0 ** math.ceil(math.log10(float(np.max(all_values))))
+    boundary = np.geomspace(boundary_min, boundary_max, 256)
+    ax.plot(
+        boundary,
+        boundary,
+        color=COLOR_DTV,
+        linestyle="--",
+        linewidth=2.0,
+        label=r"DTV boundary: $S=|C|$",
+    )
+    ax.set_xscale("log")
+    ax.set_yscale("log")
+    ax.set_xlim(boundary_min, boundary_max)
+    ax.set_ylim(boundary_min, boundary_max)
+    ax.set_xlabel("Absolute Cross-term magnitude", fontsize=LABEL_FS)
+    ax.set_ylabel("Self-term score", labelpad=8, fontsize=LABEL_FS)
+    style_axes(ax)
+    ax.legend(
+        loc="upper left",
+        frameon=False,
+        fontsize=LEGEND_FS,
+        handlelength=1.0,
+        handletextpad=0.35,
+        labelspacing=0.35,
+        borderpad=0.0,
+    )
+    savefig(fig, output_dir / "05_log_log_self_protection_scatter.png")
+    conflicts.to_csv(
+        output_dir / "grpo_dtv_negative_cross_log_scatter_samples.csv",
+        index=False,
+    )
+    ratios = conflicts["self_to_abs_cross_ratio"].to_numpy(dtype=np.float64)
+    return {
+        "negative_cross_active_samples": int(len(conflicts)),
+        "log_scatter_plotted_samples": int(len(plotted)),
+        "self_to_abs_cross_ratio_median": float(np.quantile(ratios, 0.50)),
+        "self_to_abs_cross_ratio_p90": float(np.quantile(ratios, 0.90)),
+        "self_to_abs_cross_ratio_p95": float(np.quantile(ratios, 0.95)),
+        "self_to_abs_cross_ratio_p99": float(np.quantile(ratios, 0.99)),
+        "ratio_above_1_fraction": float(np.mean(ratios > 1.0)),
+        "ratio_above_10_fraction": float(np.mean(ratios > 10.0)),
+        "ratio_above_100_fraction": float(np.mean(ratios > 100.0)),
+        "ratio_above_1000_fraction": float(np.mean(ratios > 1000.0)),
+    }
+
+
 def write_validation_report(
     samples: pd.DataFrame,
     selection_files: list[Path],
     seed_labels: list[str],
     scatter_report: dict[str, float | int],
+    log_scatter_report: dict[str, float | int],
+    plot_config: dict[str, Any],
     output_dir: Path,
 ) -> None:
     decisions = {
@@ -926,6 +1216,8 @@ def write_validation_report(
         "active_gradient_samples": int(samples["active_gradient"].sum()),
         "inactive_zero_gradient_samples": int((~samples["active_gradient"]).sum()),
         **scatter_report,
+        **log_scatter_report,
+        "plot_config": plot_config,
         "notes": [
             "All active-gradient score means/std use full untrimmed values.",
             "Fixed score/scatter axis limits affect display only.",
@@ -968,6 +1260,71 @@ def write_overall_summary(samples: pd.DataFrame, output_dir: Path) -> None:
     )
 
 
+def write_distribution_statistics(
+    samples: pd.DataFrame,
+    per_seed_step: pd.DataFrame,
+    summary: pd.DataFrame,
+    output_dir: Path,
+) -> None:
+    quantiles = {
+        "p01": 0.01,
+        "p02_5": 0.025,
+        "p05": 0.05,
+        "p50": 0.50,
+        "p90": 0.90,
+        "p95": 0.95,
+        "p97_5": 0.975,
+        "p98": 0.98,
+        "p99": 0.99,
+    }
+
+    def describe(frame: pd.DataFrame, columns: dict[str, str]) -> dict[str, Any]:
+        result: dict[str, Any] = {"count": int(len(frame)), "components": {}}
+        for component, column in columns.items():
+            values = frame[column].to_numpy(dtype=np.float64)
+            component_stats = {
+                "min": float(np.min(values)),
+                **{
+                    name: float(np.quantile(values, quantile))
+                    for name, quantile in quantiles.items()
+                },
+                "max": float(np.max(values)),
+            }
+            result["components"][component] = component_stats
+        return result
+
+    active = samples[samples["active_gradient"]]
+    report = {
+        "completion_level_active_gradient": describe(
+            active,
+            {
+                "dtv": "dtv_score",
+                "self": "self_term",
+                "cross": "cross_term",
+            },
+        ),
+        "per_seed_step_active_mean": describe(
+            per_seed_step,
+            {
+                "dtv": "dtv_mean",
+                "self": "self_mean",
+                "cross": "cross_mean",
+            },
+        ),
+        "available_seed_aggregated_step_mean": describe(
+            summary,
+            {
+                "dtv": "dtv_mean",
+                "self": "self_mean",
+                "cross": "cross_mean",
+            },
+        ),
+    }
+    path = output_dir / "grpo_dtv_distribution_statistics.json"
+    path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+    print(f"[SAVE] {path}")
+
+
 def main() -> None:
     args = parse_args()
     configure_style()
@@ -1008,6 +1365,7 @@ def main() -> None:
         output_dir / "grpo_dtv_self_protected_conflicts_per_step.csv", index=False
     )
     write_overall_summary(samples, output_dir)
+    write_distribution_statistics(samples, per_seed_step, summary, output_dir)
 
     if args.score_y_limits is not None:
         decomposition_y_limits = tuple(args.score_y_limits)
@@ -1017,17 +1375,46 @@ def main() -> None:
             "--decomposition-y-limits and --conflict-y-limits"
         )
     else:
-        decomposition_y_limits = tuple(args.decomposition_y_limits)
+        decomposition_y_limits = (
+            tuple(args.decomposition_y_limits)
+            if args.decomposition_y_limits is not None
+            else _nice_quantile_limits(
+                summary,
+                args.decomposition_lower_quantile,
+                args.decomposition_upper_quantile,
+            )
+        )
         conflict_y_limits = tuple(args.conflict_y_limits)
     decision_x_limits = tuple(args.decision_x_limits)
     decision_y_limits = tuple(args.decision_y_limits)
+    drop_y_limits = (
+        tuple(args.drop_y_limits) if args.drop_y_limits is not None else None
+    )
+    overflow = build_overflow_summary(
+        summary,
+        decomposition_y_limits,
+        args.overflow_bin_size,
+    )
+    overflow.to_csv(output_dir / "grpo_dtv_overflow_by_step_bin.csv", index=False)
+    print(
+        "[DISPLAY] decomposition ylim="
+        f"({decomposition_y_limits[0]:.6g}, {decomposition_y_limits[1]:.6g})"
+    )
     plot_score_decomposition(
         summary,
         output_dir,
         decomposition_y_limits,
         args.smooth_window,
+        args.decomposition_band_mode,
+        overflow,
+        args.overflow_label_threshold,
     )
-    plot_drop_ratio_story(summary, output_dir, args.drop_bin_size)
+    _, actual_drop_y_limits = plot_drop_ratio_story(
+        summary,
+        output_dir,
+        args.drop_bin_size,
+        drop_y_limits,
+    )
     scatter_report = plot_decision_regions(
         samples,
         output_dir,
@@ -1041,12 +1428,37 @@ def main() -> None:
         output_dir,
         conflict_y_limits,
         args.smooth_window,
+        args.conflict_band_mode,
     )
+    log_scatter_report = plot_log_log_self_protection(
+        samples,
+        output_dir,
+        args.sample_limit,
+        args.sampling_seed,
+    )
+    plot_config = {
+        "decomposition_ymin": decomposition_y_limits[0],
+        "decomposition_ymax": decomposition_y_limits[1],
+        "decomposition_lower_quantile": args.decomposition_lower_quantile,
+        "decomposition_upper_quantile": args.decomposition_upper_quantile,
+        "decomposition_band_mode": args.decomposition_band_mode,
+        "conflict_ymin": conflict_y_limits[0],
+        "conflict_ymax": conflict_y_limits[1],
+        "conflict_band_mode": args.conflict_band_mode,
+        "overflow_bin_size": args.overflow_bin_size,
+        "overflow_label_threshold": args.overflow_label_threshold,
+        "drop_bin_size": args.drop_bin_size,
+        "drop_ymin": actual_drop_y_limits[0],
+        "drop_ymax": actual_drop_y_limits[1],
+        "smooth_window": args.smooth_window,
+    }
     write_validation_report(
         samples,
         selection_files,
         seed_labels,
         scatter_report,
+        log_scatter_report,
+        plot_config,
         output_dir,
     )
     print(f"[DONE] figures and diagnostics written to {output_dir}")
