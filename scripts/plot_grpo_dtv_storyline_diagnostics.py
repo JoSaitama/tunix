@@ -94,10 +94,39 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=0.995,
         help=(
-            "Central scatter display quantile. The default 0.995 displays "
-            "the [0.005, 0.995] interval on each axis; omitted outliers remain "
-            "in all means, standard deviations, ratios, and CSV outputs."
+            "Deprecated compatibility option; accepted but ignored. Use "
+            "--decision-x-limits and --decision-y-limits."
         ),
+    )
+    parser.add_argument(
+        "--score-y-limits",
+        nargs=2,
+        type=float,
+        default=(-10.0, 30.0),
+        metavar=("YMIN", "YMAX"),
+        help="Display limits for score mean/std figures (default: -10 30).",
+    )
+    parser.add_argument(
+        "--decision-x-limits",
+        nargs=2,
+        type=float,
+        default=(-45.0, 90.0),
+        metavar=("XMIN", "XMAX"),
+        help="Decision-region x-axis display limits (default: -45 90).",
+    )
+    parser.add_argument(
+        "--decision-y-limits",
+        nargs=2,
+        type=float,
+        default=(0.0, 500.0),
+        metavar=("YMIN", "YMAX"),
+        help="Decision-region y-axis display limits (default: 0 500).",
+    )
+    parser.add_argument(
+        "--drop-bin-size",
+        type=int,
+        default=20,
+        help="Number of training steps averaged into each drop-ratio bar.",
     )
     parser.add_argument(
         "--sampling-seed",
@@ -110,6 +139,16 @@ def parse_args() -> argparse.Namespace:
         parser.error("--sample-limit must be positive")
     if not 0.5 < args.scatter_quantile < 1.0:
         parser.error("--scatter-quantile must be in (0.5, 1.0)")
+    if args.drop_bin_size <= 0:
+        parser.error("--drop-bin-size must be positive")
+    for option in (
+        "score_y_limits",
+        "decision_x_limits",
+        "decision_y_limits",
+    ):
+        limits = getattr(args, option)
+        if limits[0] >= limits[1]:
+            parser.error(f"--{option.replace('_', '-')} requires MIN < MAX")
     return args
 
 
@@ -452,7 +491,11 @@ def _draw_mean_std(
     )
 
 
-def plot_score_decomposition(summary: pd.DataFrame, output_dir: Path) -> None:
+def plot_score_decomposition(
+    summary: pd.DataFrame,
+    output_dir: Path,
+    y_limits: tuple[float, float],
+) -> None:
     x = summary["step"].to_numpy(dtype=np.float64)
     fig, ax = plt.subplots(figsize=MAIN_FIGSIZE)
     _draw_mean_std(
@@ -488,6 +531,9 @@ def plot_score_decomposition(summary: pd.DataFrame, output_dir: Path) -> None:
     ax.axhline(0.0, color="black", linewidth=1.0, alpha=0.65)
     ax.set_xlabel("Training step", fontsize=LABEL_FS)
     ax.set_ylabel("Score mean", labelpad=8, fontsize=LABEL_FS)
+    ax.set_ylim(*y_limits)
+    if tuple(y_limits) == (-10.0, 30.0):
+        ax.set_yticks([-10, 0, 10, 20, 30])
     style_axes(ax)
     ax.legend(
         loc="upper center",
@@ -504,17 +550,29 @@ def plot_score_decomposition(summary: pd.DataFrame, output_dir: Path) -> None:
     savefig(fig, output_dir / "01_score_decomposition_over_steps.png")
 
 
-def plot_drop_ratio_story(summary: pd.DataFrame, output_dir: Path) -> None:
-    x = summary["step"].to_numpy(dtype=np.float64)
-    dtv_drop = summary["dtv_drop_ratio"].to_numpy(dtype=np.float64)
-    loo_drop = summary["loo_drop_ratio"].to_numpy(dtype=np.float64)
+def plot_drop_ratio_story(
+    summary: pd.DataFrame,
+    output_dir: Path,
+    bin_size: int,
+) -> None:
+    binned = summary.assign(
+        step_bin=((summary["step"].astype(int) - 1) // bin_size)
+    ).groupby("step_bin", as_index=False).agg(
+        step=("step", "mean"),
+        dtv_drop_ratio=("dtv_drop_ratio", "mean"),
+        loo_drop_ratio=("loo_drop_ratio", "mean"),
+    )
+    x = binned["step"].to_numpy(dtype=np.float64)
+    dtv_drop = binned["dtv_drop_ratio"].to_numpy(dtype=np.float64)
+    loo_drop = binned["loo_drop_ratio"].to_numpy(dtype=np.float64)
     additional = np.clip(loo_drop - dtv_drop, 0.0, None)
+    bar_width = max(0.82, 0.82 * bin_size)
 
     fig, ax = plt.subplots(figsize=MAIN_FIGSIZE)
     ax.bar(
         x,
         dtv_drop,
-        width=0.82,
+        width=bar_width,
         color=COLOR_DTV_DROP,
         alpha=0.95,
         edgecolor="white",
@@ -525,7 +583,7 @@ def plot_drop_ratio_story(summary: pd.DataFrame, output_dir: Path) -> None:
         x,
         additional,
         bottom=dtv_drop,
-        width=0.82,
+        width=bar_width,
         color=COLOR_LOO,
         alpha=0.62,
         edgecolor="white",
@@ -561,34 +619,16 @@ def classify_decisions(samples: pd.DataFrame) -> pd.Series:
     return pd.Series(labels, index=samples.index)
 
 
-def _display_limits(
-    values: np.ndarray,
-    quantile: float,
-    include_zero: bool = True,
-) -> tuple[float, float]:
-    lower = float(np.quantile(values, 1.0 - quantile))
-    upper = float(np.quantile(values, quantile))
-    if include_zero:
-        lower = min(lower, 0.0)
-        upper = max(upper, 0.0)
-    if not lower < upper:
-        padding = max(abs(lower) * 0.05, 1.0)
-        return lower - padding, upper + padding
-    padding = 0.05 * (upper - lower)
-    return lower - padding, upper + padding
-
-
 def plot_decision_regions(
     samples: pd.DataFrame,
     output_dir: Path,
     sample_limit: int,
-    scatter_quantile: float,
+    x_limits: tuple[float, float],
+    y_limits: tuple[float, float],
     sampling_seed: int,
 ) -> dict[str, float | int]:
-    x_values = samples["cross_term"].to_numpy(dtype=np.float64)
-    y_values = samples["self_term"].to_numpy(dtype=np.float64)
-    x_min, x_max = _display_limits(x_values, scatter_quantile)
-    y_min, y_max = _display_limits(y_values, scatter_quantile)
+    x_min, x_max = x_limits
+    y_min, y_max = y_limits
 
     visible = samples[
         samples["cross_term"].between(x_min, x_max)
@@ -656,6 +696,10 @@ def plot_decision_regions(
     )
     ax.set_xlim(x_min, x_max)
     ax.set_ylim(y_min, y_max)
+    requested_x_ticks = [-40, -20, 0, 20, 40, 60, 80]
+    ax.set_xticks([tick for tick in requested_x_ticks if x_min <= tick <= x_max])
+    requested_y_ticks = [0, 100, 200, 300, 400, 500]
+    ax.set_yticks([tick for tick in requested_y_ticks if y_min <= tick <= y_max])
     ax.set_xlabel("Cross-term score", fontsize=LABEL_FS)
     ax.set_ylabel("Self-term score", labelpad=8, fontsize=LABEL_FS)
     style_axes(ax)
@@ -700,7 +744,11 @@ def plot_decision_regions(
     }
 
 
-def plot_conflict_means(conflicts: pd.DataFrame, output_dir: Path) -> None:
+def plot_conflict_means(
+    conflicts: pd.DataFrame,
+    output_dir: Path,
+    y_limits: tuple[float, float],
+) -> None:
     x = conflicts["step"].to_numpy(dtype=np.float64)
     fig, ax = plt.subplots(figsize=MAIN_FIGSIZE)
     _draw_mean_std(
@@ -726,6 +774,9 @@ def plot_conflict_means(conflicts: pd.DataFrame, output_dir: Path) -> None:
     ax.axhline(0.0, color="black", linewidth=1.0, alpha=0.65)
     ax.set_xlabel("Training step", fontsize=LABEL_FS)
     ax.set_ylabel("Conflicted case score", labelpad=8, fontsize=LABEL_FS)
+    ax.set_ylim(*y_limits)
+    if tuple(y_limits) == (-10.0, 30.0):
+        ax.set_yticks([-10, 0, 10, 20, 30])
     style_axes(ax)
     ax.legend(
         loc="upper center",
@@ -770,7 +821,8 @@ def write_validation_report(
         **scatter_report,
         "notes": [
             "All score means and standard deviations use full untrimmed values.",
-            "Scatter axis quantiles affect display only.",
+            "Fixed score/scatter axis limits affect display only.",
+            "Drop-ratio bars average adjacent steps for display only.",
             "LOO decisions use the raw zero-score threshold, not the final cap mask.",
             "No advantage or reward fields are loaded or analyzed.",
         ],
@@ -844,16 +896,20 @@ def main() -> None:
     )
     write_overall_summary(samples, output_dir)
 
-    plot_score_decomposition(summary, output_dir)
-    plot_drop_ratio_story(summary, output_dir)
+    score_y_limits = tuple(args.score_y_limits)
+    decision_x_limits = tuple(args.decision_x_limits)
+    decision_y_limits = tuple(args.decision_y_limits)
+    plot_score_decomposition(summary, output_dir, score_y_limits)
+    plot_drop_ratio_story(summary, output_dir, args.drop_bin_size)
     scatter_report = plot_decision_regions(
         samples,
         output_dir,
         args.sample_limit,
-        args.scatter_quantile,
+        decision_x_limits,
+        decision_y_limits,
         args.sampling_seed,
     )
-    plot_conflict_means(conflict_summary, output_dir)
+    plot_conflict_means(conflict_summary, output_dir, score_y_limits)
     write_validation_report(
         samples,
         selection_files,
