@@ -34,6 +34,11 @@ _DEFAULT_CHECKPOINTING_OPTIONS = ocp.CheckpointManagerOptions(
 )
 
 
+def _process_local_barrier_sync_fn(*, key: str, timeout_ms: int) -> None:
+  """Skips a distributed barrier for a single active checkpoint process."""
+  del key, timeout_ms
+
+
 class CheckpointManager:
   """Checkpoint manager for PEFT."""
 
@@ -56,14 +61,33 @@ class CheckpointManager:
     if root_directory is not None and self._is_primary_process:
       os.makedirs(root_directory, exist_ok=True)
       if jax.process_count() > 1:
+        async_options = checkpoint_manager_options.async_options
+        if not checkpoint_manager_options.enable_async_checkpointing:
+          # Orbax also uses AsyncOptions for its save-progress tracker during
+          # synchronous saves. That tracker does not need a distributed barrier
+          # when this manager has exactly one active process.
+          if async_options is None:
+            async_options = ocp.options.AsyncOptions()
+          async_options = dataclasses.replace(
+              async_options,
+              barrier_sync_fn=_process_local_barrier_sync_fn,
+          )
         checkpoint_manager_options = dataclasses.replace(
             checkpoint_manager_options,
             create=False,
+            async_options=async_options,
             multiprocessing_options=ocp.options.MultiprocessingOptions(
                 primary_host=0,
                 active_processes={0},
+                barrier_sync_key_prefix='tunix_peft_process_0',
             ),
         )
+        if not checkpoint_manager_options.enable_async_checkpointing:
+          logging.info(
+              'Configured process-local Orbax checkpoint synchronization for '
+              'JAX process 0 of %d.',
+              jax.process_count(),
+          )
     self._checkpoint_manager_options = checkpoint_manager_options
     self._item_handlers: dict[str, Any] | None = None
     if root_directory is not None and self._is_primary_process:

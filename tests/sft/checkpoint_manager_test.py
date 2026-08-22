@@ -16,6 +16,7 @@
 
 import os
 import tempfile
+from unittest import mock
 from absl.testing import absltest
 from absl.testing import parameterized
 from etils import epath
@@ -115,6 +116,53 @@ class CheckpointManagerTest(parameterized.TestCase):
         cp_manager._checkpoint_manager._options,  # pytype: disable=attribute-error
         checkpoint_manager._DEFAULT_CHECKPOINTING_OPTIONS,
     )
+
+  @mock.patch.object(checkpoint_manager.jax, 'process_count', return_value=2)
+  @mock.patch.object(checkpoint_manager.jax, 'process_index', return_value=0)
+  def test_multihost_primary_uses_process_local_progress_barrier(
+      self, process_index, process_count
+  ):
+    del process_index, process_count
+    cp_path = f'{self.temp_path}/{self.id()}'
+    options = checkpoint_manager.ocp.CheckpointManagerOptions(
+        save_interval_steps=8,
+        max_to_keep=1,
+        enable_async_checkpointing=False,
+    )
+
+    cp_manager = checkpoint_manager.CheckpointManager(cp_path, options=options)
+    resolved_options = cp_manager._checkpoint_manager_options
+    multiprocessing_options = resolved_options.multiprocessing_options
+
+    self.assertFalse(resolved_options.create)
+    self.assertFalse(resolved_options.enable_async_checkpointing)
+    self.assertEqual(multiprocessing_options.primary_host, 0)
+    self.assertEqual(multiprocessing_options.active_processes, {0})
+    self.assertEqual(
+        multiprocessing_options.barrier_sync_key_prefix,
+        'tunix_peft_process_0',
+    )
+    self.assertIsNotNone(resolved_options.async_options)
+    resolved_options.async_options.barrier_sync_fn(
+        key='ThreadSaveMultiHostValueHolder:set_value_start::0',
+        timeout_ms=60_000,
+    )
+
+    # Resolving the distributed options must not mutate the caller's options.
+    self.assertTrue(options.create)
+    self.assertIsNone(options.async_options)
+
+  @mock.patch.object(checkpoint_manager.jax, 'process_count', return_value=2)
+  @mock.patch.object(checkpoint_manager.jax, 'process_index', return_value=1)
+  def test_multihost_nonprimary_does_not_create_checkpoint_manager(
+      self, process_index, process_count
+  ):
+    del process_index, process_count
+    cp_path = f'{self.temp_path}/{self.id()}'
+    cp_manager = checkpoint_manager.CheckpointManager(cp_path)
+
+    self.assertFalse(cp_manager._is_primary_process)
+    self.assertIsNone(cp_manager._ensure_checkpoint_manager())
 
   def test_save(self):
     cp_path = f'{self.temp_path}/{self.id()}'
