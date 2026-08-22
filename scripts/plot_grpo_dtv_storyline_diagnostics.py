@@ -30,6 +30,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+from matplotlib.ticker import MaxNLocator
 
 
 COLOR_SELF = "#1F5AA6"
@@ -102,9 +103,28 @@ def parse_args() -> argparse.Namespace:
         "--score-y-limits",
         nargs=2,
         type=float,
+        default=None,
+        metavar=("YMIN", "YMAX"),
+        help=(
+            "Deprecated shared limits for both mean/std figures. Prefer the "
+            "two figure-specific options below."
+        ),
+    )
+    parser.add_argument(
+        "--decomposition-y-limits",
+        nargs=2,
+        type=float,
         default=(-10.0, 30.0),
         metavar=("YMIN", "YMAX"),
-        help="Display limits for score mean/std figures (default: -10 30).",
+        help="Y limits for figure 01 (default: -10 30).",
+    )
+    parser.add_argument(
+        "--conflict-y-limits",
+        nargs=2,
+        type=float,
+        default=(-20.0, 1000.0),
+        metavar=("YMIN", "YMAX"),
+        help="Y limits for figure 04 (default: -20 1000).",
     )
     parser.add_argument(
         "--decision-x-limits",
@@ -129,6 +149,15 @@ def parse_args() -> argparse.Namespace:
         help="Number of training steps averaged into each drop-ratio bar.",
     )
     parser.add_argument(
+        "--smooth-window",
+        type=int,
+        default=1,
+        help=(
+            "Centered moving-average width for plotted mean/std curves only; "
+            "1 keeps the original per-step curves (default: 1)."
+        ),
+    )
+    parser.add_argument(
         "--sampling-seed",
         type=int,
         default=0,
@@ -141,12 +170,18 @@ def parse_args() -> argparse.Namespace:
         parser.error("--scatter-quantile must be in (0.5, 1.0)")
     if args.drop_bin_size <= 0:
         parser.error("--drop-bin-size must be positive")
+    if args.smooth_window <= 0:
+        parser.error("--smooth-window must be positive")
     for option in (
         "score_y_limits",
+        "decomposition_y_limits",
+        "conflict_y_limits",
         "decision_x_limits",
         "decision_y_limits",
     ):
         limits = getattr(args, option)
+        if limits is None:
+            continue
         if limits[0] >= limits[1]:
             parser.error(f"--{option.replace('_', '-')} requires MIN < MAX")
     return args
@@ -481,6 +516,23 @@ def _draw_mean_std(
         linewidth=0,
         zorder=zorder - 1,
     )
+
+
+def smooth_for_display(
+    frame: pd.DataFrame,
+    columns: tuple[str, ...],
+    window: int,
+) -> pd.DataFrame:
+    """Return centered rolling curves without changing raw exported statistics."""
+    if window == 1:
+        return frame
+    smoothed = frame.copy()
+    smoothed[list(columns)] = frame[list(columns)].rolling(
+        window=window,
+        center=True,
+        min_periods=1,
+    ).mean()
+    return smoothed
     ax.plot(
         x,
         mean,
@@ -495,7 +547,13 @@ def plot_score_decomposition(
     summary: pd.DataFrame,
     output_dir: Path,
     y_limits: tuple[float, float],
+    smooth_window: int,
 ) -> None:
+    summary = smooth_for_display(
+        summary,
+        ("dtv_mean", "dtv_std", "cross_mean", "cross_std", "self_mean", "self_std"),
+        smooth_window,
+    )
     x = summary["step"].to_numpy(dtype=np.float64)
     fig, ax = plt.subplots(figsize=MAIN_FIGSIZE)
     _draw_mean_std(
@@ -532,8 +590,7 @@ def plot_score_decomposition(
     ax.set_xlabel("Training step", fontsize=LABEL_FS)
     ax.set_ylabel("Score mean", labelpad=8, fontsize=LABEL_FS)
     ax.set_ylim(*y_limits)
-    if tuple(y_limits) == (-10.0, 30.0):
-        ax.set_yticks([-10, 0, 10, 20, 30])
+    ax.yaxis.set_major_locator(MaxNLocator(nbins=6))
     style_axes(ax)
     ax.legend(
         loc="upper center",
@@ -592,7 +649,7 @@ def plot_drop_ratio_story(
     )
     ax.set_xlabel("Training step", fontsize=LABEL_FS)
     ax.set_ylabel("Drop ratio", labelpad=8, fontsize=LABEL_FS)
-    ax.set_ylim(bottom=0.0)
+    ax.set_ylim(0.0, 0.4)
     style_axes(ax)
     ax.legend(
         loc="upper center",
@@ -696,10 +753,8 @@ def plot_decision_regions(
     )
     ax.set_xlim(x_min, x_max)
     ax.set_ylim(y_min, y_max)
-    requested_x_ticks = [-40, -20, 0, 20, 40, 60, 80]
-    ax.set_xticks([tick for tick in requested_x_ticks if x_min <= tick <= x_max])
-    requested_y_ticks = [0, 100, 200, 300, 400, 500]
-    ax.set_yticks([tick for tick in requested_y_ticks if y_min <= tick <= y_max])
+    ax.xaxis.set_major_locator(MaxNLocator(nbins=7))
+    ax.yaxis.set_major_locator(MaxNLocator(nbins=6))
     ax.set_xlabel("Cross-term score", fontsize=LABEL_FS)
     ax.set_ylabel("Self-term score", labelpad=8, fontsize=LABEL_FS)
     style_axes(ax)
@@ -748,7 +803,13 @@ def plot_conflict_means(
     conflicts: pd.DataFrame,
     output_dir: Path,
     y_limits: tuple[float, float],
+    smooth_window: int,
 ) -> None:
+    conflicts = smooth_for_display(
+        conflicts,
+        ("self_mean", "self_std", "cross_mean", "cross_std"),
+        smooth_window,
+    )
     x = conflicts["step"].to_numpy(dtype=np.float64)
     fig, ax = plt.subplots(figsize=MAIN_FIGSIZE)
     _draw_mean_std(
@@ -775,8 +836,7 @@ def plot_conflict_means(
     ax.set_xlabel("Training step", fontsize=LABEL_FS)
     ax.set_ylabel("Conflicted case score", labelpad=8, fontsize=LABEL_FS)
     ax.set_ylim(*y_limits)
-    if tuple(y_limits) == (-10.0, 30.0):
-        ax.set_yticks([-10, 0, 10, 20, 30])
+    ax.yaxis.set_major_locator(MaxNLocator(nbins=6))
     style_axes(ax)
     ax.legend(
         loc="upper center",
@@ -823,6 +883,7 @@ def write_validation_report(
             "All score means and standard deviations use full untrimmed values.",
             "Fixed score/scatter axis limits affect display only.",
             "Drop-ratio bars average adjacent steps for display only.",
+            "Optional centered smoothing affects plotted mean/std curves only.",
             "LOO decisions use the raw zero-score threshold, not the final cap mask.",
             "No advantage or reward fields are loaded or analyzed.",
         ],
@@ -896,10 +957,24 @@ def main() -> None:
     )
     write_overall_summary(samples, output_dir)
 
-    score_y_limits = tuple(args.score_y_limits)
+    if args.score_y_limits is not None:
+        decomposition_y_limits = tuple(args.score_y_limits)
+        conflict_y_limits = tuple(args.score_y_limits)
+        print(
+            "[WARN] --score-y-limits is deprecated; use "
+            "--decomposition-y-limits and --conflict-y-limits"
+        )
+    else:
+        decomposition_y_limits = tuple(args.decomposition_y_limits)
+        conflict_y_limits = tuple(args.conflict_y_limits)
     decision_x_limits = tuple(args.decision_x_limits)
     decision_y_limits = tuple(args.decision_y_limits)
-    plot_score_decomposition(summary, output_dir, score_y_limits)
+    plot_score_decomposition(
+        summary,
+        output_dir,
+        decomposition_y_limits,
+        args.smooth_window,
+    )
     plot_drop_ratio_story(summary, output_dir, args.drop_bin_size)
     scatter_report = plot_decision_regions(
         samples,
@@ -909,7 +984,12 @@ def main() -> None:
         decision_y_limits,
         args.sampling_seed,
     )
-    plot_conflict_means(conflict_summary, output_dir, score_y_limits)
+    plot_conflict_means(
+        conflict_summary,
+        output_dir,
+        conflict_y_limits,
+        args.smooth_window,
+    )
     write_validation_report(
         samples,
         selection_files,
