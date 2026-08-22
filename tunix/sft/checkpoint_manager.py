@@ -141,6 +141,31 @@ class CheckpointManager:
         item,
     )
 
+  def _detach_external_restored_checkpoint(
+      self, manager: ocp.CheckpointManager, step: int
+  ) -> None:
+    """Stops Orbax retention from deleting an external resume symlink."""
+    if self._root_directory is None:
+      return
+    checkpoint_path = os.path.join(self._root_directory, str(step))
+    if not os.path.islink(checkpoint_path):
+      return
+    checkpoint_target = os.path.realpath(checkpoint_path)
+    root_directory = os.path.realpath(self._root_directory)
+    if (
+        os.path.commonpath((root_directory, checkpoint_target))
+        == root_directory
+    ):
+      return
+    os.unlink(checkpoint_path)
+    manager.reload()
+    logging.info(
+        'Detached restored checkpoint symlink %s -> %s after successful '
+        'restore; the source checkpoint remains unchanged.',
+        checkpoint_path,
+        checkpoint_target,
+    )
+
   def latest_step(self) -> int | None:
     """Returns the latest step."""
     if not self._has_checkpoint_entries():
@@ -328,6 +353,7 @@ class CheckpointManager:
         time.time() - restore_start,
     )
     custom_metadata = metadata.custom_metadata if metadata else {}
+    self._detach_external_restored_checkpoint(manager, step)
     return step, custom_metadata
 
   def close(self):

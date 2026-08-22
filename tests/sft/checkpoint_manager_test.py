@@ -164,6 +164,34 @@ class CheckpointManagerTest(parameterized.TestCase):
     self.assertFalse(cp_manager._is_primary_process)
     self.assertIsNone(cp_manager._ensure_checkpoint_manager())
 
+  def test_detach_external_restored_checkpoint_symlink(self):
+    cp_path = f'{self.temp_path}/{self.id()}/actor'
+    source_path = f'{self.temp_path}/{self.id()}/source/314'
+    os.makedirs(cp_path)
+    os.makedirs(source_path)
+    checkpoint_path = os.path.join(cp_path, '314')
+    os.symlink(source_path, checkpoint_path)
+    cp_manager = checkpoint_manager.CheckpointManager(cp_path)
+    manager = mock.MagicMock()
+
+    cp_manager._detach_external_restored_checkpoint(manager, 314)
+
+    self.assertFalse(os.path.lexists(checkpoint_path))
+    self.assertTrue(os.path.isdir(source_path))
+    manager.reload.assert_called_once_with()
+
+  def test_keep_restored_checkpoint_directory(self):
+    cp_path = f'{self.temp_path}/{self.id()}/actor'
+    checkpoint_path = os.path.join(cp_path, '314')
+    os.makedirs(checkpoint_path)
+    cp_manager = checkpoint_manager.CheckpointManager(cp_path)
+    manager = mock.MagicMock()
+
+    cp_manager._detach_external_restored_checkpoint(manager, 314)
+
+    self.assertTrue(os.path.isdir(checkpoint_path))
+    manager.reload.assert_not_called()
+
   def test_save(self):
     cp_path = f'{self.temp_path}/{self.id()}'
     cp_manager = checkpoint_manager.CheckpointManager(cp_path)
