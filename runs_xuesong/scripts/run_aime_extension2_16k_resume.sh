@@ -118,8 +118,19 @@ case "$MODE" in
     export TUNIX_SKIP_FINAL_CHECKPOINT=1
     ;;
   formal)
-    ADDITIONAL_STEPS=64
-    TARGET_STEP=$((RESUME_STEP + ADDITIONAL_STEPS))
+    # Keep the scientific endpoint fixed when resuming from an intermediate
+    # extension checkpoint. Without an explicit endpoint, retain the original
+    # behavior of training 64 additional steps from the requested checkpoint.
+    TARGET_STEP="${FORMAL_TARGET_STEP:-$((RESUME_STEP + 64))}"
+    [[ "$TARGET_STEP" =~ ^[1-9][0-9]*$ ]] || {
+      echo "invalid FORMAL_TARGET_STEP=$TARGET_STEP" >&2
+      exit 2
+    }
+    (( TARGET_STEP > RESUME_STEP )) || {
+      echo "FORMAL_TARGET_STEP must be greater than RESUME_STEP; got target=$TARGET_STEP resume=$RESUME_STEP" >&2
+      exit 2
+    }
+    ADDITIONAL_STEPS=$((TARGET_STEP - RESUME_STEP))
     BATCH_SIZE=128
     MINI_BATCH_SIZE=128
     # The original one-pass dataset supplied 314 complete batches. Repeating
@@ -129,12 +140,14 @@ case "$MODE" in
     NUM_BATCHES=314
     NUM_TRAIN_EPOCHS=2
     # PeftTrainer evaluates periodic checkpoint intervals against the absolute
-    # restored train step. Saving at the absolute target protects the formal
-    # result from a later distributed teardown failure.
-    CHECKPOINT_SAVE_INTERVAL="$TARGET_STEP"
+    # restored train step. The default still saves only at the target, while an
+    # explicit interval can protect long runs from TPU-node restarts.
+    CHECKPOINT_SAVE_INTERVAL="${FORMAL_CHECKPOINT_INTERVAL:-$TARGET_STEP}"
     unset TUNIX_SKIP_FINAL_CHECKPOINT || true
     ;;
 esac
+
+CHECKPOINT_MAX_TO_KEEP="${CHECKPOINT_MAX_TO_KEEP:-2}"
 
 (( BATCH_SIZE % 8 == 0 )) || {
   echo "BATCH_SIZE must be divisible by the eight generations per group" >&2
@@ -146,6 +159,14 @@ esac
 }
 [[ "$MAX_CONCURRENCY" =~ ^[1-9][0-9]*$ ]] || {
   echo "MAX_CONCURRENCY must be a positive integer" >&2
+  exit 2
+}
+[[ "$CHECKPOINT_SAVE_INTERVAL" =~ ^[1-9][0-9]*$ ]] || {
+  echo "CHECKPOINT_SAVE_INTERVAL must be a positive integer" >&2
+  exit 2
+}
+[[ "$CHECKPOINT_MAX_TO_KEEP" =~ ^[1-9][0-9]*$ ]] || {
+  echo "CHECKPOINT_MAX_TO_KEEP must be a positive integer" >&2
   exit 2
 }
 (( MINI_BATCH_SIZE % TRAIN_MICRO_BATCH_SIZE == 0 )) || {
@@ -195,6 +216,7 @@ echo "LR_SCHEDULE=constant_schedule"
 echo "LR=$CONSTANT_LR"
 echo "CONTINUATION_DATA_SEED=$CONTINUATION_DATA_SEED"
 echo "CHECKPOINT_SAVE_INTERVAL=$CHECKPOINT_SAVE_INTERVAL"
+echo "CHECKPOINT_MAX_TO_KEEP=$CHECKPOINT_MAX_TO_KEEP"
 echo "PROCESS_HOSTS=auto-current-endpoints-then-jax-rank-order"
 echo "RUN_ROOT=$RUN_ROOT"
 echo "LOG_ROOT=$LOG_ROOT"
@@ -223,4 +245,4 @@ exec "${REPO}/runs_xuesong/scripts/run_aime_seeded_full.sh" \
   rl_training_config.actor_optimizer_config.init_value="$CONSTANT_LR" \
   "rl_training_config.actor_optimizer_config.decay_steps=${TARGET_STEP}" \
   "rl_training_config.checkpointing_options.save_interval_steps=${CHECKPOINT_SAVE_INTERVAL}" \
-  rl_training_config.checkpointing_options.max_to_keep=2
+  "rl_training_config.checkpointing_options.max_to_keep=${CHECKPOINT_MAX_TO_KEEP}"
