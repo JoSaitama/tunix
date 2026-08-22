@@ -365,6 +365,7 @@ def load_selection_file(path: Path, seed_label: str) -> pd.DataFrame:
                         "cross_term": float(cross_term[index]),
                         "dtv_score": float(dtv_score[index]),
                         "loo_score": float(loo_score[index]),
+                        "active_gradient": bool(raw_self[index] > 0.0),
                         "kept_dtv": bool(dtv_score[index] >= 0.0),
                         "kept_loo": bool(loo_score[index] >= 0.0),
                     }
@@ -407,9 +408,13 @@ def validate_seed_alignment(samples: pd.DataFrame) -> None:
 
 
 def build_per_seed_step(samples: pd.DataFrame) -> pd.DataFrame:
+    samples = samples[samples["active_gradient"]].copy()
+    if samples.empty:
+        raise ValueError("no samples with nonzero policy-gradient signal")
     per_step = (
         samples.groupby(["seed", "step"], as_index=False, sort=True)
         .agg(
+            active_count=("active_gradient", "size"),
             dtv_mean=("dtv_score", "mean"),
             cross_mean=("cross_term", "mean"),
             self_mean=("self_term", "mean"),
@@ -438,6 +443,7 @@ def aggregate_over_seeds(per_seed_step: pd.DataFrame) -> pd.DataFrame:
     grouped = (
         per_seed_step.groupby("step", as_index=False, sort=True)
         .agg(
+            active_count=("active_count", "sum"),
             dtv_mean=("dtv_mean", "mean"),
             dtv_std=("dtv_mean", "std"),
             cross_mean=("cross_mean", "mean"),
@@ -465,7 +471,9 @@ def aggregate_over_seeds(per_seed_step: pd.DataFrame) -> pd.DataFrame:
 
 
 def build_conflict_summary(samples: pd.DataFrame) -> pd.DataFrame:
-    conflicts = samples[samples["kept_dtv"] & ~samples["kept_loo"]].copy()
+    conflicts = samples[
+        samples["active_gradient"] & samples["kept_dtv"] & ~samples["kept_loo"]
+    ].copy()
     if conflicts.empty:
         raise ValueError("no self-protected conflict samples were found")
 
@@ -506,7 +514,7 @@ def _draw_mean_std(
     label: str,
     zorder: int,
 ) -> None:
-    # Full, untrimmed values are used for both mean and sample standard deviation.
+    # Full, untrimmed active-gradient values feed both mean and sample std.
     ax.fill_between(
         x,
         mean - std,
@@ -515,6 +523,14 @@ def _draw_mean_std(
         alpha=0.35,
         linewidth=0,
         zorder=zorder - 1,
+    )
+    ax.plot(
+        x,
+        mean,
+        color=line_color,
+        linewidth=LINE_W,
+        label=label,
+        zorder=zorder,
     )
 
 
@@ -533,14 +549,18 @@ def smooth_for_display(
         min_periods=1,
     ).mean()
     return smoothed
-    ax.plot(
-        x,
-        mean,
-        color=line_color,
-        linewidth=LINE_W,
-        label=label,
-        zorder=zorder,
-    )
+
+
+def hide_highest_y_tick_label(ax: plt.Axes) -> None:
+    """Hide the highest visible y tick while retaining its grid line."""
+    lower, upper = ax.get_ylim()
+    ticks = [tick for tick in ax.get_yticks() if lower <= tick <= upper]
+    if not ticks:
+        return
+    labels = [f"{tick:g}" for tick in ticks]
+    labels[-1] = ""
+    ax.set_yticks(ticks)
+    ax.set_yticklabels(labels)
 
 
 def plot_score_decomposition(
@@ -592,6 +612,7 @@ def plot_score_decomposition(
     ax.set_ylim(*y_limits)
     ax.yaxis.set_major_locator(MaxNLocator(nbins=6))
     style_axes(ax)
+    hide_highest_y_tick_label(ax)
     ax.legend(
         loc="upper center",
         bbox_to_anchor=(0.5, 1.0),
@@ -649,8 +670,9 @@ def plot_drop_ratio_story(
     )
     ax.set_xlabel("Training step", fontsize=LABEL_FS)
     ax.set_ylabel("Drop ratio", labelpad=8, fontsize=LABEL_FS)
-    ax.set_ylim(0.0, 0.4)
+    ax.set_ylim(0.0, 0.35)
     style_axes(ax)
+    hide_highest_y_tick_label(ax)
     ax.legend(
         loc="upper center",
         bbox_to_anchor=(0.5, 1.0),
@@ -684,6 +706,7 @@ def plot_decision_regions(
     y_limits: tuple[float, float],
     sampling_seed: int,
 ) -> dict[str, float | int]:
+    samples = samples[samples["active_gradient"]].copy()
     x_min, x_max = x_limits
     y_min, y_max = y_limits
 
@@ -758,6 +781,7 @@ def plot_decision_regions(
     ax.set_xlabel("Cross-term score", fontsize=LABEL_FS)
     ax.set_ylabel("Self-term score", labelpad=8, fontsize=LABEL_FS)
     style_axes(ax)
+    hide_highest_y_tick_label(ax)
     legend = ax.legend(
         loc="upper right",
         bbox_to_anchor=(1.01, 1.01),
@@ -838,6 +862,7 @@ def plot_conflict_means(
     ax.set_ylim(*y_limits)
     ax.yaxis.set_major_locator(MaxNLocator(nbins=6))
     style_axes(ax)
+    hide_highest_y_tick_label(ax)
     ax.legend(
         loc="upper center",
         bbox_to_anchor=(0.5, 1.03),
@@ -856,13 +881,33 @@ def write_validation_report(
     output_dir: Path,
 ) -> None:
     decisions = {
-        "both_keep": int((samples["kept_dtv"] & samples["kept_loo"]).sum()),
-        "dtv_keeps_only": int(
-            (samples["kept_dtv"] & ~samples["kept_loo"]).sum()
+        "both_keep": int(
+            (
+                samples["active_gradient"]
+                & samples["kept_dtv"]
+                & samples["kept_loo"]
+            ).sum()
         ),
-        "both_drop": int((~samples["kept_dtv"] & ~samples["kept_loo"]).sum()),
+        "dtv_keeps_only": int(
+            (
+                samples["active_gradient"]
+                & samples["kept_dtv"]
+                & ~samples["kept_loo"]
+            ).sum()
+        ),
+        "both_drop": int(
+            (
+                samples["active_gradient"]
+                & ~samples["kept_dtv"]
+                & ~samples["kept_loo"]
+            ).sum()
+        ),
         "loo_keeps_only": int(
-            (~samples["kept_dtv"] & samples["kept_loo"]).sum()
+            (
+                samples["active_gradient"]
+                & ~samples["kept_dtv"]
+                & samples["kept_loo"]
+            ).sum()
         ),
     }
     report = {
@@ -878,12 +923,15 @@ def write_validation_report(
             for seed, group in samples.groupby("seed", sort=False)
         },
         "decision_counts_raw_threshold": decisions,
+        "active_gradient_samples": int(samples["active_gradient"].sum()),
+        "inactive_zero_gradient_samples": int((~samples["active_gradient"]).sum()),
         **scatter_report,
         "notes": [
-            "All score means and standard deviations use full untrimmed values.",
+            "All active-gradient score means/std use full untrimmed values.",
             "Fixed score/scatter axis limits affect display only.",
             "Drop-ratio bars average adjacent steps for display only.",
             "Optional centered smoothing affects plotted mean/std curves only.",
+            "Effective score/drop statistics exclude raw_self == 0 samples.",
             "LOO decisions use the raw zero-score threshold, not the final cap mask.",
             "No advantage or reward fields are loaded or analyzed.",
         ],
@@ -896,10 +944,14 @@ def write_validation_report(
 def write_overall_summary(samples: pd.DataFrame, output_dir: Path) -> None:
     rows = []
     for seed, group in samples.groupby("seed", sort=False):
+        total_samples = len(group)
+        group = group[group["active_gradient"]]
         rows.append(
             {
                 "seed": seed,
-                "samples": len(group),
+                "total_samples": total_samples,
+                "active_gradient_samples": len(group),
+                "inactive_zero_gradient_samples": total_samples - len(group),
                 "self_mean": group["self_term"].mean(),
                 "cross_mean": group["cross_term"].mean(),
                 "dtv_mean": group["dtv_score"].mean(),
