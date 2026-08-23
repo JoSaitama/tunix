@@ -46,6 +46,7 @@ COLOR_GREEN = "#2CA02C"
 LINE_W = 2.0
 MAIN_FIGSIZE = (5.9, 5.2)
 PAPER_AXES_POSITION = [0.18, 0.20, 0.78, 0.76]
+COVERAGE_AXES_POSITION = [0.18, 0.20, 0.66, 0.76]
 LABEL_FS = 24
 TICK_FS = 22
 TITLE_FS = 22
@@ -114,9 +115,16 @@ def parse_args() -> argparse.Namespace:
         "--decomposition-y-limits",
         nargs=2,
         type=float,
-        default=None,
+        default=(-6.0, 35.0),
         metavar=("YMIN", "YMAX"),
         help="Explicit Figure 01 limits; overrides automatic quantile limits.",
+    )
+    parser.add_argument(
+        "--decomposition-y-ticks",
+        nargs="+",
+        type=float,
+        default=(-5.0, 0.0, 5.0, 10.0, 15.0, 20.0, 25.0, 30.0),
+        help="Explicit Figure 01 y ticks.",
     )
     parser.add_argument(
         "--decomposition-lower-quantile",
@@ -139,31 +147,65 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--completion-central-coverage",
         type=float,
-        default=0.98,
+        default=0.99,
         help=(
-            "Global completion-level diagnostic coverage. Its upper bound "
-            "is also used for the one-sided Self/DTV trend mask."
+            "Global joint central coverage for the completion-level "
+            "DTV/Self/Cross trend mask (default: 0.99)."
         ),
     )
     parser.add_argument(
-        "--overflow-bin-size",
+        "--coverage-bin-size",
         type=int,
         default=50,
-        help="Temporal bin width for Figure 01 overflow markers.",
+        help="Temporal bin width for Figure 01 retained-coverage markers.",
     )
     parser.add_argument(
-        "--overflow-label-threshold",
+        "--coverage-y-limits",
+        nargs=2,
         type=float,
-        default=0.05,
-        help="Minimum overflow fraction labeled as a percentage.",
+        default=(0.94, 1.00),
+        metavar=("YMIN", "YMAX"),
+        help="Right-axis retained-coverage limits.",
+    )
+    parser.add_argument(
+        "--coverage-y-ticks",
+        nargs="+",
+        type=float,
+        default=(0.94, 0.96, 0.98, 1.00),
+        help="Right-axis retained-coverage ticks, expressed as fractions.",
+    )
+    parser.add_argument(
+        "--coverage-alpha",
+        type=float,
+        default=0.75,
+        help="Opacity of retained-coverage markers (default: 0.75).",
+    )
+    parser.add_argument(
+        "--show-coverage-markers",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Show/hide Figure 01 retained-coverage markers and right axis.",
+    )
+    parser.add_argument(
+        "--conflict-central-coverage",
+        type=float,
+        default=0.99,
+        help="Joint central coverage for active conflict completions.",
     )
     parser.add_argument(
         "--conflict-y-limits",
         nargs=2,
         type=float,
-        default=None,
+        default=(-50.0, 180.0),
         metavar=("YMIN", "YMAX"),
         help="Explicit Figure 04 limits; default uses conflict quantiles.",
+    )
+    parser.add_argument(
+        "--conflict-y-ticks",
+        nargs="+",
+        type=float,
+        default=(-40.0, -20.0, 0.0, 20.0, 40.0, 60.0, 80.0, 100.0, 120.0, 140.0, 160.0),
+        help="Explicit Figure 04 y ticks.",
     )
     parser.add_argument(
         "--conflict-band-mode",
@@ -183,9 +225,9 @@ def parse_args() -> argparse.Namespace:
         "--decision-y-limits",
         nargs=2,
         type=float,
-        default=(0.0, 850.0),
+        default=(0.0, 1100.0),
         metavar=("YMIN", "YMAX"),
-        help="Decision-region y-axis display limits (default: 0 850).",
+        help="Decision-region y-axis display limits (default: 0 1100).",
     )
     parser.add_argument(
         "--drop-bin-size",
@@ -223,12 +265,14 @@ def parse_args() -> argparse.Namespace:
         parser.error("--scatter-quantile must be in (0.5, 1.0)")
     if args.drop_bin_size <= 0:
         parser.error("--drop-bin-size must be positive")
-    if args.overflow_bin_size <= 0:
-        parser.error("--overflow-bin-size must be positive")
-    if not 0.0 <= args.overflow_label_threshold <= 1.0:
-        parser.error("--overflow-label-threshold must be in [0, 1]")
+    if args.coverage_bin_size <= 0:
+        parser.error("--coverage-bin-size must be positive")
+    if not 0.0 <= args.coverage_alpha <= 1.0:
+        parser.error("--coverage-alpha must be in [0, 1]")
     if not 0.0 < args.completion_central_coverage <= 1.0:
         parser.error("--completion-central-coverage must be in (0, 1]")
+    if not 0.0 < args.conflict_central_coverage <= 1.0:
+        parser.error("--conflict-central-coverage must be in (0, 1]")
     if not 0.0 <= args.decomposition_lower_quantile < 0.5:
         parser.error("--decomposition-lower-quantile must be in [0, 0.5)")
     if not 0.5 < args.decomposition_upper_quantile <= 1.0:
@@ -244,6 +288,7 @@ def parse_args() -> argparse.Namespace:
         "decision_x_limits",
         "decision_y_limits",
         "drop_y_limits",
+        "coverage_y_limits",
     ):
         limits = getattr(args, option)
         if limits is None:
@@ -602,19 +647,38 @@ def apply_threshold_faithful_trend_mask(
     samples: pd.DataFrame,
     bounds: dict[str, tuple[float, float]],
 ) -> pd.DataFrame:
-    """Keep zeros and remove only the extreme positive Self/DTV tail."""
+    """Apply one common central-coverage mask to complete score tuples."""
     result = samples.copy()
-    result["trend_self_upper_outlier"] = (
-        result["self_term"] > bounds["self"][1]
-    )
-    result["trend_dtv_upper_outlier"] = (
-        result["dtv_score"] > bounds["dtv"][1]
-    )
-    result["trend_inlier"] = ~(
-        result["trend_self_upper_outlier"]
-        | result["trend_dtv_upper_outlier"]
-    )
+    columns = {"dtv": "dtv_score", "self": "self_term", "cross": "cross_term"}
+    inlier_columns = []
+    for component, column in columns.items():
+        lower, upper = bounds[component]
+        lower_name = f"trend_{component}_lower_outlier"
+        upper_name = f"trend_{component}_upper_outlier"
+        result[lower_name] = result[column] < lower
+        result[upper_name] = result[column] > upper
+        inlier_columns.extend([lower_name, upper_name])
+    result["trend_inlier"] = ~result[inlier_columns].any(axis=1)
     return result
+
+
+def build_coverage_summary(
+    samples: pd.DataFrame,
+    bin_size: int,
+) -> pd.DataFrame:
+    work = samples[["step", "trend_inlier"]].copy()
+    work["coverage_bin"] = (work["step"].astype(int) - 1) // bin_size
+    return (
+        work.groupby("coverage_bin", as_index=False, sort=True)
+        .agg(
+            step_start=("step", "min"),
+            step_end=("step", "max"),
+            step_center=("step", "mean"),
+            completion_count=("trend_inlier", "size"),
+            retained_count=("trend_inlier", "sum"),
+            retained_coverage=("trend_inlier", "mean"),
+        )
+    )
 
 
 def _draw_mean_std(
@@ -637,22 +701,9 @@ def _draw_mean_std(
             raise ValueError("SEM band requires sample counts")
         uncertainty = uncertainty / np.sqrt(np.maximum(sample_count, 1.0))
 
-    visible_mean = mean.copy()
-    if y_limits is not None:
-        lower, upper = y_limits
-        visible_mean[(mean < lower) | (mean > upper)] = np.nan
-
     if band_mode != "none":
         band_lower = mean - uncertainty
         band_upper = mean + uncertainty
-        if y_limits is not None:
-            valid_band = (
-                (band_lower >= y_limits[0])
-                & (band_upper <= y_limits[1])
-                & np.isfinite(visible_mean)
-            )
-            band_lower = np.where(valid_band, band_lower, np.nan)
-            band_upper = np.where(valid_band, band_upper, np.nan)
         ax.fill_between(
             x,
             band_lower,
@@ -664,7 +715,7 @@ def _draw_mean_std(
         )
     ax.plot(
         x,
-        visible_mean,
+        mean,
         color=line_color,
         linewidth=LINE_W,
         label=label,
@@ -699,93 +750,6 @@ def _nice_conflict_limits(summary: pd.DataFrame) -> tuple[float, float]:
     )
 
 
-def build_overflow_summary(
-    samples: pd.DataFrame,
-    bounds: dict[str, tuple[float, float]],
-    bin_size: int,
-) -> pd.DataFrame:
-    work = samples[["step", "dtv_score", "self_term", "cross_term"]].copy()
-    work["overflow_bin"] = (work["step"].astype(int) - 1) // bin_size
-    rows = []
-    for _, group in work.groupby("overflow_bin", sort=True):
-        row: dict[str, float | int] = {
-            "step_start": int(group["step"].min()),
-            "step_end": int(group["step"].max()),
-            "step_center": float(group["step"].mean()),
-            "num_steps": int(len(group)),
-        }
-        for component, column in (
-            ("dtv", "dtv_score"),
-            ("self", "self_term"),
-            ("cross", "cross_term"),
-        ):
-            values = group[column]
-            lower, upper = bounds[component]
-            row[f"{component}_upper_overflow_fraction"] = float(
-                (values > upper).mean()
-            )
-            row[f"{component}_lower_overflow_fraction"] = float(
-                (values < lower).mean()
-            )
-        rows.append(row)
-    return pd.DataFrame(rows)
-
-
-def _format_percent(fraction: float) -> str:
-    value = 100.0 * fraction
-    return f"{value:.1f}".rstrip("0").rstrip(".") + "%"
-
-
-def draw_overflow_markers(
-    ax: plt.Axes,
-    overflow: pd.DataFrame,
-    y_limits: tuple[float, float],
-    label_threshold: float,
-) -> None:
-    lower, upper = y_limits
-    span = upper - lower
-    components = (
-        ("dtv", COLOR_DTV),
-        ("self", COLOR_SELF),
-        ("cross", COLOR_LOO),
-    )
-    for index, (component, color) in enumerate(components):
-        upper_y = upper - span * (0.025 + 0.035 * index)
-        lower_y = lower + span * (0.025 + 0.035 * index)
-        for direction, marker, y_value in (
-            ("upper", "^", upper_y),
-            ("lower", "v", lower_y),
-        ):
-            fractions = overflow[f"{component}_{direction}_overflow_fraction"]
-            for step, fraction in zip(overflow["step_center"], fractions):
-                fraction = float(fraction)
-                if fraction <= 0.0:
-                    continue
-                size = 18.0 + 150.0 * min(fraction / 0.20, 1.0)
-                ax.scatter(
-                    [step],
-                    [y_value],
-                    marker=marker,
-                    s=size,
-                    color=color,
-                    edgecolors="none",
-                    zorder=20,
-                )
-                if fraction >= label_threshold:
-                    vertical = -8 if direction == "upper" else 8
-                    ax.annotate(
-                        _format_percent(fraction),
-                        (step, y_value),
-                        xytext=(0, vertical),
-                        textcoords="offset points",
-                        ha="center",
-                        va="top" if direction == "upper" else "bottom",
-                        fontsize=max(10, TICK_FS - 10),
-                        color=color,
-                        zorder=21,
-                    )
-
-
 def smooth_for_display(
     frame: pd.DataFrame,
     columns: tuple[str, ...],
@@ -809,8 +773,12 @@ def plot_score_decomposition(
     y_limits: tuple[float, float],
     smooth_window: int,
     band_mode: str,
-    overflow: pd.DataFrame,
-    overflow_label_threshold: float,
+    y_ticks: tuple[float, ...],
+    coverage: pd.DataFrame,
+    show_coverage_markers: bool,
+    coverage_y_limits: tuple[float, float],
+    coverage_y_ticks: tuple[float, ...],
+    coverage_alpha: float,
 ) -> None:
     summary = smooth_for_display(
         summary,
@@ -862,10 +830,48 @@ def plot_score_decomposition(
     ax.set_xlabel("Training step", fontsize=LABEL_FS)
     ax.set_ylabel("Score mean", labelpad=8, fontsize=LABEL_FS)
     ax.set_ylim(*y_limits)
-    ax.yaxis.set_major_locator(MaxNLocator(nbins=6))
+    ax.set_yticks(y_ticks)
     style_axes(ax)
-    draw_overflow_markers(ax, overflow, y_limits, overflow_label_threshold)
+    handles, labels = ax.get_legend_handles_labels()
+    if show_coverage_markers:
+        ax.set_position(COVERAGE_AXES_POSITION)
+        ax_right = ax.twinx()
+        coverage_handle = ax_right.scatter(
+            coverage["step_center"],
+            coverage["retained_coverage"],
+            marker="v",
+            s=42,
+            color=COLOR_GREEN,
+            alpha=coverage_alpha,
+            edgecolors="none",
+            zorder=15,
+            label="Retained coverage",
+        )
+        ax_right.set_ylim(*coverage_y_limits)
+        ax_right.set_yticks(coverage_y_ticks)
+        ax_right.set_yticklabels([f"{100.0 * value:g}%" for value in coverage_y_ticks])
+        ax_right.set_ylabel(
+            "Retained coverage (%)",
+            color=COLOR_GREEN,
+            fontsize=max(16, LABEL_FS - 5),
+            labelpad=5,
+        )
+        ax_right.tick_params(
+            axis="y",
+            colors=COLOR_GREEN,
+            direction="out",
+            length=3,
+            width=0.8,
+            labelsize=max(15, TICK_FS - 5),
+        )
+        ax_right.spines["right"].set_color(COLOR_GREEN)
+        ax_right.spines["right"].set_linewidth(0.9)
+        ax_right.set_position(COVERAGE_AXES_POSITION)
+        handles.append(coverage_handle)
+        labels.append("Retained coverage")
     ax.legend(
+        handles,
+        labels,
         loc="upper center",
         bbox_to_anchor=(0.5, 1.0),
         ncol=2,
@@ -1034,8 +1040,10 @@ def plot_decision_regions(
     )
     ax.set_xlim(x_min, x_max)
     ax.set_ylim(y_min, y_max)
-    ax.set_xticks(np.arange(-200.0, 401.0, 100.0))
-    ax.set_yticks(np.arange(0.0, 801.0, 200.0))
+    x_tick_start = math.ceil(x_min / 200.0) * 200.0
+    y_tick_start = math.ceil(y_min / 200.0) * 200.0
+    ax.set_xticks(np.arange(x_tick_start, x_max, 200.0))
+    ax.set_yticks(np.arange(y_tick_start, y_max, 200.0))
     ax.set_xlabel("Cross-term score", fontsize=LABEL_FS)
     ax.set_ylabel("Self-term score", labelpad=8, fontsize=LABEL_FS)
     style_axes(ax)
@@ -1086,6 +1094,7 @@ def plot_conflict_means(
     y_limits: tuple[float, float],
     smooth_window: int,
     band_mode: str,
+    y_ticks: tuple[float, ...],
 ) -> None:
     conflicts = smooth_for_display(
         conflicts,
@@ -1129,7 +1138,7 @@ def plot_conflict_means(
     ax.set_xlabel("Training step", fontsize=LABEL_FS)
     ax.set_ylabel("Conflicted case score", labelpad=8, fontsize=LABEL_FS)
     ax.set_ylim(*y_limits)
-    ax.yaxis.set_major_locator(MaxNLocator(nbins=6))
+    ax.set_yticks(y_ticks)
     style_axes(ax)
     ax.legend(
         loc="upper center",
@@ -1277,7 +1286,7 @@ def write_validation_report(
         "plot_config": plot_config,
         "notes": [
             "Threshold-faithful statistics include finite exact-zero scores.",
-            "Trend means/std use a common one-sided Self/DTV upper-tail mask.",
+            "Trend means/std use one common joint central DTV/Self/Cross mask.",
             "Fixed score/scatter axis limits affect display only.",
             "Drop-ratio bars average adjacent steps for display only.",
             "Optional centered smoothing affects plotted mean/std curves only.",
@@ -1426,8 +1435,9 @@ def main() -> None:
     trend_per_seed_step = build_per_seed_step(trend_samples)
     trend_summary = aggregate_over_seeds(trend_per_seed_step)
     conflict_summary, conflict_bounds, conflict_retained_fraction = (
-        build_conflict_summary(samples, args.completion_central_coverage)
+        build_conflict_summary(samples, args.conflict_central_coverage)
     )
+    coverage_summary = build_coverage_summary(samples, args.coverage_bin_size)
 
     # CSVs retain every finite value; scatter display clipping is not applied.
     samples.to_csv(output_dir / "grpo_dtv_decomposition_samples.csv", index=False)
@@ -1445,6 +1455,9 @@ def main() -> None:
     )
     conflict_summary.to_csv(
         output_dir / "grpo_dtv_self_protected_conflicts_per_step.csv", index=False
+    )
+    coverage_summary.to_csv(
+        output_dir / "grpo_dtv_retained_coverage_by_step_bin.csv", index=False
     )
     write_overall_summary(samples, output_dir)
     write_distribution_statistics(
@@ -1483,12 +1496,6 @@ def main() -> None:
     drop_y_limits = (
         tuple(args.drop_y_limits) if args.drop_y_limits is not None else None
     )
-    overflow = build_overflow_summary(
-        samples,
-        completion_bounds,
-        args.overflow_bin_size,
-    )
-    overflow.to_csv(output_dir / "grpo_dtv_overflow_by_step_bin.csv", index=False)
     print(
         "[DISPLAY] decomposition ylim="
         f"({decomposition_y_limits[0]:.6g}, {decomposition_y_limits[1]:.6g})"
@@ -1496,7 +1503,7 @@ def main() -> None:
     print(
         "[TREND] central coverage diagnostics="
         f"{args.completion_central_coverage:.3f}; "
-        f"one-sided Self/DTV retained={len(trend_samples) / len(samples):.3%}; "
+        f"joint DTV/Self/Cross retained={len(trend_samples) / len(samples):.3%}; "
         f"bounds={completion_bounds}"
     )
     plot_score_decomposition(
@@ -1505,8 +1512,12 @@ def main() -> None:
         decomposition_y_limits,
         args.smooth_window,
         args.decomposition_band_mode,
-        overflow,
-        args.overflow_label_threshold,
+        tuple(args.decomposition_y_ticks),
+        coverage_summary,
+        args.show_coverage_markers,
+        tuple(args.coverage_y_limits),
+        tuple(args.coverage_y_ticks),
+        args.coverage_alpha,
     )
     _, actual_drop_y_limits = plot_drop_ratio_story(
         threshold_summary,
@@ -1528,6 +1539,7 @@ def main() -> None:
         conflict_y_limits,
         args.smooth_window,
         args.conflict_band_mode,
+        tuple(args.conflict_y_ticks),
     )
     log_scatter_report = plot_log_log_self_protection(
         samples,
@@ -1544,13 +1556,19 @@ def main() -> None:
         "completion_central_coverage": args.completion_central_coverage,
         "completion_quantile_bounds": completion_bounds,
         "trend_retained_fraction": len(trend_samples) / len(samples),
+        "decomposition_y_ticks": list(args.decomposition_y_ticks),
+        "coverage_bin_size": args.coverage_bin_size,
+        "coverage_y_limits": list(args.coverage_y_limits),
+        "coverage_y_ticks": list(args.coverage_y_ticks),
+        "coverage_alpha": args.coverage_alpha,
+        "show_coverage_markers": args.show_coverage_markers,
         "conflict_ymin": conflict_y_limits[0],
         "conflict_ymax": conflict_y_limits[1],
         "conflict_band_mode": args.conflict_band_mode,
+        "conflict_central_coverage": args.conflict_central_coverage,
+        "conflict_y_ticks": list(args.conflict_y_ticks),
         "conflict_quantile_bounds": conflict_bounds,
         "conflict_retained_fraction": conflict_retained_fraction,
-        "overflow_bin_size": args.overflow_bin_size,
-        "overflow_label_threshold": args.overflow_label_threshold,
         "drop_bin_size": args.drop_bin_size,
         "drop_ymin": actual_drop_y_limits[0],
         "drop_ymax": actual_drop_y_limits[1],
