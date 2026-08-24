@@ -10,9 +10,11 @@ ordinary Policy-DTV score without recomputing gradients:
   dtv_score  = self_term + cross_term
   loo_score  = raw_cross_sum / (G - 1)
 
-All decision plots use the raw zero-score rules.  The minimum-retention cap and
-its final mask are intentionally not part of these theoretical decision-region
-figures.
+All decision plots use the raw zero-score rules.  Paper-facing figures default
+to the full threshold population, including exact-zero completions retained by
+both DTV and DTV-Loo.  ``--analysis-population active`` remains available only
+as a sensitivity diagnostic.  The minimum-retention cap and its final mask are
+intentionally not part of these theoretical decision-region figures.
 """
 
 from __future__ import annotations
@@ -91,7 +93,18 @@ def parse_args() -> argparse.Namespace:
         "--title",
         default="GSM8K | Group Policy-DTV-Loo | 5 seeds",
     )
-    parser.add_argument("--sample-limit", type=int, default=50_000)
+    parser.add_argument("--sample-limit", type=int, default=15_000)
+    parser.add_argument(
+        "--analysis-population",
+        choices=("active", "all"),
+        default="all",
+        help=(
+            "Population used by decomposition, drop-ratio, and decision-region "
+            "figures. 'all' preserves exact-zero completions according to the "
+            "DTV/DTV-Loo score>=0 rule (default: all); 'active' is a sensitivity "
+            "diagnostic only."
+        ),
+    )
     parser.add_argument(
         "--scatter-quantile",
         type=float,
@@ -116,7 +129,7 @@ def parse_args() -> argparse.Namespace:
         "--decomposition-y-limits",
         nargs=2,
         type=float,
-        default=(-6.0, 35.0),
+        default=(-5.0, 45.0),
         metavar=("YMIN", "YMAX"),
         help="Explicit Figure 01 limits; overrides automatic quantile limits.",
     )
@@ -124,7 +137,7 @@ def parse_args() -> argparse.Namespace:
         "--decomposition-y-ticks",
         nargs="+",
         type=float,
-        default=(-5.0, 0.0, 5.0, 10.0, 15.0, 20.0, 25.0, 30.0),
+        default=(-5.0, 0.0, 10.0, 20.0, 30.0, 40.0),
         help="Explicit Figure 01 y ticks.",
     )
     parser.add_argument(
@@ -143,15 +156,15 @@ def parse_args() -> argparse.Namespace:
         "--decomposition-band-mode",
         choices=("std", "sem", "none"),
         default="std",
-        help="Figure 01 uncertainty band (default: std).",
+        help="Figure 01 uncertainty band: std, sem, or none (default: std).",
     )
     parser.add_argument(
         "--completion-central-coverage",
         type=float,
-        default=0.99,
+        default=0.98,
         help=(
             "Global joint central coverage for the completion-level "
-            "DTV/Self/Cross trend mask (default: 0.99)."
+            "DTV/Self/Cross trend mask (default: 0.98)."
         ),
     )
     parser.add_argument(
@@ -193,14 +206,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--show-coverage-markers",
         action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Show/hide Figure 01 retained-coverage markers and right axis.",
+        default=False,
+        help=(
+            "Show/hide Figure 01 retained-coverage markers and right axis "
+            "(default: hidden for the paper plot)."
+        ),
     )
     parser.add_argument(
         "--conflict-central-coverage",
         type=float,
-        default=0.99,
-        help="Joint central coverage for active conflict completions.",
+        default=0.975,
+        help="Joint central coverage for DTV-keeps/DTV-Loo-drops conflicts.",
     )
     parser.add_argument(
         "--conflict-y-limits",
@@ -220,8 +236,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--conflict-hide-above-limit",
         action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Hide conflict mean points above the displayed upper limit.",
+        default=False,
+        help=(
+            "Hide conflict mean points above the displayed upper limit. "
+            "Disabled by default so the paper curve never acquires NaN gaps."
+        ),
     )
     parser.add_argument(
         "--conflict-overflow-bin-size",
@@ -238,24 +257,24 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--conflict-band-mode",
         choices=("std", "sem", "none"),
-        default="std",
-        help="Figure 04 uncertainty band (default: std).",
+        default="none",
+        help="Figure 04 uncertainty band (default: none for the paper plot).",
     )
     parser.add_argument(
         "--decision-x-limits",
         nargs=2,
         type=float,
-        default=(-250.0, 450.0),
+        default=(-100.0, 200.0),
         metavar=("XMIN", "XMAX"),
-        help="Decision-region x-axis display limits (default: -250 450).",
+        help="Decision-region x-axis display limits (default: -100 200).",
     )
     parser.add_argument(
         "--decision-y-limits",
         nargs=2,
         type=float,
-        default=(0.0, 1100.0),
+        default=(0.0, 500.0),
         metavar=("YMIN", "YMAX"),
-        help="Decision-region y-axis display limits (default: 0 1100).",
+        help="Decision-region y-axis display limits (default: 0 500).",
     )
     parser.add_argument(
         "--drop-bin-size",
@@ -621,9 +640,7 @@ def build_conflict_summary(
     samples: pd.DataFrame,
     coverage: float,
 ) -> tuple[pd.DataFrame, dict[str, tuple[float, float]], float]:
-    conflicts = samples[
-        samples["active_gradient"] & samples["kept_dtv"] & ~samples["kept_loo"]
-    ].copy()
+    conflicts = samples[samples["kept_dtv"] & ~samples["kept_loo"]].copy()
     if conflicts.empty:
         raise ValueError("no self-protected conflict samples were found")
     bounds = completion_quantile_bounds(conflicts, coverage)
@@ -1019,6 +1036,8 @@ def plot_decision_regions(
     samples = samples.copy()
     x_min, x_max = x_limits
     y_min, y_max = y_limits
+    samples["decision"] = classify_decisions(samples)
+    decision_fractions = samples["decision"].value_counts(normalize=True)
 
     visible = samples[
         samples["cross_term"].between(x_min, x_max)
@@ -1027,7 +1046,6 @@ def plot_decision_regions(
     omitted = len(samples) - len(visible)
     if len(visible) > sample_limit:
         visible = visible.sample(n=sample_limit, random_state=sampling_seed)
-    visible["decision"] = classify_decisions(visible)
 
     order = (
         "Keep by both",
@@ -1049,19 +1067,28 @@ def plot_decision_regions(
     }
 
     fig, ax = plt.subplots(figsize=MAIN_FIGSIZE)
+    visual_style = {
+        "Keep by both": (4.0, 0.24, 2),
+        "DTV keeps / LOO drops": (5.0, 0.48, 5),
+        "Drop by both": (5.0, 0.48, 4),
+        "DTV drops / LOO keeps": (5.0, 0.48, 3),
+    }
     for label in order:
         subset = visible[visible["decision"] == label]
         if subset.empty:
             continue
+        marker_size, marker_alpha, marker_zorder = visual_style[label]
+        fraction = float(decision_fractions.get(label, 0.0))
         ax.scatter(
             subset["cross_term"],
             subset["self_term"],
-            s=9,
-            alpha=0.85,
+            s=marker_size,
+            alpha=marker_alpha,
             color=color_map[label],
-            label=label_map[label],
+            label=f"{label_map[label]} ({100.0 * fraction:.1f}%)",
             edgecolors="none",
             rasterized=True,
+            zorder=marker_zorder,
         )
 
     ax.axhline(0.0, color="black", linewidth=0.9, alpha=0.50)
@@ -1086,10 +1113,12 @@ def plot_decision_regions(
     )
     ax.set_xlim(x_min, x_max)
     ax.set_ylim(y_min, y_max)
-    x_tick_start = math.ceil(x_min / 200.0) * 200.0
-    y_tick_start = math.ceil(y_min / 200.0) * 200.0
-    ax.set_xticks(np.arange(x_tick_start, x_max, 200.0))
-    ax.set_yticks(np.arange(y_tick_start, y_max, 200.0))
+    x_tick_step = 100.0 if (x_max - x_min) <= 400.0 else 200.0
+    y_tick_step = 100.0 if (y_max - y_min) <= 600.0 else 200.0
+    x_tick_start = math.ceil(x_min / x_tick_step) * x_tick_step
+    y_tick_start = math.ceil(y_min / y_tick_step) * y_tick_step
+    ax.set_xticks(np.arange(x_tick_start, x_max, x_tick_step))
+    ax.set_yticks(np.arange(y_tick_start, y_max, y_tick_step))
     ax.set_xlabel("Cross-term score", fontsize=LABEL_FS)
     ax.set_ylabel("Self-term score", labelpad=8, fontsize=LABEL_FS)
     style_axes(ax)
@@ -1098,7 +1127,7 @@ def plot_decision_regions(
         bbox_to_anchor=(1.01, 1.01),
         ncol=1,
         frameon=False,
-        fontsize=LEGEND_FS,
+        fontsize=max(14, LEGEND_FS - 3),
         markerscale=1.5,
         scatterpoints=1,
         handlelength=1.0,
@@ -1131,6 +1160,19 @@ def plot_decision_regions(
         "scatter_x_max": x_max,
         "scatter_y_min": y_min,
         "scatter_y_max": y_max,
+        "scatter_display_fraction": (len(samples) - omitted) / len(samples),
+        "decision_both_keep_fraction": float(
+            decision_fractions.get("Keep by both", 0.0)
+        ),
+        "decision_dtv_keeps_only_fraction": float(
+            decision_fractions.get("DTV keeps / LOO drops", 0.0)
+        ),
+        "decision_both_drop_fraction": float(
+            decision_fractions.get("Drop by both", 0.0)
+        ),
+        "decision_loo_keeps_only_fraction": float(
+            decision_fractions.get("DTV drops / LOO keeps", 0.0)
+        ),
     }
 
 
@@ -1266,11 +1308,9 @@ def plot_log_log_self_protection(
     sample_limit: int,
     sampling_seed: int,
 ) -> dict[str, float | int]:
-    conflicts = samples[
-        samples["active_gradient"] & (samples["cross_term"] < 0.0)
-    ].copy()
+    conflicts = samples[samples["cross_term"] < 0.0].copy()
     if conflicts.empty:
-        raise ValueError("no active-gradient samples with negative Cross-term")
+        raise ValueError("no samples with negative Cross-term")
     conflicts["abs_cross_term"] = -conflicts["cross_term"]
     conflicts["self_to_abs_cross_ratio"] = (
         conflicts["self_term"] / conflicts["abs_cross_term"]
@@ -1321,8 +1361,8 @@ def plot_log_log_self_protection(
     ax.set_yscale("log")
     ax.set_xlim(boundary_min, boundary_max)
     ax.set_ylim(boundary_min, boundary_max)
-    ax.set_xlabel("Absolute Cross-term magnitude", fontsize=LABEL_FS)
-    ax.set_ylabel("Self-term score", labelpad=8, fontsize=LABEL_FS)
+    ax.set_xlabel(r"$|C|$", fontsize=LABEL_FS)
+    ax.set_ylabel(r"$S$", labelpad=8, fontsize=LABEL_FS)
     style_axes(ax)
     ax.legend(
         loc="upper left",
@@ -1340,7 +1380,7 @@ def plot_log_log_self_protection(
     )
     ratios = conflicts["self_to_abs_cross_ratio"].to_numpy(dtype=np.float64)
     return {
-        "negative_cross_active_samples": int(len(conflicts)),
+        "negative_cross_threshold_samples": int(len(conflicts)),
         "log_scatter_plotted_samples": int(len(plotted)),
         "self_to_abs_cross_ratio_median": float(np.quantile(ratios, 0.50)),
         "self_to_abs_cross_ratio_p90": float(np.quantile(ratios, 0.90)),
@@ -1353,27 +1393,126 @@ def plot_log_log_self_protection(
     }
 
 
+def plot_normalized_conflict_strength_ecdf(
+    samples: pd.DataFrame,
+    output_dir: Path,
+) -> dict[str, float | int]:
+    """Plot a bounded, scale-free measure of negative Cross-term strength."""
+    conflicts = samples[samples["kept_dtv"] & ~samples["kept_loo"]].copy()
+    if conflicts.empty:
+        raise ValueError("no active DTV-keeps/LOO-drops conflict samples")
+
+    denominator = conflicts["self_term"] + conflicts["cross_term"].abs()
+    valid = np.isfinite(denominator) & (denominator > 0.0)
+    conflicts = conflicts[valid].copy()
+    conflicts["normalized_cross_strength"] = (
+        conflicts["cross_term"].abs()
+        / (conflicts["self_term"] + conflicts["cross_term"].abs())
+    )
+    conflicts = conflicts.sort_values(
+        "normalized_cross_strength", kind="mergesort"
+    ).reset_index(drop=True)
+    conflicts["ecdf"] = (
+        np.arange(1, len(conflicts) + 1, dtype=np.float64) / len(conflicts)
+    )
+
+    strength = conflicts["normalized_cross_strength"].to_numpy(dtype=np.float64)
+    median = float(np.quantile(strength, 0.50))
+    fig, ax = plt.subplots(figsize=MAIN_FIGSIZE)
+    ax.plot(
+        strength,
+        conflicts["ecdf"].to_numpy(dtype=np.float64),
+        color=COLOR_LOO,
+        linewidth=LINE_W,
+        label="GRPO–GSM8K",
+        zorder=5,
+    )
+    ax.axvline(
+        median,
+        color=COLOR_DARK_GRAY,
+        linewidth=1.6,
+        linestyle="--",
+        label=f"Median = {median:.3f}",
+        zorder=4,
+    )
+    ax.set_xlim(0.0, 0.5)
+    ax.set_ylim(0.0, 1.02)
+    ax.set_xticks(np.arange(0.0, 0.51, 0.1))
+    ax.set_yticks(np.arange(0.0, 1.01, 0.2))
+    ax.set_xlabel(r"$|C|/(S+|C|)$", fontsize=LABEL_FS)
+    ax.set_ylabel("Cumulative fraction", labelpad=8, fontsize=LABEL_FS)
+    style_axes(ax)
+    ax.legend(
+        loc="lower right",
+        frameon=False,
+        fontsize=LEGEND_FS,
+        handlelength=1.2,
+        handletextpad=0.35,
+        labelspacing=0.35,
+        borderpad=0.0,
+    )
+    savefig(fig, output_dir / "06_normalized_conflict_strength_ecdf.png")
+    conflicts[
+        [
+            "seed",
+            "step",
+            "group_index",
+            "generation_index",
+            "self_term",
+            "cross_term",
+            "dtv_score",
+            "normalized_cross_strength",
+            "ecdf",
+        ]
+    ].to_csv(
+        output_dir / "grpo_dtv_normalized_conflict_strength_ecdf.csv",
+        index=False,
+    )
+    report = {
+        "normalized_conflict_samples": int(len(conflicts)),
+        "normalized_cross_strength_p25": float(np.quantile(strength, 0.25)),
+        "normalized_cross_strength_median": median,
+        "normalized_cross_strength_p75": float(np.quantile(strength, 0.75)),
+        "normalized_cross_strength_p90": float(np.quantile(strength, 0.90)),
+        "normalized_cross_strength_le_0p1_fraction": float(
+            np.mean(strength <= 0.1)
+        ),
+        "normalized_cross_strength_le_0p2_fraction": float(
+            np.mean(strength <= 0.2)
+        ),
+        "normalized_cross_strength_le_0p25_fraction": float(
+            np.mean(strength <= 0.25)
+        ),
+    }
+    path = output_dir / "grpo_dtv_normalized_conflict_strength_summary.json"
+    path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+    print(f"[SAVE] {path}")
+    return report
+
+
 def write_validation_report(
     samples: pd.DataFrame,
+    analysis_samples: pd.DataFrame,
     selection_files: list[Path],
     seed_labels: list[str],
     scatter_report: dict[str, float | int],
     log_scatter_report: dict[str, float | int],
+    normalized_strength_report: dict[str, float | int],
     plot_config: dict[str, Any],
     output_dir: Path,
 ) -> None:
     decisions = {
         "both_keep": int(
-            (samples["kept_dtv"] & samples["kept_loo"]).sum()
+            (analysis_samples["kept_dtv"] & analysis_samples["kept_loo"]).sum()
         ),
         "dtv_keeps_only": int(
-            (samples["kept_dtv"] & ~samples["kept_loo"]).sum()
+            (analysis_samples["kept_dtv"] & ~analysis_samples["kept_loo"]).sum()
         ),
         "both_drop": int(
-            (~samples["kept_dtv"] & ~samples["kept_loo"]).sum()
+            (~analysis_samples["kept_dtv"] & ~analysis_samples["kept_loo"]).sum()
         ),
         "loo_keeps_only": int(
-            (~samples["kept_dtv"] & samples["kept_loo"]).sum()
+            (~analysis_samples["kept_dtv"] & analysis_samples["kept_loo"]).sum()
         ),
     }
     report = {
@@ -1388,19 +1527,23 @@ def write_validation_report(
             str(seed): int(len(group))
             for seed, group in samples.groupby("seed", sort=False)
         },
-        "decision_counts_raw_threshold": decisions,
+        "analysis_population_samples": int(len(analysis_samples)),
+        "decision_counts_raw_threshold_analysis_population": decisions,
         "active_gradient_samples": int(samples["active_gradient"].sum()),
         "inactive_zero_gradient_samples": int((~samples["active_gradient"]).sum()),
         **scatter_report,
         **log_scatter_report,
+        **normalized_strength_report,
         "plot_config": plot_config,
         "notes": [
-            "Threshold-faithful statistics include finite exact-zero scores.",
+            "The paper-facing population is controlled by --analysis-population.",
             "Trend means/std use one common joint central DTV/Self/Cross mask.",
             "Fixed score/scatter axis limits affect display only.",
             "Drop-ratio bars average adjacent steps for display only.",
             "Optional centered smoothing affects plotted mean/std curves only.",
-            "Drop ratios and decision counts use untrimmed threshold decisions.",
+            "Drop ratios and decision counts use untrimmed analysis-population decisions.",
+            "Conflict plots use raw threshold disagreements; exact-zero samples "
+            "are retained by both methods and therefore are not conflicts.",
             "LOO decisions use the raw zero-score threshold, not the final cap mask.",
             "No advantage or reward fields are loaded or analyzed.",
         ],
@@ -1410,24 +1553,34 @@ def write_validation_report(
     print(f"[SAVE] {path}")
 
 
-def write_overall_summary(samples: pd.DataFrame, output_dir: Path) -> None:
+def write_overall_summary(
+    samples: pd.DataFrame,
+    analysis_samples: pd.DataFrame,
+    analysis_population: str,
+    output_dir: Path,
+) -> None:
     rows = []
     for seed, group in samples.groupby("seed", sort=False):
+        analyzed = analysis_samples[analysis_samples["seed"] == seed]
+        if analyzed.empty:
+            continue
         total_samples = len(group)
         rows.append(
             {
                 "seed": seed,
                 "total_samples": total_samples,
+                "analysis_population": analysis_population,
+                "analysis_population_samples": int(len(analyzed)),
                 "active_gradient_samples": int(group["active_gradient"].sum()),
                 "inactive_zero_gradient_samples": int((~group["active_gradient"]).sum()),
-                "self_mean": group["self_term"].mean(),
-                "cross_mean": group["cross_term"].mean(),
-                "dtv_mean": group["dtv_score"].mean(),
-                "loo_mean": group["loo_score"].mean(),
-                "dtv_drop_ratio": 1.0 - group["kept_dtv"].mean(),
-                "loo_drop_ratio": 1.0 - group["kept_loo"].mean(),
+                "self_mean": analyzed["self_term"].mean(),
+                "cross_mean": analyzed["cross_term"].mean(),
+                "dtv_mean": analyzed["dtv_score"].mean(),
+                "loo_mean": analyzed["loo_score"].mean(),
+                "dtv_drop_ratio": 1.0 - analyzed["kept_dtv"].mean(),
+                "loo_drop_ratio": 1.0 - analyzed["kept_loo"].mean(),
                 "self_protected_conflict_ratio": (
-                    group["kept_dtv"] & ~group["kept_loo"]
+                    analyzed["kept_dtv"] & ~analyzed["kept_loo"]
                 ).mean(),
             }
         )
@@ -1534,20 +1687,32 @@ def main() -> None:
     samples = pd.concat(frames, ignore_index=True)
     validate_seed_alignment(samples)
 
+    samples["main_analysis_population"] = (
+        samples["active_gradient"]
+        if args.analysis_population == "active"
+        else True
+    )
+    analysis_samples = samples[samples["main_analysis_population"]].copy()
+    if analysis_samples.empty:
+        raise ValueError("the selected --analysis-population is empty")
+
     completion_bounds = completion_quantile_bounds(
-        samples, args.completion_central_coverage
+        analysis_samples, args.completion_central_coverage
     )
     samples = apply_threshold_faithful_trend_mask(samples, completion_bounds)
-    trend_samples = samples[samples["trend_inlier"]].copy()
+    analysis_samples = samples[samples["main_analysis_population"]].copy()
+    trend_samples = analysis_samples[analysis_samples["trend_inlier"]].copy()
 
-    threshold_per_seed_step = build_per_seed_step(samples)
+    threshold_per_seed_step = build_per_seed_step(analysis_samples)
     threshold_summary = aggregate_over_seeds(threshold_per_seed_step)
     trend_per_seed_step = build_per_seed_step(trend_samples)
     trend_summary = aggregate_over_seeds(trend_per_seed_step)
     conflict_summary, conflict_bounds, conflict_retained_fraction = (
         build_conflict_summary(samples, args.conflict_central_coverage)
     )
-    coverage_summary = build_coverage_summary(samples, args.coverage_bin_size)
+    coverage_summary = build_coverage_summary(
+        analysis_samples, args.coverage_bin_size
+    )
 
     # CSVs retain every finite value; scatter display clipping is not applied.
     samples.to_csv(output_dir / "grpo_dtv_decomposition_samples.csv", index=False)
@@ -1569,9 +1734,14 @@ def main() -> None:
     coverage_summary.to_csv(
         output_dir / "grpo_dtv_retained_coverage_by_step_bin.csv", index=False
     )
-    write_overall_summary(samples, output_dir)
-    write_distribution_statistics(
+    write_overall_summary(
         samples,
+        analysis_samples,
+        args.analysis_population,
+        output_dir,
+    )
+    write_distribution_statistics(
+        analysis_samples,
         trend_samples,
         trend_per_seed_step,
         trend_summary,
@@ -1613,7 +1783,9 @@ def main() -> None:
     print(
         "[TREND] central coverage diagnostics="
         f"{args.completion_central_coverage:.3f}; "
-        f"joint DTV/Self/Cross retained={len(trend_samples) / len(samples):.3%}; "
+        f"population={args.analysis_population}; "
+        f"joint DTV/Self/Cross retained="
+        f"{len(trend_samples) / len(analysis_samples):.3%}; "
         f"bounds={completion_bounds}"
     )
     plot_score_decomposition(
@@ -1637,7 +1809,7 @@ def main() -> None:
         drop_y_limits,
     )
     scatter_report = plot_decision_regions(
-        samples,
+        analysis_samples,
         output_dir,
         args.sample_limit,
         decision_x_limits,
@@ -1661,7 +1833,13 @@ def main() -> None:
         args.sample_limit,
         args.sampling_seed,
     )
+    normalized_strength_report = plot_normalized_conflict_strength_ecdf(
+        samples,
+        output_dir,
+    )
     plot_config = {
+        "analysis_population": args.analysis_population,
+        "analysis_population_samples": len(analysis_samples),
         "decomposition_ymin": decomposition_y_limits[0],
         "decomposition_ymax": decomposition_y_limits[1],
         "decomposition_lower_quantile": args.decomposition_lower_quantile,
@@ -1669,7 +1847,7 @@ def main() -> None:
         "decomposition_band_mode": args.decomposition_band_mode,
         "completion_central_coverage": args.completion_central_coverage,
         "completion_quantile_bounds": completion_bounds,
-        "trend_retained_fraction": len(trend_samples) / len(samples),
+        "trend_retained_fraction": len(trend_samples) / len(analysis_samples),
         "decomposition_y_ticks": list(args.decomposition_y_ticks),
         "coverage_bin_size": args.coverage_bin_size,
         "coverage_y_limits": list(args.coverage_y_limits),
@@ -1696,10 +1874,12 @@ def main() -> None:
     }
     write_validation_report(
         samples,
+        analysis_samples,
         selection_files,
         seed_labels,
         scatter_report,
         log_scatter_report,
+        normalized_strength_report,
         plot_config,
         output_dir,
     )
