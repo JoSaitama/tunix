@@ -1067,28 +1067,20 @@ def plot_decision_regions(
     }
 
     fig, ax = plt.subplots(figsize=MAIN_FIGSIZE)
-    visual_style = {
-        "Keep by both": (4.0, 0.24, 2),
-        "DTV keeps / LOO drops": (5.0, 0.48, 5),
-        "Drop by both": (5.0, 0.48, 4),
-        "DTV drops / LOO keeps": (5.0, 0.48, 3),
-    }
     for label in order:
         subset = visible[visible["decision"] == label]
         if subset.empty:
             continue
-        marker_size, marker_alpha, marker_zorder = visual_style[label]
         fraction = float(decision_fractions.get(label, 0.0))
         ax.scatter(
             subset["cross_term"],
             subset["self_term"],
-            s=marker_size,
-            alpha=marker_alpha,
+            s=9,
+            alpha=0.85,
             color=color_map[label],
             label=f"{label_map[label]} ({100.0 * fraction:.1f}%)",
             edgecolors="none",
             rasterized=True,
-            zorder=marker_zorder,
         )
 
     ax.axhline(0.0, color="black", linewidth=0.9, alpha=0.50)
