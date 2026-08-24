@@ -1071,14 +1071,13 @@ def plot_decision_regions(
         subset = visible[visible["decision"] == label]
         if subset.empty:
             continue
-        fraction = float(decision_fractions.get(label, 0.0))
         ax.scatter(
             subset["cross_term"],
             subset["self_term"],
             s=9,
             alpha=0.85,
             color=color_map[label],
-            label=f"{label_map[label]} ({100.0 * fraction:.1f}%)",
+            label=label_map[label],
             edgecolors="none",
             rasterized=True,
         )
@@ -1212,8 +1211,8 @@ def plot_conflict_means(
     x = plotted["step"].to_numpy(dtype=np.float64)
     fig, ax = plt.subplots(figsize=MAIN_FIGSIZE)
     suffix = {
-        "std": " mean ± 1 std",
-        "sem": " mean ± 1 SEM",
+        "std": " mean ± std",
+        "sem": " mean ± sem",
         "none": " mean",
     }[band_mode]
     _draw_mean_std(
