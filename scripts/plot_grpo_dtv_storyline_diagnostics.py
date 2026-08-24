@@ -42,6 +42,7 @@ COLOR_LOO_FILL = "#F5B5B5"
 COLOR_DTV_DROP = "#017340"
 COLOR_DARK_GRAY = "#4D4D4D"
 COLOR_GREEN = "#2CA02C"
+COLOR_YELLOW = "#E5AE00"
 
 LINE_W = 2.0
 MAIN_FIGSIZE = (5.9, 5.2)
@@ -181,6 +182,15 @@ def parse_args() -> argparse.Namespace:
         help="Opacity of retained-coverage markers (default: 0.75).",
     )
     parser.add_argument(
+        "--coverage-marker-max",
+        type=float,
+        default=0.99,
+        help=(
+            "Plot retained-coverage triangles only below this fraction "
+            "(default: 0.99)."
+        ),
+    )
+    parser.add_argument(
         "--show-coverage-markers",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -196,7 +206,7 @@ def parse_args() -> argparse.Namespace:
         "--conflict-y-limits",
         nargs=2,
         type=float,
-        default=(-50.0, 180.0),
+        default=(-10.0, 40.0),
         metavar=("YMIN", "YMAX"),
         help="Explicit Figure 04 limits; default uses conflict quantiles.",
     )
@@ -204,8 +214,26 @@ def parse_args() -> argparse.Namespace:
         "--conflict-y-ticks",
         nargs="+",
         type=float,
-        default=(-40.0, -20.0, 0.0, 20.0, 40.0, 60.0, 80.0, 100.0, 120.0, 140.0, 160.0),
+        default=(-10.0, 0.0, 10.0, 20.0, 30.0),
         help="Explicit Figure 04 y ticks.",
+    )
+    parser.add_argument(
+        "--conflict-hide-above-limit",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Hide conflict mean points above the displayed upper limit.",
+    )
+    parser.add_argument(
+        "--conflict-overflow-bin-size",
+        type=int,
+        default=50,
+        help="Step-bin width for conflict upper-overflow markers.",
+    )
+    parser.add_argument(
+        "--conflict-overflow-marker-threshold",
+        type=float,
+        default=0.0,
+        help="Minimum hidden-point fraction required to draw a yellow marker.",
     )
     parser.add_argument(
         "--conflict-band-mode",
@@ -269,6 +297,12 @@ def parse_args() -> argparse.Namespace:
         parser.error("--coverage-bin-size must be positive")
     if not 0.0 <= args.coverage_alpha <= 1.0:
         parser.error("--coverage-alpha must be in [0, 1]")
+    if not 0.0 <= args.coverage_marker_max <= 1.0:
+        parser.error("--coverage-marker-max must be in [0, 1]")
+    if args.conflict_overflow_bin_size <= 0:
+        parser.error("--conflict-overflow-bin-size must be positive")
+    if not 0.0 <= args.conflict_overflow_marker_threshold <= 1.0:
+        parser.error("--conflict-overflow-marker-threshold must be in [0, 1]")
     if not 0.0 < args.completion_central_coverage <= 1.0:
         parser.error("--completion-central-coverage must be in (0, 1]")
     if not 0.0 < args.conflict_central_coverage <= 1.0:
@@ -681,6 +715,11 @@ def build_coverage_summary(
     )
 
 
+def _format_percent(fraction: float) -> str:
+    value = 100.0 * fraction
+    return f"{value:.1f}".rstrip("0").rstrip(".") + "%"
+
+
 def _draw_mean_std(
     ax: plt.Axes,
     x: np.ndarray,
@@ -779,6 +818,7 @@ def plot_score_decomposition(
     coverage_y_limits: tuple[float, float],
     coverage_y_ticks: tuple[float, ...],
     coverage_alpha: float,
+    coverage_marker_max: float,
 ) -> None:
     summary = smooth_for_display(
         summary,
@@ -836,9 +876,12 @@ def plot_score_decomposition(
     if show_coverage_markers:
         ax.set_position(COVERAGE_AXES_POSITION)
         ax_right = ax.twinx()
+        visible_coverage = coverage[
+            coverage["retained_coverage"] < coverage_marker_max
+        ]
         coverage_handle = ax_right.scatter(
-            coverage["step_center"],
-            coverage["retained_coverage"],
+            visible_coverage["step_center"],
+            visible_coverage["retained_coverage"],
             marker="v",
             s=42,
             color=COLOR_GREEN,
@@ -852,20 +895,23 @@ def plot_score_decomposition(
         ax_right.set_yticklabels([f"{100.0 * value:g}%" for value in coverage_y_ticks])
         ax_right.set_ylabel(
             "Retained coverage (%)",
-            color=COLOR_GREEN,
+            color="black",
             fontsize=max(16, LABEL_FS - 5),
             labelpad=5,
         )
         ax_right.tick_params(
             axis="y",
-            colors=COLOR_GREEN,
+            colors="black",
             direction="out",
             length=3,
             width=0.8,
             labelsize=max(15, TICK_FS - 5),
         )
-        ax_right.spines["right"].set_color(COLOR_GREEN)
+        for side in ("left", "top", "bottom"):
+            ax_right.spines[side].set_visible(False)
+        ax_right.spines["right"].set_color("black")
         ax_right.spines["right"].set_linewidth(0.9)
+        ax_right.set_box_aspect(0.90)
         ax_right.set_position(COVERAGE_AXES_POSITION)
         handles.append(coverage_handle)
         labels.append("Retained coverage")
@@ -1095,13 +1141,41 @@ def plot_conflict_means(
     smooth_window: int,
     band_mode: str,
     y_ticks: tuple[float, ...],
-) -> None:
+    hide_above_limit: bool,
+    overflow_bin_size: int,
+    overflow_marker_threshold: float,
+) -> pd.DataFrame:
     conflicts = smooth_for_display(
         conflicts,
         ("self_mean", "self_std", "cross_mean", "cross_std"),
         smooth_window,
     )
-    x = conflicts["step"].to_numpy(dtype=np.float64)
+    upper_limit = y_limits[1]
+    overflow_work = conflicts[["step", "self_mean"]].copy()
+    overflow_work["step_bin"] = (
+        (overflow_work["step"].astype(int) - 1) // overflow_bin_size
+    )
+    overflow_work["above_upper_limit"] = (
+        overflow_work["self_mean"] > upper_limit
+    )
+    overflow = (
+        overflow_work.groupby("step_bin", as_index=False, sort=True)
+        .agg(
+            step_start=("step", "min"),
+            step_end=("step", "max"),
+            step_center=("step", "mean"),
+            available_step_count=("above_upper_limit", "size"),
+            above_upper_count=("above_upper_limit", "sum"),
+            above_upper_fraction=("above_upper_limit", "mean"),
+        )
+    )
+    plotted = conflicts.copy()
+    if hide_above_limit:
+        for prefix in ("self", "cross"):
+            hidden = plotted[f"{prefix}_mean"] > upper_limit
+            plotted.loc[hidden, [f"{prefix}_mean", f"{prefix}_std"]] = np.nan
+
+    x = plotted["step"].to_numpy(dtype=np.float64)
     fig, ax = plt.subplots(figsize=MAIN_FIGSIZE)
     suffix = {
         "std": " mean ± 1 std",
@@ -1111,28 +1185,28 @@ def plot_conflict_means(
     _draw_mean_std(
         ax,
         x,
-        conflicts["self_mean"].to_numpy(),
-        conflicts["self_std"].to_numpy(),
+        plotted["self_mean"].to_numpy(),
+        plotted["self_std"].to_numpy(),
         COLOR_SELF,
         COLOR_SELF_FILL,
         "Self-term" + suffix,
         5,
         y_limits,
         band_mode,
-        conflicts["seeds_with_conflicts"].to_numpy(dtype=np.float64),
+        plotted["seeds_with_conflicts"].to_numpy(dtype=np.float64),
     )
     _draw_mean_std(
         ax,
         x,
-        conflicts["cross_mean"].to_numpy(),
-        conflicts["cross_std"].to_numpy(),
+        plotted["cross_mean"].to_numpy(),
+        plotted["cross_std"].to_numpy(),
         COLOR_LOO,
         COLOR_LOO_FILL,
         "Cross-term" + suffix,
         6,
         y_limits,
         band_mode,
-        conflicts["seeds_with_conflicts"].to_numpy(dtype=np.float64),
+        plotted["seeds_with_conflicts"].to_numpy(dtype=np.float64),
     )
     ax.axhline(0.0, color="black", linewidth=1.0, alpha=0.65)
     ax.set_xlabel("Training step", fontsize=LABEL_FS)
@@ -1140,7 +1214,38 @@ def plot_conflict_means(
     ax.set_ylim(*y_limits)
     ax.set_yticks(y_ticks)
     style_axes(ax)
+    marker_rows = overflow[
+        overflow["above_upper_fraction"] > overflow_marker_threshold
+    ]
+    marker_handle = None
+    if not marker_rows.empty:
+        marker_y = upper_limit - 0.025 * (y_limits[1] - y_limits[0])
+        marker_handle = ax.scatter(
+            marker_rows["step_center"],
+            np.full(len(marker_rows), marker_y),
+            marker="^",
+            s=48,
+            color=COLOR_YELLOW,
+            edgecolors="none",
+            zorder=20,
+            label=f"Self-term mean > {upper_limit:g}",
+        )
+        for row in marker_rows.itertuples(index=False):
+            ax.annotate(
+                _format_percent(float(row.above_upper_fraction)),
+                (float(row.step_center), marker_y),
+                xytext=(0, -10),
+                textcoords="offset points",
+                ha="center",
+                va="top",
+                fontsize=max(10, TICK_FS - 10),
+                color=COLOR_YELLOW,
+                zorder=21,
+            )
+    handles, labels = ax.get_legend_handles_labels()
     ax.legend(
+        handles,
+        labels,
         loc="upper center",
         bbox_to_anchor=(0.5, 1.03),
         ncol=1,
@@ -1148,6 +1253,11 @@ def plot_conflict_means(
         fontsize=LEGEND_FS,
     )
     savefig(fig, output_dir / "04_self_protected_conflict_means.png")
+    overflow.to_csv(
+        output_dir / "grpo_dtv_conflict_upper_overflow_by_step_bin.csv",
+        index=False,
+    )
+    return overflow
 
 
 def plot_log_log_self_protection(
@@ -1518,6 +1628,7 @@ def main() -> None:
         tuple(args.coverage_y_limits),
         tuple(args.coverage_y_ticks),
         args.coverage_alpha,
+        args.coverage_marker_max,
     )
     _, actual_drop_y_limits = plot_drop_ratio_story(
         threshold_summary,
@@ -1540,6 +1651,9 @@ def main() -> None:
         args.smooth_window,
         args.conflict_band_mode,
         tuple(args.conflict_y_ticks),
+        args.conflict_hide_above_limit,
+        args.conflict_overflow_bin_size,
+        args.conflict_overflow_marker_threshold,
     )
     log_scatter_report = plot_log_log_self_protection(
         samples,
@@ -1561,12 +1675,18 @@ def main() -> None:
         "coverage_y_limits": list(args.coverage_y_limits),
         "coverage_y_ticks": list(args.coverage_y_ticks),
         "coverage_alpha": args.coverage_alpha,
+        "coverage_marker_max": args.coverage_marker_max,
         "show_coverage_markers": args.show_coverage_markers,
         "conflict_ymin": conflict_y_limits[0],
         "conflict_ymax": conflict_y_limits[1],
         "conflict_band_mode": args.conflict_band_mode,
         "conflict_central_coverage": args.conflict_central_coverage,
         "conflict_y_ticks": list(args.conflict_y_ticks),
+        "conflict_hide_above_limit": args.conflict_hide_above_limit,
+        "conflict_overflow_bin_size": args.conflict_overflow_bin_size,
+        "conflict_overflow_marker_threshold": (
+            args.conflict_overflow_marker_threshold
+        ),
         "conflict_quantile_bounds": conflict_bounds,
         "conflict_retained_fraction": conflict_retained_fraction,
         "drop_bin_size": args.drop_bin_size,
