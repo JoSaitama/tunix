@@ -98,6 +98,8 @@ class DpoMainTest(absltest.TestCase):
             "use_dynamic_batch_curation": True,
             "curation_variant": "self-inf-batch",
             "curation_threshold": 2.5,
+            "curation_keep_ratio": 0.9,
+            "curation_seed": 7,
             "self_influence_dot_threshold": 0.25,
         }
     }
@@ -117,6 +119,8 @@ class DpoMainTest(absltest.TestCase):
     self.assertTrue(training_config.use_dynamic_batch_curation)
     self.assertEqual(training_config.curation_variant, "self_inf_batch")
     self.assertEqual(training_config.curation_threshold, 2.5)
+    self.assertEqual(training_config.curation_keep_ratio, 0.9)
+    self.assertEqual(training_config.curation_seed, 7)
     self.assertEqual(training_config.self_influence_dot_threshold, 0.25)
 
   def test_create_optimizer_with_clipping_wraps_base_optimizer(self):

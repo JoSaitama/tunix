@@ -130,9 +130,9 @@ if [[ -z "${SFT_MODEL_PATH}" || ! -d "${SFT_MODEL_PATH}" ]]; then
 fi
 
 if [[ "${FT_MODE}" == "lora" ]]; then
-  CONFIG_PATH="${REPO_ROOT}/examples/dpo/qwen2p5_1p5b_ultrafeedback_from_sft_lora.yaml"
+  CONFIG_PATH="${CONFIG_PATH:-/home/lhf_hongfu_gmail_com/tunix/examples/dpo/qwen2p5_1p5b_helpsteer3_general_from_sft_lora.yaml}"
 else
-  CONFIG_PATH="${REPO_ROOT}/examples/dpo/qwen2p5_1p5b_ultrafeedback_from_sft.yaml"
+  CONFIG_PATH="${CONFIG_PATH:-/home/lhf_hongfu_gmail_com/tunix/examples/dpo/qwen2p5_1p5b_helpsteer3_general_from_sft_lora.yaml}"
 fi
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 RUN_TS="${RUN_TS:-$(date +%Y%m%d_%H%M%S)}"

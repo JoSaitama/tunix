@@ -62,6 +62,56 @@ class UltraFeedbackDpoTest(absltest.TestCase):
     self.assertEqual(record["chosen_responses"], "Detailed answer")
     self.assertEqual(record["rejected_responses"], "Bad answer")
 
+  def test_select_flip_indices_global_matches_requested_fraction(self):
+    flip_indices = ultrafeedback_dpo._select_flip_indices(
+        10,
+        flip_scope="global",
+        flip_ratio=0.3,
+        flip_tail_fraction=0.5,
+        flip_seed=7,
+    )
+
+    self.assertLen(flip_indices, 3)
+    self.assertTrue(all(0 <= idx < 10 for idx in flip_indices))
+
+  def test_select_flip_indices_tail_only_uses_tail_region(self):
+    flip_indices = ultrafeedback_dpo._select_flip_indices(
+        10,
+        flip_scope="tail_fraction",
+        flip_ratio=0.4,
+        flip_tail_fraction=0.5,
+        flip_seed=7,
+    )
+
+    self.assertLen(flip_indices, 2)
+    self.assertTrue(all(idx >= 5 for idx in flip_indices))
+
+  def test_select_flip_indices_is_seeded(self):
+    first = ultrafeedback_dpo._select_flip_indices(
+        20,
+        flip_scope="global",
+        flip_ratio=0.2,
+        flip_tail_fraction=0.5,
+        flip_seed=3,
+    )
+    second = ultrafeedback_dpo._select_flip_indices(
+        20,
+        flip_scope="global",
+        flip_ratio=0.2,
+        flip_tail_fraction=0.5,
+        flip_seed=3,
+    )
+    third = ultrafeedback_dpo._select_flip_indices(
+        20,
+        flip_scope="global",
+        flip_ratio=0.2,
+        flip_tail_fraction=0.5,
+        flip_seed=13,
+    )
+
+    self.assertEqual(first, second)
+    self.assertNotEqual(first, third)
+
   def test_create_dataset_limits_and_wraps_dataset(self):
     dataset = mock.MagicMock()
     dataset.__len__.return_value = 10
@@ -119,6 +169,61 @@ class UltraFeedbackDpoTest(absltest.TestCase):
     self.assertIs(output, mapped_dataset)
     self.assertEqual(dataset.filter.call_count, 2)
     dataset.shuffle.assert_called_once_with(seed=11)
+
+  def test_create_dataset_train_uses_shuffle_seed_when_provided(self):
+    dataset = mock.MagicMock()
+    dataset.filter.return_value = dataset
+    dataset.shuffle.return_value = dataset
+    mapped_dataset = object()
+
+    with (
+        mock.patch.object(
+            ultrafeedback_dpo, "load_dataset", return_value=dataset
+        ),
+        mock.patch.object(
+            ultrafeedback_dpo.grain.MapDataset,
+            "source",
+            return_value=mock.Mock(map=mock.Mock(return_value=mapped_dataset)),
+        ),
+    ):
+      output = ultrafeedback_dpo.create_dataset(
+          "train_prefs",
+          partition="dpo",
+          subset="train",
+          seed=42,
+          shuffle_seed=9,
+      )
+
+    self.assertIs(output, mapped_dataset)
+    dataset.shuffle.assert_called_once_with(seed=9)
+
+  def test_create_dataset_eval_limit_ignores_shuffle_seed(self):
+    dataset = mock.MagicMock()
+    dataset.__len__.return_value = 6
+    dataset.shuffle.return_value = dataset
+    dataset.select.return_value = dataset
+    dataset.filter.return_value = dataset
+    mapped_dataset = object()
+
+    with (
+        mock.patch.object(
+            ultrafeedback_dpo, "load_dataset", return_value=dataset
+        ),
+        mock.patch.object(
+            ultrafeedback_dpo.grain.MapDataset,
+            "source",
+            return_value=mock.Mock(map=mock.Mock(return_value=mapped_dataset)),
+        ),
+    ):
+      output = ultrafeedback_dpo.create_dataset(
+          "test_prefs",
+          limit=4,
+          seed=42,
+          shuffle_seed=9,
+      )
+
+    self.assertIs(output, mapped_dataset)
+    dataset.shuffle.assert_called_once_with(seed=42)
 
 
 if __name__ == "__main__":

@@ -57,25 +57,53 @@ Default mode is full DPO:
 ```bash
 SFT_MODEL=/path/to/sft_exported_model
 
-./examples/dpo/run_qwen2p5_1p5b_ultrafeedback_from_sft.sh smoke baseline "${SFT_MODEL}"
-./examples/dpo/run_qwen2p5_1p5b_ultrafeedback_from_sft.sh smoke outlier_l2 "${SFT_MODEL}"
-./examples/dpo/run_qwen2p5_1p5b_ultrafeedback_from_sft.sh smoke self_inf_batch "${SFT_MODEL}"
+./examples/dpo/run_qwen2p5_1p5b_ultrafeedback_from_sft.sh smoke vanilla_dpo "${SFT_MODEL}"
+./examples/dpo/run_qwen2p5_1p5b_ultrafeedback_from_sft.sh smoke random_pair_filtering "${SFT_MODEL}"
+./examples/dpo/run_qwen2p5_1p5b_ultrafeedback_from_sft.sh smoke reward_based_filtering "${SFT_MODEL}"
+./examples/dpo/run_qwen2p5_1p5b_ultrafeedback_from_sft.sh smoke self_inf "${SFT_MODEL}"
 ```
 
 Full runs:
 
 ```bash
-./examples/dpo/run_qwen2p5_1p5b_ultrafeedback_from_sft.sh full baseline "${SFT_MODEL}"
-./examples/dpo/run_qwen2p5_1p5b_ultrafeedback_from_sft.sh full outlier_l2 "${SFT_MODEL}"
-./examples/dpo/run_qwen2p5_1p5b_ultrafeedback_from_sft.sh full self_inf_batch "${SFT_MODEL}"
+./examples/dpo/run_qwen2p5_1p5b_ultrafeedback_from_sft.sh full vanilla_dpo "${SFT_MODEL}"
+./examples/dpo/run_qwen2p5_1p5b_ultrafeedback_from_sft.sh full random_pair_filtering "${SFT_MODEL}"
+./examples/dpo/run_qwen2p5_1p5b_ultrafeedback_from_sft.sh full reward_based_filtering "${SFT_MODEL}"
+./examples/dpo/run_qwen2p5_1p5b_ultrafeedback_from_sft.sh full self_inf "${SFT_MODEL}"
 ```
+
+Static train-set corruption variants can be layered onto the same launcher:
+
+```bash
+./examples/dpo/run_qwen2p5_1p5b_ultrafeedback_from_sft.sh \
+  full \
+  vanilla_dpo \
+  "${SFT_MODEL}" \
+  --ft-mode lora \
+  --corruption-config global_flip20
+```
+
+Supported corruption configs are:
+
+- `clean`
+- `tail50_flip20`
+- `tail50_flip40`
+- `global_flip10`
+- `global_flip20`
+- `global_flip30`
+- `global_flip40`
+
+For the corruption matrix, the DPO launcher keeps the eval holdout clean and
+disables training-time `late_flip` so only the static dataset corruption is
+being studied.
 
 Run LoRA DPO instead:
 
 ```bash
-./examples/dpo/run_qwen2p5_1p5b_ultrafeedback_from_sft.sh smoke baseline "${SFT_MODEL}" --ft-mode lora
-./examples/dpo/run_qwen2p5_1p5b_ultrafeedback_from_sft.sh smoke outlier_l2 "${SFT_MODEL}" --ft-mode lora
-./examples/dpo/run_qwen2p5_1p5b_ultrafeedback_from_sft.sh smoke self_inf_batch "${SFT_MODEL}" --ft-mode lora
+./examples/dpo/run_qwen2p5_1p5b_ultrafeedback_from_sft.sh smoke vanilla_dpo "${SFT_MODEL}" --ft-mode lora
+./examples/dpo/run_qwen2p5_1p5b_ultrafeedback_from_sft.sh smoke random_pair_filtering "${SFT_MODEL}" --ft-mode lora
+./examples/dpo/run_qwen2p5_1p5b_ultrafeedback_from_sft.sh smoke reward_based_filtering "${SFT_MODEL}" --ft-mode lora
+./examples/dpo/run_qwen2p5_1p5b_ultrafeedback_from_sft.sh smoke self_inf "${SFT_MODEL}" --ft-mode lora
 ```
 
 The DPO launcher supports all stage-wise combinations:
@@ -87,8 +115,18 @@ The DPO launcher supports all stage-wise combinations:
 
 ## Notes for experiments
 
-- `baseline`, `outlier_l2`, and `self_inf_batch` should share the exact same
-  SFT `exported_model`.
+- `vanilla_dpo`, `random_pair_filtering`, `reward_based_filtering`, and
+  `self_inf` should share the exact same SFT `exported_model`.
+- `reward_based_filtering` ranks pairs by the DPO trainer's own
+  `rewards/margin`, not by an external reward model.
+- `random_pair_filtering` and `reward_based_filtering` use
+  `CURATION_KEEP_RATIO`, which defaults to `0.9` when unset.
 - DPO outputs are isolated by variant, `ft-mode`, profile, and timestamp, so
   runs do not overwrite one another.
+- The static flip matrix launcher
+  `examples/dpo/run_qwen2p5_1p5b_ultrafeedback_from_sft_flip_matrix.sh`
+  now defaults to the focused `4 x 3` study over
+  `clean`, `global_flip20`, and `global_flip40`. It prints the full command
+  list before running, and supports
+  `--methods`, `--datasets`, and `--print-only` for partial reruns.
 - `HF_TOKEN` is required.

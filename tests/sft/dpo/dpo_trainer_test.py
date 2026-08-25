@@ -440,11 +440,112 @@ class DPOTrainerTest(parameterized.TestCase):
         final_aux["dbc/self_inf_dot_threshold"], 0.0, atol=1e-6
     )
 
+  def test_aggregate_random_curated_step_keeps_requested_count_deterministically(
+      self,
+  ):
+    grads = {"w": jnp.array([[1.0], [2.0], [3.0], [4.0]])}
+    losses = jnp.array([1.0, 2.0, 3.0, 4.0])
+    aux = {"metric": jnp.array([1.0, 2.0, 3.0, 4.0])}
+    grad_norms = jnp.array([1.0, 2.0, 3.0, 4.0])
+
+    final_grads, final_loss, final_aux = dpo_lib.aggregate_random_curated_step(
+        per_sample_grads=grads,
+        per_sample_losses=losses,
+        per_sample_aux=aux,
+        per_sample_grad_norms=grad_norms,
+        curation_keep_ratio=0.5,
+        curation_seed=7,
+        window_seed=17,
+    )
+    repeated_grads, repeated_loss, repeated_aux = (
+        dpo_lib.aggregate_random_curated_step(
+            per_sample_grads=grads,
+            per_sample_losses=losses,
+            per_sample_aux=aux,
+            per_sample_grad_norms=grad_norms,
+            curation_keep_ratio=0.5,
+            curation_seed=7,
+            window_seed=17,
+        )
+    )
+    changed_seed_grads, changed_seed_loss, changed_seed_aux = (
+        dpo_lib.aggregate_random_curated_step(
+            per_sample_grads=grads,
+            per_sample_losses=losses,
+            per_sample_aux=aux,
+            per_sample_grad_norms=grad_norms,
+            curation_keep_ratio=0.5,
+            curation_seed=8,
+            window_seed=17,
+        )
+    )
+
+    scores = np.asarray(
+        jax.random.uniform(
+            jax.random.fold_in(jax.random.PRNGKey(7), 17), shape=(4,)
+        )
+    )
+    kept_indices = np.argsort(scores)[-2:]
+    expected_mean = np.mean(np.array([1.0, 2.0, 3.0, 4.0])[kept_indices])
+
+    np.testing.assert_allclose(final_grads["w"], np.array([expected_mean]), atol=1e-6)
+    np.testing.assert_allclose(final_loss, expected_mean, atol=1e-6)
+    np.testing.assert_allclose(final_aux["metric"], expected_mean, atol=1e-6)
+    np.testing.assert_allclose(final_aux["dbc/num_samples_kept"], 2.0, atol=1e-6)
+    np.testing.assert_allclose(final_aux["dbc/keep_ratio"], 0.5, atol=1e-6)
+    np.testing.assert_allclose(
+        final_aux["dbc/random_keep_ratio_target"], 0.5, atol=1e-6
+    )
+    np.testing.assert_allclose(final_grads["w"], repeated_grads["w"], atol=1e-6)
+    np.testing.assert_allclose(final_loss, repeated_loss, atol=1e-6)
+    np.testing.assert_allclose(final_aux["metric"], repeated_aux["metric"], atol=1e-6)
+    self.assertNotAlmostEqual(
+        float(changed_seed_grads["w"][0]),
+        float(final_grads["w"][0]),
+    )
+    self.assertNotAlmostEqual(float(changed_seed_loss), float(final_loss))
+    self.assertNotAlmostEqual(
+        float(changed_seed_aux["metric"]),
+        float(final_aux["metric"]),
+    )
+
+  def test_aggregate_reward_margin_curated_step_keeps_top_margin_samples(self):
+    grads = {"w": jnp.array([[1.0], [4.0], [-2.0], [9.0]])}
+    losses = jnp.array([1.0, 4.0, 2.0, 9.0])
+    aux = {
+        "metric": jnp.array([1.0, 4.0, 2.0, 9.0]),
+        "rewards/margin": jnp.array([0.1, 0.4, -0.2, 0.9]),
+    }
+    grad_norms = jnp.array([1.0, 4.0, 2.0, 9.0])
+
+    final_grads, final_loss, final_aux = (
+        dpo_lib.aggregate_reward_margin_curated_step(
+            per_sample_grads=grads,
+            per_sample_losses=losses,
+            per_sample_aux=aux,
+            per_sample_grad_norms=grad_norms,
+            curation_keep_ratio=0.5,
+        )
+    )
+
+    np.testing.assert_allclose(final_grads["w"], np.array([6.5]), atol=1e-6)
+    np.testing.assert_allclose(final_loss, 6.5, atol=1e-6)
+    np.testing.assert_allclose(final_aux["metric"], 6.5, atol=1e-6)
+    np.testing.assert_allclose(final_aux["dbc/num_samples_kept"], 2.0, atol=1e-6)
+    np.testing.assert_allclose(final_aux["dbc/keep_ratio"], 0.5, atol=1e-6)
+    np.testing.assert_allclose(
+        final_aux["dbc/reward_margin_mean"], 0.3, atol=1e-6
+    )
+    np.testing.assert_allclose(
+        final_aux["dbc/reward_margin_cutoff"], 0.4, atol=1e-6
+    )
+
   @parameterized.named_parameters(
       dict(
           testcase_name="outlier_l2",
           curation_variant="outlier_l2",
           curation_threshold=1e6,
+          curation_keep_ratio=1.0,
           self_influence_dot_threshold=0.0,
           expected_metrics=(
               "dbc/num_samples_total",
@@ -457,6 +558,7 @@ class DPOTrainerTest(parameterized.TestCase):
           testcase_name="self_inf_batch",
           curation_variant="self_inf_batch",
           curation_threshold=3.0,
+          curation_keep_ratio=1.0,
           self_influence_dot_threshold=-1e6,
           expected_metrics=(
               "dbc/num_samples_total",
@@ -465,11 +567,38 @@ class DPOTrainerTest(parameterized.TestCase):
               "dbc/self_inf_dot_mean",
           ),
       ),
+      dict(
+          testcase_name="random_pair_filtering",
+          curation_variant="random_pair_filtering",
+          curation_threshold=3.0,
+          curation_keep_ratio=1.0,
+          self_influence_dot_threshold=0.0,
+          expected_metrics=(
+              "dbc/num_samples_total",
+              "dbc/num_samples_kept",
+              "dbc/keep_ratio",
+              "dbc/random_keep_ratio_target",
+          ),
+      ),
+      dict(
+          testcase_name="reward_based_filtering",
+          curation_variant="reward_based_filtering",
+          curation_threshold=3.0,
+          curation_keep_ratio=1.0,
+          self_influence_dot_threshold=0.0,
+          expected_metrics=(
+              "dbc/num_samples_total",
+              "dbc/num_samples_kept",
+              "dbc/keep_ratio",
+              "dbc/reward_margin_mean",
+          ),
+      ),
   )
   def test_curated_trainer_matches_grad_accumulation_when_no_samples_filtered(
       self,
       curation_variant,
       curation_threshold,
+      curation_keep_ratio,
       self_influence_dot_threshold,
       expected_metrics,
   ):
@@ -514,6 +643,7 @@ class DPOTrainerTest(parameterized.TestCase):
             use_dynamic_batch_curation=True,
             curation_variant=curation_variant,
             curation_threshold=curation_threshold,
+            curation_keep_ratio=curation_keep_ratio,
             self_influence_dot_threshold=self_influence_dot_threshold,
         ),
     )
@@ -536,14 +666,33 @@ class DPOTrainerTest(parameterized.TestCase):
           curated_trainer.train_steps,
       )
 
-  def test_dpo_training_config_normalizes_curation_variant_alias(self):
+  @parameterized.named_parameters(
+      dict(
+          testcase_name="self_inf_alias",
+          variant="self-inf-batch",
+          expected="self_inf_batch",
+      ),
+      dict(
+          testcase_name="random_pair_filtering_alias",
+          variant="random-pair-filtering",
+          expected="random_pair_filtering",
+      ),
+      dict(
+          testcase_name="reward_based_filtering_alias",
+          variant="reward-based-filtering",
+          expected="reward_based_filtering",
+      ),
+  )
+  def test_dpo_training_config_normalizes_curation_variant_alias(
+      self, variant, expected
+  ):
     config = dpo_lib.DPOTrainingConfig(
         eval_every_n_steps=10,
         max_steps=20,
-        curation_variant="self-inf-batch",
+        curation_variant=variant,
     )
 
-    self.assertEqual(config.curation_variant, "self_inf_batch")
+    self.assertEqual(config.curation_variant, expected)
 
 
 if __name__ == "__main__":

@@ -1,0 +1,609 @@
+#!/usr/bin/env python3
+
+"""Evaluate all metrics needed by the multi-seed clean DPO main table."""
+
+from __future__ import annotations
+
+import argparse
+import os
+from datetime import datetime
+import importlib.util
+import json
+from pathlib import Path
+import subprocess
+import sys
+from typing import Any
+
+from datasets import load_dataset
+import numpy as np
+from omegaconf import OmegaConf
+from tensorboard.backend.event_processing import event_accumulator
+
+REPO_ROOT = Path("/home/lhf_hongfu_gmail_com/tunix")
+if str(REPO_ROOT) not in sys.path:
+  sys.path.insert(0, str(REPO_ROOT))
+
+from examples.dpo import qwen2p5_clean_main_table_lib as table_lib
+from examples.dpo import qwen2p5_dpo_eval_lib
+
+
+CONFIG_PATH = table_lib.CONFIG_PATH
+SFT_MODEL_PATH = table_lib.SFT_MODEL_PATH
+DEFAULT_OFFLINE_EVAL_VENV = Path("/home/lhf_hongfu_gmail_com/.venvs/DPO-EVAL-OFFLINE")
+LIVEBENCH_HELPER_PATH = REPO_ROOT / "examples/dpo/score_instruction_following_dataset.py"
+IFEVAL_HELPER_MODULE = REPO_ROOT / "examples/dpo/eval_qwen2p5_clean_benchmarks.py"
+LIVEBENCH_ROOT = Path("/home/lhf_hongfu_gmail_com/.cache/LiveBench")
+
+
+def _load_helper_module(module_path: Path, module_name: str):
+  spec = importlib.util.spec_from_file_location(module_name, module_path)
+  module = importlib.util.module_from_spec(spec)
+  assert spec.loader is not None
+  spec.loader.exec_module(module)
+  return module
+
+
+def _parse_args() -> argparse.Namespace:
+  parser = argparse.ArgumentParser(
+      description=(
+          "Evaluate the 3-seed clean DPO main-table runs on clean held-out "
+          "preference accuracy plus LiveBench-IF, RewardBench 2 Precise IF, "
+          "and IFBench."
+      )
+  )
+  parser.add_argument("--repo-root", default=str(REPO_ROOT))
+  parser.add_argument("--run-ts", required=True)
+  parser.add_argument(
+      "--legacy-run-ts",
+      default=table_lib.LEGACY_RUN_TS,
+      help="Reuse existing seed-0 clean results from this legacy timestamp.",
+  )
+  parser.add_argument(
+      "--no-legacy",
+      action="store_true",
+      help="Disable legacy seed-0 fallback and require all runs to come from --run-ts.",
+  )
+  parser.add_argument(
+      "--methods",
+      nargs="+",
+      default=list(table_lib.METHOD_ORDER),
+      help="Subset of logical clean main-table methods to evaluate.",
+  )
+  parser.add_argument(
+      "--seeds",
+      nargs="+",
+      type=int,
+      default=list(table_lib.DEFAULT_SEEDS),
+      help="Seeds to include when discovering seeded runs.",
+  )
+  parser.add_argument(
+      "--benchmarks",
+      nargs="+",
+      default=("clean_test", "livebench_if", "rewardbench2", "ifbench"),
+      help="Subset of metrics/benchmarks to evaluate.",
+  )
+  parser.add_argument(
+      "--profile",
+      default="full",
+      help="Run profile to discover (for example: full or smoke).",
+  )
+  parser.add_argument(
+      "--output-root",
+      default=None,
+      help="Defaults to runs/results/qwen2p5_clean_main_table_<run-ts>.",
+  )
+  parser.add_argument(
+      "--config-path",
+      default=str(CONFIG_PATH),
+  )
+  parser.add_argument(
+      "--sft-model-path",
+      default=str(SFT_MODEL_PATH),
+  )
+  parser.add_argument("--force", action="store_true")
+  parser.add_argument("--eval-limit", type=int, default=None)
+  parser.add_argument("--num-batches", type=int, default=None)
+  parser.add_argument("--rewardbench-batch-size", type=int, default=8)
+  parser.add_argument("--generation-batch-size", type=int, default=8)
+  parser.add_argument("--seed", type=int, default=0)
+  parser.add_argument("--max-prompt-length", type=int, default=4096)
+  parser.add_argument("--max-generation-steps", type=int, default=1024)
+  parser.add_argument("--top-k", type=int, default=50)
+  parser.add_argument("--top-p", type=float, default=0.95)
+  parser.add_argument(
+      "--offline-eval-venv",
+      default=str(DEFAULT_OFFLINE_EVAL_VENV),
+  )
+  parser.add_argument(
+      "--livebench-root",
+      default=str(LIVEBENCH_ROOT),
+  )
+  return parser.parse_args()
+
+
+def _normalize_benchmarks(names: list[str]) -> set[str]:
+  aliases = {
+      "clean_test": "clean_test",
+      "test": "clean_test",
+      "livebench_if": "livebench_if",
+      "livebench": "livebench_if",
+      "rewardbench2": "rewardbench2",
+      "rewardbench_v2": "rewardbench2",
+      "ifbench": "ifbench",
+  }
+  normalized = set()
+  for name in names:
+    key = name.strip().lower().replace("-", "_")
+    if key not in aliases:
+      raise ValueError(f"Unsupported benchmark selector {name!r}.")
+    normalized.add(aliases[key])
+  return normalized
+
+
+def _load_json(path: Path) -> dict[str, Any]:
+  return json.loads(path.read_text()) if path.exists() else {}
+
+
+def _build_legacy_payloads(repo_root: Path, legacy_run_ts: str | None) -> dict[str, Any]:
+  if not legacy_run_ts:
+    return {}
+  results_root = repo_root / "runs" / "results"
+  clean_benchmark_root = results_root / f"clean_benchmarks_{legacy_run_ts}"
+  return {
+      "test_matrix": _load_json(
+          results_root / f"qwen2p5_dpo_test_matrix_{legacy_run_ts}.json"
+      ),
+      "benchmark_summary": _load_json(
+          clean_benchmark_root / "benchmark_summary.json"
+      ),
+      "rewardbench_v2": _load_json(
+          clean_benchmark_root / "rewardbench_v2" / "rewardbench_v2_summary.json"
+      ),
+  }
+
+
+def _lookup_legacy_metric(
+    *,
+    run: dict[str, Any],
+    legacy_payloads: dict[str, Any],
+    metric_name: str,
+) -> float | None:
+  if run["source"] != "legacy_seed0":
+    return None
+  legacy_variant = run["source_variant"]
+  if metric_name == "clean_test_acc":
+    for row in legacy_payloads.get("test_matrix", {}).get("results", []):
+      if row.get("dataset") != "clean" or row.get("variant") != legacy_variant:
+        continue
+      return float(row["metrics"]["rewards_accuracy"])
+    return None
+  if metric_name in ("livebench_if_score", "ifbench_prompt_strict"):
+    row = legacy_payloads.get("benchmark_summary", {}).get("scores", {}).get(
+        legacy_variant, {}
+    )
+    value = row.get(metric_name)
+    return float(value) if value is not None else None
+  if metric_name == "rewardbench2_precise_if":
+    row = legacy_payloads.get("rewardbench_v2", {}).get("scores", {}).get(
+        legacy_variant, {}
+    )
+    value = row.get(metric_name)
+    return float(value) if value is not None else None
+  return None
+
+
+def _compute_normalized_scalar_auc(tensorboard_dir: Path, tag: str) -> float:
+  accumulator = event_accumulator.EventAccumulator(str(tensorboard_dir))
+  accumulator.Reload()
+  scalar_points = accumulator.Scalars(tag)
+  if not scalar_points:
+    raise SystemExit(
+        f"No scalar history for tag={tag!r} under tensorboard_dir={tensorboard_dir}"
+    )
+  steps = np.asarray([point.step for point in scalar_points], dtype=np.float64)
+  values = np.asarray([point.value for point in scalar_points], dtype=np.float64)
+  if len(steps) == 1 or np.allclose(steps[0], steps[-1]):
+    return float(values[-1])
+  area = np.trapezoid(values, steps)
+  return float(area / (steps[-1] - steps[0]))
+
+
+def _append_limit_to_module_spec(module_spec: str, limit: int | None) -> str:
+  """Append limit=... to a create_dataset(...) module spec when requested."""
+  if limit is None:
+    return module_spec
+  if "limit=" in module_spec:
+    return module_spec
+  stripped = module_spec.strip()
+  if stripped.endswith(")"):
+    return stripped[:-1] + f", limit={limit})"
+  return stripped + f"(limit={limit})"
+
+
+def _build_test_module_spec(limit: int | None) -> str:
+  env_spec = os.environ.get("DPO_CLEAN_TEST_DATA_MODULE", "").strip()
+  if env_spec:
+    return _append_limit_to_module_spec(env_spec, limit)
+
+  if limit is None:
+    return "examples/data/ultrafeedback_dpo.py:create_dataset(split='test_prefs', seed=42)"
+  return (
+      "examples/data/ultrafeedback_dpo.py:create_dataset("
+      f"split='test_prefs', seed=42, limit={limit})"
+  )
+def _evaluate_clean_test_acc(
+    *,
+    run: dict[str, Any],
+    base_cfg: Any,
+    sft_model_path: str,
+    eval_limit: int | None,
+    num_batches: int | None,
+) -> float:
+  bundle = qwen2p5_dpo_eval_lib.load_eval_bundle(
+      base_cfg=base_cfg,
+      actor_model_path=run["exported_model_path"],
+      reference_model_path=sft_model_path,
+      metrics_prefix=f"dpo_clean_test_{run['run_key']}",
+  )
+  eval_dataset = qwen2p5_dpo_eval_lib.load_eval_dataset(
+      module_spec=_build_test_module_spec(eval_limit),
+      tokenizer=bundle.tokenizer,
+      batch_size=int(base_cfg.get("eval_batch_size", base_cfg["batch_size"])),
+      num_batches=num_batches,
+      dpo_config=bundle.training_config,
+  )
+  trainer, metrics_logger = qwen2p5_dpo_eval_lib.create_eval_trainer(bundle)
+  try:
+    with bundle.actor_mesh:
+      metrics = qwen2p5_dpo_eval_lib.aggregate_eval_metrics(
+          trainer=trainer,
+          metrics_logger=metrics_logger,
+          eval_dataset=eval_dataset,
+      )
+  finally:
+    qwen2p5_dpo_eval_lib.close_eval_trainer(trainer, metrics_logger)
+    qwen2p5_dpo_eval_lib.close_eval_bundle(bundle)
+  return float(metrics["rewards_accuracy"])
+
+
+def _load_livebench_rows(limit: int | None) -> list[dict[str, Any]]:
+  rows = list(load_dataset("livebench/instruction_following", split="test"))
+  normalized_rows = []
+  for row in rows:
+    normalized = dict(row)
+    for key, value in list(normalized.items()):
+      if isinstance(value, datetime):
+        normalized[key] = datetime.strftime(value, "%Y-%m-%d")
+    normalized_rows.append(normalized)
+  return normalized_rows[:limit] if limit is not None else normalized_rows
+
+
+def _jsonl_len(path: Path) -> int:
+  if not path.exists():
+    return 0
+  with path.open(encoding="utf-8") as f:
+    return sum(1 for line in f if line.strip())
+
+
+def _evaluate_livebench_if(
+    *,
+    clean_benchmarks: Any,
+    repo_root: Path,
+    run: dict[str, Any],
+    output_root: Path,
+    rows: list[dict[str, Any]],
+    args: argparse.Namespace,
+) -> float:
+  response_file = output_root / "livebench_if" / "responses" / f"{run['run_key']}.jsonl"
+  result_dir = output_root / "livebench_if" / "results" / run["run_key"]
+  result_dir.mkdir(parents=True, exist_ok=True)
+  prompts = [row["turns"][0] for row in rows]
+  if args.force or _jsonl_len(response_file) != len(rows):
+    generator = clean_benchmarks.TunixChatGenerator(
+        config_path=str(CONFIG_PATH),
+        exported_model_path=run["exported_model_path"],
+        max_prompt_length=args.max_prompt_length,
+        max_generation_steps=args.max_generation_steps,
+        top_k=args.top_k,
+        top_p=args.top_p,
+    )
+    try:
+      answers = clean_benchmarks._chunked_generate(  # pylint: disable=protected-access
+          generator,
+          prompts=prompts,
+          temperature=0.0,
+          seed=args.seed,
+          batch_size=args.generation_batch_size,
+      )
+    finally:
+      generator.close()
+    response_rows = [
+        {
+            "question_id": row["question_id"],
+            "prompt": row["turns"][0],
+            "response": answer,
+        }
+        for row, answer in zip(rows, answers, strict=True)
+    ]
+    clean_benchmarks._write_jsonl(response_file, response_rows)  # pylint: disable=protected-access
+
+  offline_python = Path(args.offline_eval_venv).resolve() / "bin/python"
+  subprocess.run(
+      [
+          str(offline_python),
+          str(LIVEBENCH_HELPER_PATH),
+          "--dataset-format",
+          "livebench_if",
+          "--input-data",
+          str(output_root / "livebench_if" / "data" / "livebench_instruction_following.jsonl"),
+          "--input-response-data",
+          str(response_file),
+          "--output-dir",
+          str(result_dir),
+          "--score-prefix",
+          "livebench_if",
+          "--livebench-root",
+          str(Path(args.livebench_root).resolve()),
+      ],
+      check=True,
+      cwd=str(repo_root),
+  )
+  summary = json.loads((result_dir / "summary.json").read_text())
+  return float(summary["livebench_if_score"])
+
+
+def _evaluate_ifbench(
+    *,
+    clean_benchmarks: Any,
+    run: dict[str, Any],
+    output_root: Path,
+    prompts: list[dict[str, Any]],
+    args: argparse.Namespace,
+) -> float:
+  assets = clean_benchmarks._prepare_ifbench_assets(  # pylint: disable=protected-access
+      output_root / "ifbench"
+  )
+  response_file = Path(assets["response_dir"]) / f"{run['run_key']}.jsonl"
+  expected_count = len(prompts)
+  if args.force or _jsonl_len(response_file) != expected_count:
+    generator = clean_benchmarks.TunixChatGenerator(
+        config_path=str(CONFIG_PATH),
+        exported_model_path=run["exported_model_path"],
+        max_prompt_length=args.max_prompt_length,
+        max_generation_steps=args.max_generation_steps,
+        top_k=args.top_k,
+        top_p=args.top_p,
+    )
+    try:
+      clean_benchmarks._generate_ifbench(  # pylint: disable=protected-access
+          generator,
+          prompts=prompts,
+          output_file=response_file,
+          seed=args.seed,
+          batch_size=args.generation_batch_size,
+      )
+    finally:
+      generator.close()
+  scores = clean_benchmarks._run_ifbench_evaluator(  # pylint: disable=protected-access
+      assets=assets,
+      model_name=run["run_key"],
+      offline_eval_venv=Path(args.offline_eval_venv).resolve(),
+  )
+  return float(scores["ifbench_prompt_strict"])
+
+
+def _evaluate_rewardbench2(
+    *,
+    rewardbench_module: Any,
+    run: dict[str, Any],
+    rewardbench_rows: list[dict[str, Any]],
+    base_cfg: Any,
+    sft_model_path: str,
+    batch_size: int,
+    output_root: Path,
+    force: bool,
+) -> float:
+  summary = rewardbench_module._evaluate_method(  # pylint: disable=protected-access
+      run={
+          "variant": run["run_key"],
+          "run_name": run["run_name"],
+          "exported_model_path": run["exported_model_path"],
+      },
+      rewardbench_rows=rewardbench_rows,
+      base_cfg=base_cfg,
+      sft_model_path=sft_model_path,
+      batch_size=batch_size,
+      output_root=output_root / "rewardbench_v2",
+      force=force,
+  )
+  return float(summary["rewardbench2_precise_if"])
+
+
+def main() -> None:
+  args = _parse_args()
+  repo_root = Path(args.repo_root).resolve()
+  output_root = (
+      Path(args.output_root).resolve()
+      if args.output_root
+      else repo_root / "runs" / "results" / f"qwen2p5_clean_main_table_{args.run_ts}"
+  )
+  output_root.mkdir(parents=True, exist_ok=True)
+  per_run_dir = output_root / "per_run"
+  per_run_dir.mkdir(parents=True, exist_ok=True)
+  per_run_summary_path = output_root / "per_run_metrics.json"
+
+  clean_benchmarks = _load_helper_module(
+      IFEVAL_HELPER_MODULE, "eval_qwen2p5_clean_benchmarks"
+  )
+  rewardbench_module = _load_helper_module(
+      REPO_ROOT / "examples/dpo/eval_qwen2p5_rewardbench_v2.py",
+      "eval_qwen2p5_rewardbench_v2",
+  )
+  base_cfg = OmegaConf.load(args.config_path)
+  legacy_payloads = _build_legacy_payloads(repo_root, args.legacy_run_ts)
+  if args.no_legacy:
+    legacy_payloads = {}
+  selected_benchmarks = _normalize_benchmarks(list(args.benchmarks))
+  runs = table_lib.discover_clean_main_table_runs(
+      repo_root=repo_root,
+      run_ts=args.run_ts,
+      legacy_run_ts=None if args.no_legacy else args.legacy_run_ts,
+      allow_legacy_fallback=not args.no_legacy,
+      methods=args.methods,
+      seeds=args.seeds,
+      profile=args.profile,
+  )
+
+  rewardbench_rows = None
+  if "rewardbench2" in selected_benchmarks:
+    rewardbench_rows = rewardbench_module._load_rewardbench_v2_rows(  # pylint: disable=protected-access
+        args.eval_limit
+    )
+  livebench_rows = None
+  if "livebench_if" in selected_benchmarks:
+    livebench_rows = _load_livebench_rows(args.eval_limit)
+    livebench_data_path = (
+        output_root / "livebench_if" / "data" / "livebench_instruction_following.jsonl"
+    )
+    clean_benchmarks._write_jsonl(  # pylint: disable=protected-access
+        livebench_data_path,
+        livebench_rows,
+    )
+  ifbench_prompts = None
+  if "ifbench" in selected_benchmarks:
+    ifbench_assets = clean_benchmarks._prepare_ifbench_assets(  # pylint: disable=protected-access
+        output_root / "ifbench"
+    )
+    ifbench_prompts = clean_benchmarks._load_jsonl(  # pylint: disable=protected-access
+        Path(ifbench_assets["input_path"]),
+        args.eval_limit,
+    )
+
+  previous_payload = _load_json(per_run_summary_path)
+  per_run_payload = {
+      "run_ts": args.run_ts,
+      "legacy_run_ts": None if args.no_legacy else args.legacy_run_ts,
+      "columns": list(table_lib.MAIN_TABLE_COLUMNS),
+      "runs": dict(previous_payload.get("runs", {})),
+  }
+
+  for run in runs:
+    row_path = per_run_dir / f"{run['run_key']}.json"
+    cached = _load_json(row_path) if row_path.exists() and not args.force else {}
+    metrics = dict(cached.get("metrics", {}))
+
+    if "clean_val_acc_auc" not in metrics or args.force:
+      metrics["clean_val_acc_auc"] = _compute_normalized_scalar_auc(
+          Path(run["tensorboard_dir"]),
+          tag="dpo/eval/rewards/accuracy",
+      )
+    if "clean_test" in selected_benchmarks and (
+        "clean_test_acc" not in metrics or args.force
+    ):
+      legacy_value = _lookup_legacy_metric(
+          run=run,
+          legacy_payloads=legacy_payloads,
+          metric_name="clean_test_acc",
+      )
+      metrics["clean_test_acc"] = (
+          legacy_value
+          if legacy_value is not None and not args.force
+          else _evaluate_clean_test_acc(
+              run=run,
+              base_cfg=base_cfg,
+              sft_model_path=args.sft_model_path,
+              eval_limit=args.eval_limit,
+              num_batches=args.num_batches,
+          )
+      )
+    if "livebench_if" in selected_benchmarks and (
+        "livebench_if_score" not in metrics or args.force
+    ):
+      legacy_value = _lookup_legacy_metric(
+          run=run,
+          legacy_payloads=legacy_payloads,
+          metric_name="livebench_if_score",
+      )
+      metrics["livebench_if_score"] = (
+          legacy_value
+          if legacy_value is not None and not args.force
+          else _evaluate_livebench_if(
+              clean_benchmarks=clean_benchmarks,
+              repo_root=repo_root,
+              run=run,
+              output_root=output_root,
+              rows=livebench_rows or [],
+              args=args,
+          )
+      )
+    if "rewardbench2" in selected_benchmarks and (
+        "rewardbench2_precise_if" not in metrics or args.force
+    ):
+      legacy_value = _lookup_legacy_metric(
+          run=run,
+          legacy_payloads=legacy_payloads,
+          metric_name="rewardbench2_precise_if",
+      )
+      metrics["rewardbench2_precise_if"] = (
+          legacy_value
+          if legacy_value is not None and not args.force
+          else _evaluate_rewardbench2(
+              rewardbench_module=rewardbench_module,
+              run=run,
+              rewardbench_rows=rewardbench_rows or [],
+              base_cfg=base_cfg,
+              sft_model_path=args.sft_model_path,
+              batch_size=args.rewardbench_batch_size,
+              output_root=output_root,
+              force=args.force,
+          )
+      )
+    if "ifbench" in selected_benchmarks and (
+        "ifbench_prompt_strict" not in metrics or args.force
+    ):
+      legacy_value = _lookup_legacy_metric(
+          run=run,
+          legacy_payloads=legacy_payloads,
+          metric_name="ifbench_prompt_strict",
+      )
+      metrics["ifbench_prompt_strict"] = (
+          legacy_value
+          if legacy_value is not None and not args.force
+          else _evaluate_ifbench(
+              clean_benchmarks=clean_benchmarks,
+              run=run,
+              output_root=output_root,
+              prompts=ifbench_prompts or [],
+              args=args,
+          )
+      )
+
+    payload = {
+        "run_key": run["run_key"],
+        "logical_variant": run["logical_variant"],
+        "display_name": run["display_name"],
+        "seed": run["seed"],
+        "source": run["source"],
+        "source_variant": run["source_variant"],
+        "source_run_ts": run["source_run_ts"],
+        "run_name": run["run_name"],
+        "run_dir": run["run_dir"],
+        "metrics": metrics,
+    }
+    row_path.write_text(json.dumps(payload, indent=2, sort_keys=True))
+    per_run_payload["runs"][run["run_key"]] = payload
+    print(
+        f"{run['run_key']}: "
+        + ", ".join(
+            f"{key}={metrics[key]:.4f}"
+            for key in table_lib.MAIN_TABLE_COLUMNS
+            if key in metrics
+        )
+    )
+
+  per_run_summary_path.write_text(json.dumps(per_run_payload, indent=2, sort_keys=True))
+  print(f"Wrote per-run clean main-table metrics to {per_run_summary_path}")
+
+
+if __name__ == "__main__":
+  main()

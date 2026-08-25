@@ -219,9 +219,13 @@ class DpoPipeline(config.HyperParameters):
       logging.info(
           "Dynamic batch curation enabled for DPO: using CuratedDPOTrainer "
           "(curation_variant=%s, curation_threshold=%s, "
-          "self_influence_dot_threshold=%s, gradient_accumulation_steps=%s).",
+          "curation_keep_ratio=%s, curation_seed=%s, "
+          "self_influence_dot_threshold=%s, "
+          "gradient_accumulation_steps=%s).",
           training_config.curation_variant,
           training_config.curation_threshold,
+          training_config.curation_keep_ratio,
+          training_config.curation_seed,
           training_config.self_influence_dot_threshold,
           training_config.gradient_accumulation_steps,
       )

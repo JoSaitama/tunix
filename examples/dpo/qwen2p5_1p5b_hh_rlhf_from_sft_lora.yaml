@@ -1,0 +1,83 @@
+actor_model_config:
+  model_name: qwen2.5-1.5b
+  model_source: internal
+  model_id: Qwen/Qwen2.5-1.5B
+  model_path: /tmp/qwen2p5_1p5b_sft_exported
+  model_download_path: ''
+  rng_seed: 0
+  model_display: false
+  intermediate_ckpt_dir: /tmp/intermediate_ckpt_dpo_qwen2p5_1p5b
+  lora_config:
+    module_path: .*q_proj|.*k_proj|.*v_proj|.*o_proj|.*gate_proj|.*up_proj|.*down_proj
+    rank: 64
+    alpha: 64.0
+  mesh:
+    shape: (2,2)
+    axis_names: ('fsdp','tp')
+reference_model_config:
+  model_name: qwen2.5-1.5b
+  model_source: internal
+  model_id: Qwen/Qwen2.5-1.5B
+  model_path: /tmp/qwen2p5_1p5b_sft_exported
+  model_download_path: ''
+  rng_seed: 0
+  model_display: false
+  intermediate_ckpt_dir: /tmp/intermediate_ckpt_dpo_qwen2p5_1p5b
+  mesh:
+    shape: (2,2)
+    axis_names: ('fsdp','tp')
+tokenizer_config:
+  tokenizer_path: Qwen/Qwen2.5-1.5B
+  tokenizer_type: huggingface
+  add_bos: false
+  add_eos: false
+train_data_module: examples/data/hh_rlhf_dpo.py:create_dataset(split='train', partition='dpo',
+  subset='train', sft_fraction=0.25, eval_fraction=0.1, seed=42, flip_ratio=0.0, flip_seed=123)
+eval_data_module: examples/data/hh_rlhf_dpo.py:create_dataset(split='train', partition='dpo',
+  subset='eval', sft_fraction=0.25, eval_fraction=0.1, seed=42)
+batch_size: 8
+eval_batch_size: 8
+optimizer_config:
+  opt_type: adamw
+  schedule_type: warmup_cosine_decay_schedule
+  init_value: 0.0
+  peak_value: 5.0e-06
+  end_value: 0.0
+  warmup_steps: 20
+  decay_steps: 180
+  b1: 0.9
+  b2: 0.99
+  weight_decay: 0.1
+  max_grad_norm: 0.1
+training_config:
+  eval_every_n_steps: 20
+  max_steps: 180
+  gradient_accumulation_steps: 32
+  checkpoint_root_directory: /home/lhf_hongfu_gmail_com/tunix/runs/dpo_qwen2p5_1p5b_hh_rlhf_from_sft/checkpoints
+  checkpointing_options:
+    save_interval_steps: 20
+    max_to_keep: 1
+  metrics_logging_options:
+    project_name: tunix
+    run_name: qwen2p5-1p5b-hh-rlhf-from-sft-baseline
+    log_dir: /home/lhf_hongfu_gmail_com/tunix/runs/dpo_qwen2p5_1p5b_hh_rlhf_from_sft/tensorboard
+    flush_every_n_steps: 20
+  profiler_options: null
+  data_sharding_axis:
+  - fsdp
+  max_inflight_computations: 2
+  metrics_prefix: dpo
+  pbar_description: DPO
+dpo_config:
+  beta: 0.1
+  label_smoothing: 0.0
+  max_prompt_length: 512
+  max_response_length: 512
+  use_dynamic_batch_curation: false
+  curation_variant: outlier_l2
+  curation_threshold: 3.0
+  self_influence_dot_threshold: 0.0
+  late_flip_ratio: 0.3
+  late_flip_start_step: 57
+  late_flip_seed: 123
+exported_model_output_dir: /home/lhf_hongfu_gmail_com/tunix/runs/dpo_qwen2p5_1p5b_hh_rlhf_from_sft/exported_model

@@ -37,3 +37,49 @@ wandb/
 # large HF/LoRA artifacts
 google/gemma-3-1b-it-lora/
 **/*.safetensors
+
+# Experiment outputs
+runs/
+runs_xuesong/
+outputs/
+checkpoints/
+exported_model/
+tensorboard/
+
+# Large model files
+*.safetensors
+*.ckpt
+*.pt
+*.pth
+*.bin
+
+# Logs and temporary files
+*.log
+*.tmp
+*.bak
+*.swp
+
+# Experiment outputs
+runs/logs/
+runs/model/
+runs/paper_results/
+runs_xuesong/logs/
+runs_xuesong/model/
+runs_xuesong/paper_results/
+
+# Python backup files
+*.py.bak*
+
+# Local tooling
+.codex/
+
+# Experiment outputs
+runs/logs/
+runs/model/
+runs/paper_results/
+runs_xuesong/logs/
+runs_xuesong/model/
+runs_xuesong/paper_results/
+
+# Python backup files
+*.py.bak*

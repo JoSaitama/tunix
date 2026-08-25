@@ -26,7 +26,6 @@ SFT_MODEL_PATH=""
 SEED="${DPO_SEED:-}"
 RUN_SEED="${DPO_RUN_SEED:-}"
 TRAIN_SHUFFLE_SEED="${DPO_TRAIN_SHUFFLE_SEED:-}"
-export DPO_SELF_INF_LAMBDA="${DPO_SELF_INF_LAMBDA:-0.5}"
 CURATION_SEED="${CURATION_SEED:-}"
 declare -a USER_OVERRIDES=()
 
@@ -125,16 +124,20 @@ if [[ -z "${HF_TOKEN:-}" ]]; then
 fi
 
 if [[ -z "${SFT_MODEL_PATH}" || ! -d "${SFT_MODEL_PATH}" ]]; then
-  echo "Usage: $0 [full|smoke] [vanilla_dpo|random_pair_filtering|reward_based_filtering|self_inf|self_inf_norm|self_inf_loo|self_inf_re_loo|self_inf_lambda|self_inf_loo_cos|outlier_l2] /path/to/sft_exported_model [--corruption-config clean|tail50_flip20|tail50_flip40|global_flip10|global_flip20|global_flip30|global_flip40] [--ft-mode full|lora] [--seed INT] [--run-seed INT] [--train-shuffle-seed INT] [--curation-seed INT] [overrides...]" >&2
+  echo "Usage: $0 [full|smoke] [vanilla_dpo|random_pair_filtering|reward_based_filtering|self_inf|self_inf_loo|self_inf_loo_cos|outlier_l2] /path/to/sft_exported_model [--corruption-config clean|tail50_flip20|tail50_flip40|global_flip10|global_flip20|global_flip30|global_flip40] [--ft-mode full|lora] [--seed INT] [--run-seed INT] [--train-shuffle-seed INT] [--curation-seed INT] [overrides...]" >&2
   exit 1
 fi
 
 if [[ "${FT_MODE}" == "lora" ]]; then
-  CONFIG_PATH="${REPO_ROOT}/examples/dpo/qwen2p5_1p5b_ultrafeedback_from_sft_lora.yaml"
+  CONFIG_PATH="${REPO_ROOT}/examples/dpo/qwen2p5_1p5b_hh_rlhf_from_sft_lora.yaml"
 else
-  CONFIG_PATH="${REPO_ROOT}/examples/dpo/qwen2p5_1p5b_ultrafeedback_from_sft.yaml"
+  CONFIG_PATH="${REPO_ROOT}/examples/dpo/qwen2p5_1p5b_hh_rlhf_from_sft.yaml"
 fi
 PYTHON_BIN="${PYTHON_BIN:-python3}"
+export DPO_DATASET_MODULE="tunix/examples/data/hh_rlhf_dpo.py:create_dataset"
+export DPO_CLEAN_TEST_DATA_MODULE="examples/data/hh_rlhf_dpo.py:create_dataset(split='test_prefs', partition='all', subset='all', seed=42)"
+export DPO_RUN_DIR_PREFIX="dpo_qwen2p5_1p5b_hh_rlhf_from_sft"
+export DPO_RUN_DATASET_TAG="qwen2p5-1p5b-hh-rlhf-from-sft"
 RUN_TS="${RUN_TS:-$(date +%Y%m%d_%H%M%S)}"
 if [[ -z "${RUN_SEED}" && -n "${SEED}" ]]; then
   RUN_SEED="${SEED}"

@@ -4,11 +4,12 @@ This directory contains the runnable recipe for the `Qwen/Qwen3-4B-Instruct-2507
 LoRA DPO baseline on `HuggingFaceH4/ultrafeedback_binarized`.
 
 It also contains a second recipe for `Qwen/Qwen2.5-1.5B` that starts from an
-SFT-exported model checkpoint and compares `baseline`, `outlier_l2`, and
-`self_inf_batch`. That workflow now defaults to full DPO and accepts
-`--ft-mode lora` when you want a LoRA actor. Its training-time eval is taken
-from a prompt-level holdout inside `train_prefs`, leaving `test_prefs` for
-final reporting.
+SFT-exported model checkpoint and now supports four primary methods:
+`vanilla_dpo`, `random_pair_filtering`, `reward_based_filtering`, and
+`self_inf`. A legacy `outlier_l2` option is still available for backward
+comparisons. That workflow defaults to full DPO and accepts `--ft-mode lora`
+when you want a LoRA actor. Its training-time eval is taken from a prompt-level
+holdout inside `train_prefs`, leaving `test_prefs` for final reporting.
 
 ## Files
 
@@ -17,7 +18,9 @@ final reporting.
 - `qwen2p5_1p5b_ultrafeedback_from_sft.yaml`: full DPO-from-SFT config
 - `qwen2p5_1p5b_ultrafeedback_from_sft_lora.yaml`: LoRA DPO-from-SFT config
 - `run_qwen2p5_1p5b_ultrafeedback_from_sft.sh`: launcher for
-  `baseline|outlier_l2|self_inf_batch`
+  `vanilla_dpo|random_pair_filtering|reward_based_filtering|self_inf`
+- `run_qwen2p5_1p5b_ultrafeedback_from_sft_flip_matrix.sh`: batch launcher for
+  the focused static flip-correlation matrix
 
 ## Baseline
 
@@ -89,22 +92,82 @@ source /home/lhf_hongfu_gmail_com/.venvs/DPO/bin/activate
 cd /home/lhf_hongfu_gmail_com/tunix
 ./examples/dpo/run_qwen2p5_1p5b_ultrafeedback_from_sft.sh \
   smoke \
-  baseline \
+  vanilla_dpo \
   /path/to/sft_exported_model
 ```
 
-Swap `baseline` for `outlier_l2` or `self_inf_batch` to run the two DBC
-variants. The script writes each run into a variant-specific directory so the
-artifacts do not overwrite one another.
+Swap `vanilla_dpo` for `random_pair_filtering`, `reward_based_filtering`, or
+`self_inf` to run the other methods. `outlier_l2` is still accepted as a legacy
+comparison baseline. The script writes each run into a variant-specific
+directory so the artifacts do not overwrite one another.
 
 Run the same workflow with a LoRA actor:
 
 ```bash
 ./examples/dpo/run_qwen2p5_1p5b_ultrafeedback_from_sft.sh \
   smoke \
-  baseline \
+  reward_based_filtering \
+  /path/to/sft_exported_model \
+  --corruption-config clean \
+  --ft-mode lora
+```
+
+Static train-set corruption is configured via `--corruption-config`:
+
+- `clean`
+- `tail50_flip20`
+- `tail50_flip40`
+- `global_flip10`
+- `global_flip20`
+- `global_flip30`
+- `global_flip40`
+
+These settings only affect the train split. The eval holdout stays clean.
+
+For this matrix, the launcher also disables training-time `late_flip` so that
+static dataset corruption is not mixed with dynamic chosen/rejected swapping.
+
+Method semantics for the focused Qwen2.5 study:
+
+- `vanilla_dpo`: standard DPO, keep all preference pairs
+- `random_pair_filtering`: keep a fixed random fraction of pairs per
+  accumulation window
+- `reward_based_filtering`: keep the top fraction of pairs ranked by the DPO
+  trainer's own per-sample `rewards/margin`
+- `self_inf`: keep pairs whose gradients align well with the window mean
+
+`reward_based_filtering` does not use an external reward model. It ranks pairs
+by the existing per-sample DPO reward margin.
+
+`random_pair_filtering` and `reward_based_filtering` share
+`CURATION_KEEP_RATIO` and default to `0.9` when unset.
+
+Run the focused `4 methods x 3 datasets` matrix and print every command before
+execution:
+
+```bash
+./examples/dpo/run_qwen2p5_1p5b_ultrafeedback_from_sft_flip_matrix.sh \
   /path/to/sft_exported_model \
   --ft-mode lora
+```
+
+Preview commands without executing them:
+
+```bash
+./examples/dpo/run_qwen2p5_1p5b_ultrafeedback_from_sft_flip_matrix.sh \
+  /path/to/sft_exported_model \
+  --ft-mode lora \
+  --print-only
+```
+
+Filter the matrix to a subset of methods or corruption settings:
+
+```bash
+./examples/dpo/run_qwen2p5_1p5b_ultrafeedback_from_sft_flip_matrix.sh \
+  /path/to/sft_exported_model \
+  --ft-mode lora \
+  --methods vanilla_dpo,reward_based_filtering \
+  --datasets clean,global_flip20
 ```
 
 For the full SFT -> DPO workflow, including the prompt-disjoint dataset split,

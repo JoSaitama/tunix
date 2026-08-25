@@ -10,6 +10,79 @@ This file tracks engineering changes made in this repository.
 
 ---
 
+## 2026-04-19: Clean paper benchmark scaffolding for MT-Bench, AlpacaEval 2, and Arena-Hard
+
+### Scope
+
+- 为 clean-only 论文扩展新增 benchmark 环境脚本、统一生成脚本、统一表格汇总脚本，以及一份当前 clean 主表所需的本地指标 JSON。
+- 这一轮只把 Stage A 落到“生成与汇总可跑、judge 入口与命令已准备好”的状态；不在本次提交里实际调用 OpenAI judge API。
+
+### Changed files
+
+1. `examples/dpo/setup_qwen2p5_clean_benchmark_env.sh`
+2. `examples/dpo/eval_qwen2p5_clean_benchmarks.py`
+3. `examples/dpo/summarize_qwen2p5_clean_tables.py`
+4. `tests/examples/qwen2p5_clean_tables_test.py`
+5. `runs/results/qwen2p5_clean_metrics_20260417_013847.json`
+6. `develop.md`
+
+### Validation
+
+- 环境与资源检查：
+  - `source /home/lhf_hongfu_gmail_com/.venvs/DPO-EVAL/bin/activate && pip install "setuptools<81" "fschat[llm_judge]" alpaca-eval psutil`
+  - `git clone https://github.com/lmarena/arena-hard-auto.git /home/lhf_hongfu_gmail_com/.cache/arena-hard-auto`
+  - `source /home/lhf_hongfu_gmail_com/.venvs/DPO/bin/activate && python - <<'PY' ... jax.devices() ... PY`
+  - `source /home/lhf_hongfu_gmail_com/.venvs/DPO/bin/activate && python - <<'PY' ... HfApi.list_repo_files('tatsu-lab/alpaca_eval', repo_type='dataset') ... PY`
+  - `source /home/lhf_hongfu_gmail_com/.venvs/DPO/bin/activate && python - <<'PY' ... HfApi.list_repo_files('lmarena-ai/arena-hard-auto', repo_type='dataset') ... PY`
+  - `curl -L --fail --silent https://raw.githubusercontent.com/lm-sys/FastChat/main/fastchat/llm_judge/data/mt_bench/question.jsonl | sed -n '1,2p'`
+  - `curl -L --fail --silent https://raw.githubusercontent.com/lm-sys/FastChat/main/fastchat/llm_judge/data/judge_prompts.jsonl | sed -n '1,3p'`
+  - `curl -L --fail --silent https://raw.githubusercontent.com/lm-sys/FastChat/main/fastchat/llm_judge/data/mt_bench/reference_answer/gpt-4.jsonl | sed -n '1,2p'`
+- 代码与脚本检查：
+  - `python -m py_compile examples/dpo/eval_qwen2p5_clean_benchmarks.py examples/dpo/summarize_qwen2p5_clean_tables.py`
+  - `bash -n examples/dpo/setup_qwen2p5_clean_benchmark_env.sh`
+  - `source /home/lhf_hongfu_gmail_com/.venvs/DPO/bin/activate && python tests/examples/qwen2p5_clean_tables_test.py`
+  - `python examples/dpo/summarize_qwen2p5_clean_tables.py --run-ts 20260417_013847`
+  - `source /home/lhf_hongfu_gmail_com/.venvs/DPO/bin/activate && python examples/dpo/eval_qwen2p5_clean_benchmarks.py --run-ts 20260417_013847 --skip-generation --question-limit 2`
+  - `source /home/lhf_hongfu_gmail_com/.venvs/DPO/bin/activate && python examples/dpo/eval_qwen2p5_clean_benchmarks.py --run-ts 20260417_013847 --benchmarks mt_bench --skip-generation --question-limit 2 --output-root /tmp/clean_bench_subset_test`
+  - `source /home/lhf_hongfu_gmail_com/.venvs/DPO/bin/activate && python examples/dpo/eval_qwen2p5_clean_benchmarks.py --run-ts 20260417_013847 --methods self_inf --benchmarks mt_bench --question-limit 1 --output-root /tmp/clean_bench_generate_smoke`
+
+### Validation results
+
+- 已确认 4 个 clean exported models 都存在：
+  - `vanilla_dpo`
+  - `random_pair_filtering`
+  - `reward_based_filtering`
+  - `self_inf`
+- 已确认本地资源可用于 Stage A：
+  - MT-Bench 的 `question.jsonl`、`judge_prompts.jsonl`、`gpt-4 reference answers` 可从官方 GitHub raw 路径获取
+  - AlpacaEval 2 的 `alpaca_eval_gpt4_baseline.json` 可从 HF dataset 直接下载
+  - Arena-Hard v2.0 的问题文件与官方 baseline answers 可从 HF dataset 直接下载
+- 已新增：
+  - 一个单独 eval venv 的 setup 脚本
+  - 一个 clean benchmark 生成/编排脚本，默认把三套 benchmark 的 Stage A 工作区与 Stage B 命令文件准备好
+  - 一个 clean 论文表汇总脚本，可把已有 clean 指标与 benchmark summary 合并成统一 JSON 和 LaTeX
+- `summarize_qwen2p5_clean_tables.py` 已成功生成：
+  - `runs/results/clean_benchmarks_20260417_013847/tables/clean_main_table.json`
+  - `runs/results/clean_benchmarks_20260417_013847/tables/clean_main_table.tex`
+- `eval_qwen2p5_clean_benchmarks.py` 的 Stage A 已 smoke 通过：
+  - full workspace prepare: `runs/results/clean_benchmarks_20260417_013847/benchmark_summary.json`
+  - subset prepare: `/tmp/clean_bench_subset_test/benchmark_summary.json`
+  - local generation smoke:
+    - 配置：`self_inf + mt_bench + 1 prompt`
+    - 输出：`/tmp/clean_bench_generate_smoke/mt_bench/data/mt_bench/model_answer/self_inf.jsonl`
+    - 结果：成功写出 1 条官方 MT-Bench answer record，说明 exported model -> Tunix/JAX sampler -> benchmark output 这条链路已经跑通
+- 当前 `runs/results/qwen2p5_clean_metrics_20260417_013847.json` 里记录的 clean validation `Acc-AUC` 为：
+  - `vanilla_dpo`: `0.5629`
+  - `random_pair_filtering`: `0.5596`
+  - `reward_based_filtering`: `0.5641`
+  - `self_inf`: `0.5659`
+
+### Known risks / TODO
+
+- 本轮没有实际运行 OpenAI judge，因此 `benchmark_summary.json` 的 benchmark score 字段仍会是 `null`，需要 Stage B 补齐。
+- `FastChat` 的 MT-Bench judge import 链会依赖 `torch`；目前 setup 脚本把它做成可选安装项 `INSTALL_TORCH=1`，避免默认拉一个较重的包。
+- 现有 clean validation `Acc-AUC` 来自此前已经验证过的分析结果，因此这次新增了一个本地 JSON 作为汇总脚本的稳定输入；后续如果把该指标自动重算链路补齐，可以再把这个手工桥接移除。
+
 ## 2026-03-07: DeepScaler live eval progress inspection
 
 ### Scope
@@ -5754,3 +5827,2925 @@ This file tracks engineering changes made in this repository.
 ### Known risks / TODO
 
 - 如果后续更换 worker、TPU 拓扑或 venv，再单独补记录。
+
+## 2026-04-13 - Qwen2.5 DPO static flip-correlation experiment matrix
+
+### Scope
+
+- 为 `Qwen2.5-1.5B from SFT` 的 DPO LoRA recipe 增加静态 train-set corruption 实验矩阵。
+- 让 `baseline`、`outlier_l2`、`self_inf_batch` 都能在 `clean`、`tail50_flip20`、`tail50_flip40`、`global_flip10/20/30/40` 上复用同一套 launcher。
+- 将训练期 `late_flip` 与静态 dataset flip 解耦：本矩阵实验里显式关闭 `late_flip`，eval 保持 clean。
+
+### Changed files
+
+1. `tunix/examples/data/ultrafeedback_dpo.py`
+2. `examples/dpo/qwen2p5_dpo_experiments.py`
+3. `examples/dpo/run_qwen2p5_1p5b_ultrafeedback_from_sft.sh`
+4. `examples/dpo/run_qwen2p5_1p5b_ultrafeedback_from_sft_flip_matrix.sh`
+5. `tests/examples/data/ultrafeedback_dpo_test.py`
+6. `tests/examples/qwen2p5_dpo_experiments_test.py`
+7. `examples/dpo/README.md`
+8. `examples/ultrafeedback/README.md`
+9. `develop.md`
+
+### Validation
+
+- `source /home/lhf_hongfu_gmail_com/.venvs/DPO/bin/activate && python tests/examples/data/ultrafeedback_dpo_test.py`
+- `source /home/lhf_hongfu_gmail_com/.venvs/DPO/bin/activate && python tests/examples/qwen2p5_dpo_experiments_test.py`
+- `mkdir -p /tmp/sft_model_dummy && ./examples/dpo/run_qwen2p5_1p5b_ultrafeedback_from_sft_flip_matrix.sh /tmp/sft_model_dummy --ft-mode lora --methods baseline,outlier_l2,self_inf_batch --datasets clean,tail50_flip20,tail50_flip40,global_flip10,global_flip20,global_flip30,global_flip40 --print-only`
+- `bash -n examples/dpo/run_qwen2p5_1p5b_ultrafeedback_from_sft.sh && bash -n examples/dpo/run_qwen2p5_1p5b_ultrafeedback_from_sft_flip_matrix.sh`
+- `source /home/lhf_hongfu_gmail_com/.venvs/DPO/bin/activate && python - <<'PY' ... examples/dpo/qwen2p5_dpo_experiments.py helper import smoke check ... PY`
+
+### Validation results
+
+- 数据层新增了静态 flip 参数：
+  - `flip_scope`: `none | global | tail_fraction`
+  - `flip_ratio`
+  - `flip_tail_fraction`
+  - `flip_seed`
+- 静态 flip 现在基于 train split shuffle 之后的索引空间，按 `flip_seed` 进行可复现采样：
+  - `global_flip*` 在全 train 范围内选样本翻转
+  - `tail50_flip*` 仅在后 50% 作用域内选样本翻转
+- `Qwen2.5` DPO launcher 新增了 `--corruption-config`，并且在该实验路径里会：
+  - 将 train data module 切到指定 corruption config
+  - 保持 eval data module clean
+  - 显式设置 `dpo_config.late_flip_ratio=0.0`
+  - 显式设置 `dpo_config.late_flip_start_step=null`
+- 新增矩阵脚本 `examples/dpo/run_qwen2p5_1p5b_ultrafeedback_from_sft_flip_matrix.sh`：
+  - 默认生成并顺序执行 `3 x 7 = 21` 条命令
+  - 支持 `--methods`、`--datasets`、`--print-only`
+  - `--print-only` 验证时成功打印了完整的 21 条 full LoRA 命令
+- 新增单测全部通过：
+  - `tests/examples/data/ultrafeedback_dpo_test.py`: `9` 项通过
+  - `tests/examples/qwen2p5_dpo_experiments_test.py`: `4` 项通过
+- 脚本语法检查通过。
+
+### Known risks / TODO
+
+- 当前只做了配置生成、矩阵编排与单元级验证，还没有在真实 TPU 上完成 3 组代表性 smoke 训练；如果要做端到端运行确认，建议优先跑：
+  - `baseline + clean`
+  - `outlier_l2 + global_flip20`
+  - `self_inf_batch + tail50_flip40`
+- `examples/dpo/qwen2p5_dpo_experiments.py` 依赖 `omegaconf`，因此需要在 DPO venv 中运行；系统 Python 缺少该依赖时，helper 级验证不会通过。
+
+## 2026-04-14 - Clear old DPO artifacts to free space for the 21-run matrix
+
+### Scope
+
+- 清理历史 DPO 运行产物，为新的 `Qwen2.5` static flip matrix 腾出足够磁盘空间。
+- 本轮无代码改动，仅删除历史 `runs/` 目录下的实验产物并记录结果。
+
+### Changed files
+
+1. `develop.md`
+
+### Validation
+
+- 删除目录：
+  - `runs/dpo_qwen3_4b_ultrafeedback`
+  - `runs/dpo_qwen3_4b_ultrafeedback_probe`
+  - `runs/dpo_qwen3_4b_ultrafeedback_smoke`
+  - `runs/dpo_qwen3_4b_ultrafeedback_smoke_baseline`
+  - `runs/dpo_qwen3_4b_ultrafeedback_smoke_backup_20260310_153734`
+  - `runs/dpo_qwen3_4b_ultrafeedback_smoke_backup_20260310_154811`
+  - `runs/dpo_qwen2p5_1p5b_ultrafeedback_from_sft_baseline_lora_full_20260325_164001`
+  - `runs/dpo_qwen2p5_1p5b_ultrafeedback_from_sft_outlier_l2_lora_full_20260325_173635`
+  - `runs/dpo_qwen2p5_1p5b_ultrafeedback_from_sft_self_inf_batch_lora_full_20260325_183244`
+  - `runs/dpo_qwen2p5_1p5b_ultrafeedback_from_sft_baseline_lora_full_20260327_061550`
+  - `runs/dpo_qwen2p5_1p5b_ultrafeedback_from_sft_outlier_l2_lora_full_20260327_071321`
+  - `runs/dpo_qwen2p5_1p5b_ultrafeedback_from_sft_self_inf_batch_lora_full_20260327_080934`
+  - `runs/dpo_qwen2p5_1p5b_ultrafeedback_from_sft_baseline_lora_full_20260401_163713`
+  - `runs/dpo_qwen2p5_1p5b_ultrafeedback_from_sft_outlier_l2_lora_full_20260401_173432`
+  - `runs/dpo_qwen2p5_1p5b_ultrafeedback_from_sft_self_inf_batch_lora_full_20260401_183110`
+- 复查空间：
+  - `df -h / /tmp /home/lhf_hongfu_gmail_com/tunix`
+  - `du -sh runs`
+  - `du -sh runs/*`
+
+### Validation results
+
+- 本轮无代码改动。
+- 删除后 `runs/` 仅保留：
+  - `runs/sft_qwen2p5_1p5b_ultrafeedback_full_full_20260317_003657`
+- `runs/` 总占用从约 `63G` 降到 `2.9G`。
+- 根分区可用空间从约 `9.0G` 提升到 `69G`，已足够容纳新的 `21` 个 full DPO runs。
+
+### Known risks / TODO
+
+- 当前仅保留了 `Qwen2.5` 的 SFT exported model 目录；已删除的历史 DPO 产物不可恢复。
+- 新矩阵运行前仍建议先用 `--print-only` 检查命令清单，并优先做 1-3 个代表性 smoke/full 预热，避免一次性长时间占满 TPU 资源。
+
+## 2026-04-16 - Add random/reward filtering DPO methods and focused 4x3 launcher
+
+### Scope
+
+- 在现有 DPO dynamic batch curation 框架上新增两种 pair-level filtering 方法：
+  - `random_pair_filtering`
+  - `reward_based_filtering`
+- 保持现有 `Vanilla DPO` 与 `Self-inf` 行为不变，并把 `Qwen2.5` 实验入口统一到新的方法命名：
+  - `vanilla_dpo`
+  - `random_pair_filtering`
+  - `reward_based_filtering`
+  - `self_inf`
+- 将批量 launcher 的默认实验矩阵收束为当前聚焦的 `4 methods x 3 datasets`：
+  - `clean`
+  - `global_flip20`
+  - `global_flip40`
+
+### Changed files
+
+1. `tunix/sft/dpo/dpo_trainer.py`
+2. `tunix/cli/dpo_main.py`
+3. `tests/sft/dpo/dpo_trainer_test.py`
+4. `tests/cli/dpo_main_test.py`
+5. `examples/dpo/qwen2p5_dpo_experiments.py`
+6. `examples/dpo/run_qwen2p5_1p5b_ultrafeedback_from_sft.sh`
+7. `examples/dpo/run_qwen2p5_1p5b_ultrafeedback_from_sft_flip_matrix.sh`
+8. `tests/examples/qwen2p5_dpo_experiments_test.py`
+9. `examples/dpo/README.md`
+10. `examples/ultrafeedback/README.md`
+11. `develop.md`
+
+### Validation
+
+- `bash -n examples/dpo/run_qwen2p5_1p5b_ultrafeedback_from_sft.sh`
+- `bash -n examples/dpo/run_qwen2p5_1p5b_ultrafeedback_from_sft_flip_matrix.sh`
+- `source /home/lhf_hongfu_gmail_com/.venvs/DPO/bin/activate && python tests/sft/dpo/dpo_trainer_test.py`
+- `source /home/lhf_hongfu_gmail_com/.venvs/DPO/bin/activate && python tests/cli/dpo_main_test.py`
+- `source /home/lhf_hongfu_gmail_com/.venvs/DPO/bin/activate && python tests/examples/qwen2p5_dpo_experiments_test.py`
+- `mkdir -p /tmp/fake_sft_model && ./examples/dpo/run_qwen2p5_1p5b_ultrafeedback_from_sft_flip_matrix.sh /tmp/fake_sft_model --print-only`
+
+### Validation results
+
+- `DPOTrainingConfig` 新增了 `curation_keep_ratio`，并支持新 variant：
+  - `random_pair_filtering`
+  - `reward_based_filtering`
+- `CuratedDPOTrainer` 现在支持 4 类 curation 路径：
+  - `outlier_l2`
+  - `random_pair_filtering`
+  - `reward_based_filtering`
+  - `self_inf_batch`
+- `random_pair_filtering` 在每个 accumulation window 中按固定比例、可复现地随机保留 pair。
+- `reward_based_filtering` 在每个 accumulation window 中按 DPO trainer 内部的每样本 `rewards/margin` 排序，保留 top 比例 pair；未引入外部 reward model。
+- 针对新方法的 trainer 单测通过：
+  - 新增 aggregator 行为验证通过
+  - `curation_keep_ratio=1.0` 时，新方法与标准 gradient accumulation 一致
+  - 新 variant alias normalize 测试通过
+- CLI config merge 测试通过，并记录了 `curation_keep_ratio`
+- `Qwen2.5` helper/launcher 测试通过：
+  - train corruption / clean eval 仍保持正确
+  - `late_flip` 在该实验路径下仍被显式禁用
+  - legacy alias `baseline` / `self_inf_batch` 仍可映射到新方法名
+- 批量脚本 `--print-only` 成功打印默认 `12` 条命令：
+  - `4 methods x 3 datasets`
+  - 方法默认值已切换为 `vanilla_dpo,random_pair_filtering,reward_based_filtering,self_inf`
+  - 数据默认值已切换为 `clean,global_flip20,global_flip40`
+- 脚本语法检查通过。
+
+### Known risks / TODO
+
+- `random_pair_filtering` 和 `reward_based_filtering` 目前默认共用 `CURATION_KEEP_RATIO=0.9`；这是为便于直接跑实验做的默认假设，后续仍值得在 `0.8/0.9/0.95` 等范围内做敏感性分析。
+- 本轮验证停留在单元/配置/脚本层，还没有跑真实 TPU smoke；建议优先验证：
+  - `vanilla_dpo + clean`
+  - `random_pair_filtering + global_flip20`
+  - `reward_based_filtering + global_flip40`
+  - `self_inf + global_flip20`
+- 旧的 `outlier_l2` 仍保留为可选 legacy 方法，便于和此前结果对齐；新的默认矩阵不再自动包含它。
+
+## 2026-04-16 - Plan the focused DPO experiment rollout
+
+### Scope
+
+- 规划 `Qwen2.5` DPO 新方法矩阵的实际运行顺序、验证步骤与结果汇总方式。
+- 本轮仅做实验计划整理，无代码改动。
+
+### Changed files
+
+1. `develop.md`
+
+### Validation
+
+- 无代码改动
+
+### Validation results
+
+- 已整理下一轮推荐实验流程：
+  - 先做 4 组 smoke 验证方法入口与数据配置
+  - 再做 12 组 full run 主实验
+  - 统一比较 `clean / global_flip20 / global_flip40`
+  - 统一比较 `vanilla_dpo / random_pair_filtering / reward_based_filtering / self_inf`
+
+### Known risks / TODO
+
+- `random_pair_filtering` 与 `reward_based_filtering` 的默认 `CURATION_KEEP_RATIO=0.9` 仍属于工作假设；如果主实验差距不明显，建议追加 keep ratio sweep。
+- 真实 TPU 运行前仍需确认 `SFT_MODEL` 路径、剩余磁盘空间和目标输出目录。
+
+## 2026-04-16 - Run DPO smoke experiments for the focused 4x3 matrix
+
+### Scope
+
+- 实际执行 4 组推荐 smoke：
+  - `vanilla_dpo + clean`
+  - `random_pair_filtering + global_flip20`
+  - `reward_based_filtering + global_flip40`
+  - `self_inf + global_flip20`
+- 本轮不修改代码，仅验证训练路径、checkpoint 路径与方法分支是否打通。
+
+### Changed files
+
+1. `develop.md`
+
+### Validation
+
+- `source /home/lhf_hongfu_gmail_com/.venvs/DPO/bin/activate && ./examples/dpo/run_qwen2p5_1p5b_ultrafeedback_from_sft.sh smoke vanilla_dpo /home/lhf_hongfu_gmail_com/tunix/runs/sft_qwen2p5_1p5b_ultrafeedback_full_full_20260317_003657/exported_model --corruption-config clean --ft-mode lora`
+- `source /home/lhf_hongfu_gmail_com/.venvs/DPO/bin/activate && CURATION_KEEP_RATIO=0.9 ./examples/dpo/run_qwen2p5_1p5b_ultrafeedback_from_sft.sh smoke random_pair_filtering /home/lhf_hongfu_gmail_com/tunix/runs/sft_qwen2p5_1p5b_ultrafeedback_full_full_20260317_003657/exported_model --corruption-config global_flip20 --ft-mode lora`
+- `source /home/lhf_hongfu_gmail_com/.venvs/DPO/bin/activate && CURATION_KEEP_RATIO=0.9 ./examples/dpo/run_qwen2p5_1p5b_ultrafeedback_from_sft.sh smoke reward_based_filtering /home/lhf_hongfu_gmail_com/tunix/runs/sft_qwen2p5_1p5b_ultrafeedback_full_full_20260317_003657/exported_model --corruption-config global_flip40 --ft-mode lora exported_model_output_dir=`
+- `source /home/lhf_hongfu_gmail_com/.venvs/DPO/bin/activate && CURATION_KEEP_RATIO=0.9 ./examples/dpo/run_qwen2p5_1p5b_ultrafeedback_from_sft.sh smoke self_inf /home/lhf_hongfu_gmail_com/tunix/runs/sft_qwen2p5_1p5b_ultrafeedback_full_full_20260317_003657/exported_model --corruption-config global_flip20 --ft-mode lora exported_model_output_dir=`
+- `source /home/lhf_hongfu_gmail_com/.venvs/DPO/bin/activate && CURATION_KEEP_RATIO=0.9 RUN_ROOT=/home/lhf_hongfu_gmail_com/tunix/runs/dpo_qwen2p5_1p5b_ultrafeedback_from_sft_random_pair_filtering_global_flip20_lora_smoke_20260416_214150 ./examples/dpo/run_qwen2p5_1p5b_ultrafeedback_from_sft.sh smoke random_pair_filtering /home/lhf_hongfu_gmail_com/tunix/runs/sft_qwen2p5_1p5b_ultrafeedback_full_full_20260317_003657/exported_model --corruption-config global_flip20 --ft-mode lora exported_model_output_dir=`
+- `df -h / /home/lhf_hongfu_gmail_com/tunix/runs`
+- `find runs/dpo_qwen2p5_1p5b_ultrafeedback_from_sft_*_smoke_20260416_*/checkpoints -maxdepth 1 -mindepth 1 -type d | sort`
+
+### Validation results
+
+- 四组 smoke 均成功跑到 `checkpoint 20`：
+  - `runs/dpo_qwen2p5_1p5b_ultrafeedback_from_sft_vanilla_dpo_clean_lora_smoke_20260416_213152`
+  - `runs/dpo_qwen2p5_1p5b_ultrafeedback_from_sft_random_pair_filtering_global_flip20_lora_smoke_20260416_214150`
+  - `runs/dpo_qwen2p5_1p5b_ultrafeedback_from_sft_reward_based_filtering_global_flip40_lora_smoke_20260416_215427`
+  - `runs/dpo_qwen2p5_1p5b_ultrafeedback_from_sft_self_inf_global_flip20_lora_smoke_20260416_220308`
+- `random_pair_filtering` 首次 smoke 训练完成但在最终 `exported_model` 导出时因磁盘空间不足失败；删除 smoke run 的 `exported_model` 后，使用同一 `RUN_ROOT` + `exported_model_output_dir=` 成功从 `checkpoint 20` restore 并正常收尾。
+- 为避免再次触发磁盘写满，后续 `reward_based_filtering` 与 `self_inf` smoke 直接以 `exported_model_output_dir=` 运行，仅验证训练与 checkpoint/restore 路径。
+- `self_inf` 前几步显著更慢，但在首次编译/累计之后恢复正常速度，最终完整结束。
+- 当前 4 个 smoke run 目录各约 `101M`，不再携带大型 `exported_model` 产物。
+
+### Known risks / TODO
+
+- 当前根分区剩余空间约 `3G`，不足以直接继续跑完整 `12` 组 full 实验；开始主实验前需要再次清理旧产物或改到更大的输出盘。
+- 本轮 smoke 为了节省空间关闭了部分 run 的最终导出；如果后续需要显式验证 `maybe_export_model` 路径，还需要在更充足的磁盘环境下单独补一次。
+
+## 2026-04-16 - Plan disk cleanup for the next DPO full runs
+
+### Scope
+
+- 盘点 `runs/` 目录的主要占用来源，给出继续跑下一轮 `12` 组 full 实验前的清空间方案。
+- 本轮仅做空间规划与现状核对，无代码改动。
+
+### Changed files
+
+1. `develop.md`
+
+### Validation
+
+- `df -h / /home/lhf_hongfu_gmail_com/tunix/runs`
+- `cd /home/lhf_hongfu_gmail_com/tunix && du -sh runs/* 2>/dev/null | sort -hr | head -n 40`
+- `cd /home/lhf_hongfu_gmail_com/tunix && find runs -maxdepth 2 -type d -name exported_model -print0 | xargs -0 du -sh 2>/dev/null | sort -hr | head -n 40`
+
+### Validation results
+
+- 当前根分区剩余空间约 `2.9G`。
+- 当前最大占用来自 `2026-04-14` 的 `21` 个 full run，每个目录约 `3.0G`。
+- 这些 full run 的主要空间几乎都来自各自的 `exported_model/`，单个约 `2.9G`。
+- 当前最值得保留的是：
+  - `runs/sft_qwen2p5_1p5b_ultrafeedback_full_full_20260317_003657/exported_model`
+  因为它是后续 DPO 继续训练要用到的 SFT 起点。
+- 当前最适合清理的是 `2026-04-14` 那批 full run 的 `exported_model/`；这样可以保留：
+  - checkpoints
+  - tensorboard
+  - config 和日志
+  同时最大化回收空间。
+
+### Known risks / TODO
+
+- 如果后续还需要直接从某个 `2026-04-14` 的 full run 导出模型目录做推理或下游初始化，删掉对应 `exported_model/` 前需要先确认没有这类依赖。
+- 若只删 `exported_model/` 仍不足以支撑完整新实验，再考虑删除整组旧 run 或将新实验输出迁到更大的磁盘路径。
+
+## 2026-04-16 - Confirm the SFT source run is still present
+
+### Scope
+
+- 核对后续 DPO 实验依赖的 SFT run 目录及其 `exported_model` 是否仍然存在。
+- 本轮仅做状态确认，无代码改动。
+
+### Changed files
+
+1. `develop.md`
+
+### Validation
+
+- `d=/home/lhf_hongfu_gmail_com/tunix/runs/sft_qwen2p5_1p5b_ultrafeedback_full_full_20260317_003657; if [ -d "$d" ]; then echo EXISTS; du -sh "$d"; find "$d" -maxdepth 1 -mindepth 1 | sort; else echo MISSING; fi`
+- `d=/home/lhf_hongfu_gmail_com/tunix/runs/sft_qwen2p5_1p5b_ultrafeedback_full_full_20260317_003657/exported_model; if [ -d "$d" ]; then echo EXPORTED_MODEL_EXISTS; du -sh "$d"; find "$d" -maxdepth 1 -mindepth 1 | sort | head -n 40; else echo EXPORTED_MODEL_MISSING; fi`
+
+### Validation results
+
+- SFT run 目录仍然存在：
+  - `runs/sft_qwen2p5_1p5b_ultrafeedback_full_full_20260317_003657`
+- 其 `exported_model` 也仍然存在，大小约 `2.9G`：
+  - `runs/sft_qwen2p5_1p5b_ultrafeedback_full_full_20260317_003657/exported_model`
+- 导出目录中的关键文件仍在，包括：
+  - `model.safetensors`
+  - `config.json`
+  - `tokenizer.json`
+  - `tokenizer_config.json`
+  - `vocab.json`
+  - `merges.txt`
+
+### Known risks / TODO
+
+- 该 SFT `exported_model` 是当前后续 DPO full run 的起点，清空间时应继续排除，不要删除。
+
+## 2026-04-16 - Clean old DPO exported models to free disk space
+
+### Scope
+
+- 按既定清理方案删除 `2026-04-14` 那批 `21` 个 DPO full run 的 `exported_model/`。
+- 保留 SFT 起点目录 `runs/sft_qwen2p5_1p5b_ultrafeedback_full_full_20260317_003657/exported_model` 不动。
+- 本轮不修改代码，仅做运行产物清理。
+
+### Changed files
+
+1. `develop.md`
+
+### Validation
+
+- `cd /home/lhf_hongfu_gmail_com/tunix && targets=(runs/dpo_qwen2p5_1p5b_ultrafeedback_from_sft_*_lora_full_20260414_*/exported_model); printf '%s\n' "${targets[@]}"`
+- `cd /home/lhf_hongfu_gmail_com/tunix && targets=(runs/dpo_qwen2p5_1p5b_ultrafeedback_from_sft_*_lora_full_20260414_*/exported_model); echo count=${#targets[@]}; du -ch "${targets[@]}" | tail -n 1`
+- `cd /home/lhf_hongfu_gmail_com/tunix && targets=(runs/dpo_qwen2p5_1p5b_ultrafeedback_from_sft_*_lora_full_20260414_*/exported_model); rm -rf "${targets[@]}"`
+- `df -h / /home/lhf_hongfu_gmail_com/tunix/runs`
+- `cd /home/lhf_hongfu_gmail_com/tunix && find runs -maxdepth 2 -type d -name exported_model | sort`
+- `d=/home/lhf_hongfu_gmail_com/tunix/runs/sft_qwen2p5_1p5b_ultrafeedback_full_full_20260317_003657/exported_model; if [ -d "$d" ]; then echo SFT_EXPORTED_MODEL_OK; du -sh "$d"; else echo SFT_EXPORTED_MODEL_MISSING; fi`
+
+### Validation results
+
+- 实际删除目标共 `21` 个 `exported_model/`，预计回收量约 `61G`。
+- 删除完成后，根分区可用空间从约 `2.9G` 提升到约 `64G`。
+- 删除后 `runs/` 下剩余的 `exported_model` 只剩一个：
+  - `runs/sft_qwen2p5_1p5b_ultrafeedback_full_full_20260317_003657/exported_model`
+- SFT 起点导出目录确认仍在，大小约 `2.9G`，未被误删。
+
+### Known risks / TODO
+
+- 旧的 `2026-04-14` full run 仍保留 checkpoints、tensorboard 和 config/log 产物，但已经不再保留可直接拿来推理的导出模型目录。
+- 当前磁盘空间已足够继续跑下一轮 `12` 组 DPO full 实验；开始前仍建议确认是否继续沿用根分区作为输出位置。
+
+## 2026-04-16 - Plan the one-script rollout for the next DPO full matrix
+
+### Scope
+
+- 核对当前矩阵脚本默认值是否已经覆盖下一轮目标实验。
+- 规划如何用单个 `.sh` 顺序跑完下一轮 `12` 组 full run。
+- 本轮仅做运行方案整理，无代码改动。
+
+### Changed files
+
+1. `develop.md`
+
+### Validation
+
+- `sed -n '1,260p' /home/lhf_hongfu_gmail_com/tunix/examples/dpo/run_qwen2p5_1p5b_ultrafeedback_from_sft_flip_matrix.sh`
+- `sed -n '1,260p' /home/lhf_hongfu_gmail_com/tunix/examples/dpo/run_qwen2p5_1p5b_ultrafeedback_from_sft.sh`
+- `sed -n '1,320p' /home/lhf_hongfu_gmail_com/tunix/examples/dpo/qwen2p5_dpo_experiments.py`
+- `df -h / /home/lhf_hongfu_gmail_com/tunix/runs`
+
+### Validation results
+
+- 当前矩阵脚本默认方法集合已经是：
+  - `vanilla_dpo`
+  - `random_pair_filtering`
+  - `reward_based_filtering`
+  - `self_inf`
+- 当前矩阵脚本默认数据集集合已经是：
+  - `clean`
+  - `global_flip20`
+  - `global_flip40`
+- 因此现成的 `examples/dpo/run_qwen2p5_1p5b_ultrafeedback_from_sft_flip_matrix.sh` 已经可以直接顺序跑完目标 `12` 组 full 实验，无需再加新的 wrapper。
+- `random_pair_filtering` 与 `reward_based_filtering` 在未显式覆盖时会默认使用 `curation_keep_ratio=0.9`。
+- 当前根分区剩余空间约 `64G`，足以承载这轮 `12` 组 full run。
+
+### Known risks / TODO
+
+- 该批量脚本按“方法优先、数据其次”的顺序运行；如果后续想改成“数据优先”顺序，需要再单独改脚本。
+- 如果希望长期后台运行更稳，建议配合 `nohup`、`tmux` 或者把 stdout/stderr 同时落盘。
+
+## 2026-04-17 - Start the 12-run DPO full matrix
+
+### Scope
+
+- 启动当前目标实验矩阵：
+  - 方法：`vanilla_dpo`、`random_pair_filtering`、`reward_based_filtering`、`self_inf`
+  - 数据：`clean`、`global_flip20`、`global_flip40`
+- 使用单个批量脚本顺序跑完 `12` 组 full run。
+- 本轮仅做实验启动与运行记录，无代码改动。
+
+### Changed files
+
+1. `develop.md`
+
+### Validation
+
+- `cd /home/lhf_hongfu_gmail_com/tunix && test -d runs/sft_qwen2p5_1p5b_ultrafeedback_full_full_20260317_003657/exported_model && echo SFT_MODEL_OK && df -h / runs && if [ -n "${HF_TOKEN:-}" ]; then echo HF_TOKEN_SET; else echo HF_TOKEN_MISSING; fi`
+- `cd /home/lhf_hongfu_gmail_com/tunix && bash -lc 'set -a; [ -f .env ] && source .env; [ -f my_example/.env ] && source my_example/.env; set +a; if [ -n "${HF_TOKEN:-}" ]; then echo HF_TOKEN_LOADABLE; else echo HF_TOKEN_STILL_MISSING; fi'`
+- `cd /home/lhf_hongfu_gmail_com/tunix && CURATION_KEEP_RATIO=0.9 ./examples/dpo/run_qwen2p5_1p5b_ultrafeedback_from_sft_flip_matrix.sh runs/sft_qwen2p5_1p5b_ultrafeedback_full_full_20260317_003657/exported_model --profile full --ft-mode lora --print-only`
+- `cd /home/lhf_hongfu_gmail_com/tunix && RUN_TS=$(date +%Y%m%d_%H%M%S) && export RUN_TS CURATION_KEEP_RATIO=0.9 && mkdir -p runs/logs && ./examples/dpo/run_qwen2p5_1p5b_ultrafeedback_from_sft_flip_matrix.sh /home/lhf_hongfu_gmail_com/tunix/runs/sft_qwen2p5_1p5b_ultrafeedback_full_full_20260317_003657/exported_model --profile full --ft-mode lora 2>&1 | tee /home/lhf_hongfu_gmail_com/tunix/runs/logs/dpo_full_matrix_${RUN_TS}.log`
+- `pgrep -af 'tunix.cli.dpo_main|run_qwen2p5_1p5b_ultrafeedback_from_sft.sh'`
+
+### Validation results
+
+- SFT 起点模型目录存在且可用：
+  - `runs/sft_qwen2p5_1p5b_ultrafeedback_full_full_20260317_003657/exported_model`
+- 当前根分区剩余空间约 `64G`，足够启动这轮 `12` 组 full run。
+- 当前 shell 本身没有直接设置 `HF_TOKEN`，但按 launcher 的 `.env` 加载方式验证后可正常读取 `HF_TOKEN`。
+- `--print-only` 成功打印完整 `12` 条 full 命令。
+- 首次 `nohup` 包装尝试只打印了矩阵计划，没有稳定保活；随后改为直接运行批量脚本并用 `tee` 持续落盘日志。
+- 当前实际运行会话：
+  - exec session id: `88474`
+  - `RUN_TS=20260417_013847`
+  - log file: `runs/logs/dpo_full_matrix_20260417_013847.log`
+- 启动后已确认进入第一组 full run：
+  - `vanilla_dpo + clean`
+  - run root: `runs/dpo_qwen2p5_1p5b_ultrafeedback_from_sft_vanilla_dpo_clean_lora_full_20260417_013847`
+  - 相关进程已出现：
+    - `run_qwen2p5_1p5b_ultrafeedback_from_sft.sh full vanilla_dpo ...`
+    - `python3 -m tunix.cli.dpo_main ...`
+
+### Known risks / TODO
+
+- 这轮 `12` 组 full run 预计会运行较久，后续需要持续监控：
+  - 当前进行到哪一组
+  - 是否出现磁盘再次逼近上限
+  - 是否有单组在导出模型阶段失败
+- 如果后续需要中断续跑，应优先保留本次 `RUN_TS=20260417_013847` 对应的日志文件，便于精确定位完成到哪一组。
+
+## 2026-04-17 - Clarify how the 12-run matrix is being kept alive
+
+### Scope
+
+- 核对当前实验进程的实际运行方式，并说明是否使用了 `tmux` / `nohup` 之类的独立保活手段。
+- 本轮仅做运行方式说明，无代码改动。
+
+### Changed files
+
+1. `develop.md`
+
+### Validation
+
+- `ps -fp 3956117,3956128`
+- `tail -n 40 /home/lhf_hongfu_gmail_com/tunix/runs/logs/dpo_full_matrix_20260417_013847.log`
+
+### Validation results
+
+- 当前实际运行方式不是 `tmux`，也不是最终成功依赖 `nohup`。
+- 当前 `12` 组 full matrix 是通过一个持续的交互式 PTY 会话运行：
+  - exec session id: `88474`
+  - shell 进程：`3956117`
+  - 子进程：`3956128` (`python3 -m tunix.cli.dpo_main ...`)
+- 运行输出同时落盘到：
+  - `runs/logs/dpo_full_matrix_20260417_013847.log`
+- 核对时第一组 `vanilla_dpo + clean` 仍在正常推进，已到 `train step 20` 附近并持续写 checkpoint / 日志。
+
+### Known risks / TODO
+
+- 这种 PTY 会话方式在当前 agent 持续监控时是可用的，但严格意义上没有 `tmux` / `screen` 那样强的“脱离当前控制端后仍独立保活”保证。
+- 如果后续需要更强的长时鲁棒性，建议迁移到 `tmux` 或等价的 detached session 里运行。
+
+## 2026-04-17 - Migrate the 12-run DPO matrix into tmux
+
+### Scope
+
+- 将已经启动的 `12` 组 DPO full matrix 从 PTY 会话迁移到 detached `tmux` 会话。
+- 迁移策略为：
+  - 等待当前 run 完成一次完整 checkpoint
+  - 中断旧 PTY 进程
+  - 使用同一 `RUN_TS` 在 `tmux` 中恢复继续跑
+- 本轮仅做运行方式迁移，无代码改动。
+
+### Changed files
+
+1. `develop.md`
+
+### Validation
+
+- `tmux -V`
+- `cd /home/lhf_hongfu_gmail_com/tunix && find runs/dpo_qwen2p5_1p5b_ultrafeedback_from_sft_vanilla_dpo_clean_lora_full_20260417_013847/checkpoints -maxdepth 1 -mindepth 1 -type d | sed 's#^.*/##' | sort -n | tail -n 10`
+- `ps -fp 3956117,3956128`
+- `kill -INT 3956128 3956117 && sleep 2 && ps -fp 3956117,3956128 || true`
+- `cd /home/lhf_hongfu_gmail_com/tunix && tmux new-session -d -s dpo_matrix_20260417_013847 "bash -lc 'cd /home/lhf_hongfu_gmail_com/tunix && export RUN_TS=20260417_013847 CURATION_KEEP_RATIO=0.9 && ./examples/dpo/run_qwen2p5_1p5b_ultrafeedback_from_sft_flip_matrix.sh /home/lhf_hongfu_gmail_com/tunix/runs/sft_qwen2p5_1p5b_ultrafeedback_full_full_20260317_003657/exported_model --profile full --ft-mode lora 2>&1 | tee -a /home/lhf_hongfu_gmail_com/tunix/runs/logs/dpo_full_matrix_20260417_013847.log'" && tmux set-option -t dpo_matrix_20260417_013847 remain-on-exit on`
+- `tmux ls | grep dpo_matrix_20260417_013847`
+- `pgrep -af 'tunix.cli.dpo_main|run_qwen2p5_1p5b_ultrafeedback_from_sft.sh'`
+- `tmux capture-pane -pt dpo_matrix_20260417_013847 | tail -n 120`
+
+### Validation results
+
+- `tmux` 可用，版本为 `3.2a`。
+- 迁移前，第一组 `vanilla_dpo + clean` 已经安全落到 `checkpoint 21`。
+- 旧 PTY 运行在发送 `Ctrl-C` 后未立即全部退出，随后确认旧 `bash` / `dpo_main` 进程已经结束。
+- 已创建 detached `tmux` 会话：
+  - session name: `dpo_matrix_20260417_013847`
+- `tmux` 内已重新拉起矩阵脚本，并继续复用：
+  - `RUN_TS=20260417_013847`
+  - log file: `runs/logs/dpo_full_matrix_20260417_013847.log`
+- 新的 `bash` 与 `python3 -m tunix.cli.dpo_main` 进程已经出现，说明 `tmux` 接管成功。
+- 当前恢复阶段日志已开始继续追加到原日志文件；checkpoint 根目录仍指向原第一组 run root，后续将从已有 checkpoint 继续向下推进。
+
+### Known risks / TODO
+
+- 当前刚完成运行方式迁移，恢复阶段会先重新加载模型，短时间内日志里可能还看不到新的 step 增长；需要继续观察确认从 `checkpoint 21` 往后推进。
+- 如果后续需要人工接入查看，可使用：
+  - `tmux attach -t dpo_matrix_20260417_013847`
+  - 或 `tmux capture-pane -pt dpo_matrix_20260417_013847 | tail -n 100`
+
+## 2026-04-17 - Check the live status of the 12-run DPO matrix
+
+### Scope
+
+- 核对当前 `tmux` 中的 `12` 组 DPO full matrix 运行到了哪一组、当前组进展到哪一步。
+- 本轮仅做运行状态检查，无代码改动。
+
+### Changed files
+
+1. `develop.md`
+
+### Validation
+
+- `tmux capture-pane -pt dpo_matrix_20260417_013847 | tail -n 120`
+- `tail -n 120 /home/lhf_hongfu_gmail_com/tunix/runs/logs/dpo_full_matrix_20260417_013847.log`
+- `cd /home/lhf_hongfu_gmail_com/tunix && ls -1dt runs/dpo_qwen2p5_1p5b_ultrafeedback_from_sft_*_20260417_013847 runs/dpo_qwen2p5_1p5b_ultrafeedback_from_sft_*_20260417_* 2>/dev/null | head -n 20`
+
+### Validation results
+
+- 当前 `tmux` 会话仍在正常推进：
+  - `dpo_matrix_20260417_013847`
+- 当前已经进入第 `3/12` 组：
+  - `vanilla_dpo + global_flip40`
+  - run root: `runs/dpo_qwen2p5_1p5b_ultrafeedback_from_sft_vanilla_dpo_global_flip40_lora_full_20260417_013847`
+- 日志显示这组当前大约进行到：
+  - `train step 80 / 115`
+  - 刚进入 `step 80` 的 evaluation
+- 这意味着前两组已经完成：
+  - `vanilla_dpo + clean`
+  - `vanilla_dpo + global_flip20`
+
+### Known risks / TODO
+
+- 当前仍处于 `vanilla_dpo` 方法的最后一个数据设置，后续还剩：
+  - `random_pair_filtering` 3 组
+  - `reward_based_filtering` 3 组
+  - `self_inf` 3 组
+- 完整矩阵仍需继续长时间运行，后续应继续关注：
+  - 磁盘空间
+  - 导出模型阶段是否报错
+  - `self_inf` 阶段的单组耗时是否明显更长
+
+## 2026-04-17 - Confirm the 12-run DPO matrix finished
+
+### Scope
+
+- 核对 `tmux` 中这轮 `12` 组 DPO full matrix 是否已经全部结束。
+- 检查是否还有残留训练进程，以及每个 run 是否都生成了 `exported_model`。
+- 本轮仅做运行状态确认，无代码改动。
+
+### Changed files
+
+1. `develop.md`
+
+### Validation
+
+- `tmux capture-pane -pt dpo_matrix_20260417_013847 | tail -n 120`
+- `tail -n 160 /home/lhf_hongfu_gmail_com/tunix/runs/logs/dpo_full_matrix_20260417_013847.log`
+- `cd /home/lhf_hongfu_gmail_com/tunix && ls -1dt runs/dpo_qwen2p5_1p5b_ultrafeedback_from_sft_*_20260417_013847 2>/dev/null | head -n 20`
+- `ps -ef | grep 'python3 -m tunix.cli.dpo_main' | grep -v grep || true`
+- `ps -ef | grep 'run_qwen2p5_1p5b_ultrafeedback_from_sft.sh full' | grep -v grep || true`
+- `cd /home/lhf_hongfu_gmail_com/tunix && for d in runs/dpo_qwen2p5_1p5b_ultrafeedback_from_sft_*_20260417_013847; do printf '%s ' \"$(basename \"$d\")\"; if [ -d \"$d/exported_model\" ]; then printf 'exported '; else printf 'no_export '; fi; if [ -d \"$d/checkpoints\" ]; then find \"$d/checkpoints\" -maxdepth 1 -mindepth 1 -type d | sed 's#^.*/##' | sort -n | tail -n 1 | tr -d '\\n'; fi; printf '\\n'; done`
+- `df -h / /home/lhf_hongfu_gmail_com/tunix/runs`
+
+### Validation results
+
+- `tmux` pane 已经是 `dead (status 0)`，说明矩阵脚本正常退出而不是异常中断。
+- 日志最后停在：
+  - `self_inf + global_flip40`
+  - 训练结束后开始导出：
+    - `Saving exported DPO model to .../self_inf_global_flip40.../exported_model`
+- 当前不存在残留的：
+  - `python3 -m tunix.cli.dpo_main`
+  - `run_qwen2p5_1p5b_ultrafeedback_from_sft.sh full`
+- 本轮 `12` 个 full run 全部存在，且每个 run 都有：
+  - `exported_model`
+  - 最新 checkpoint 目录 `114`
+- 当前根分区剩余空间约 `28G`。
+
+### Known risks / TODO
+
+- `tmux` 会话 `dpo_matrix_20260417_013847` 仍保留，pane 处于 `dead (status 0)`；如果不再需要，可以后续手动清理该会话。
+- 下一步如果要做结果汇总，建议直接从这批 `20260417_013847` run 中提取：
+  - final eval metrics
+  - step-wise convergence curves
+  - DBC keep ratio / filtered count 指标
+
+## 2026-04-17 - Clarify the current method and dataset counts
+
+### Scope
+
+- 回答当前这轮已完成实验中共有几种方法、几个数据集设置。
+- 本轮仅做状态说明，无代码改动。
+
+### Changed files
+
+1. `develop.md`
+
+### Validation
+
+- 无代码改动
+
+### Validation results
+
+- 当前这轮 `20260417_013847` 的完整结果矩阵为：
+  - `4` 种方法
+  - `3` 个数据集设置
+  - 共 `12` 个 full run 结果
+
+### Known risks / TODO
+
+- 若后续讨论范围切换到更早的 `20260414` 实验批次，方法数和数据集数会不同；需要明确是在说哪一轮结果。
+
+## 2026-04-17 - Rank metrics for paper presentation
+
+### Scope
+
+- 为当前这轮 `12` 个 full run 的论文呈现整理指标优先级，明确哪些指标更适合放进主表。
+- 本轮仅做结果呈现建议，无代码改动。
+
+### Changed files
+
+1. `develop.md`
+
+### Validation
+
+- 无代码改动
+
+### Validation results
+
+- 当前实验的指标优先级建议应以“最终效果”优先，其次才是“收敛过程”，再其次是“机制/效率”。
+- 推荐将主表重点放在：
+  - `final eval rewards/accuracy`
+  - `final eval rewards/margin`
+  - 一个单独的 convergence-aware 指标（优先 `Acc-AUC`）
+
+### Known risks / TODO
+
+- 若论文主 claim 强调的是“收敛更快”，则需要在主表或主文图中显式加入一个收敛指标；否则仅靠最终 accuracy 不足以支撑该 claim。
+
+## 2026-04-17 - Clarify whether the reported metrics are validation or test
+
+### Scope
+
+- 回答当前这批 `12` 个 full run 的表格指标来自 validation 还是 test split。
+- 本轮仅做结果口径说明，无代码改动。
+
+### Changed files
+
+1. `develop.md`
+
+### Validation
+
+- 无代码改动
+
+### Validation results
+
+- 当前这批结果不是独立 test set 指标。
+- 这些指标来自当前 DPO recipe 中的 clean eval holdout，即：
+  - `train_prefs`
+  - `partition='dpo'`
+  - `subset='eval'`
+- 更准确地说，它们属于当前实验流程中的 validation / evaluation split，而不是单独保留、从未用于模型选择的最终 test split。
+
+### Known risks / TODO
+
+- 如果论文里要严格写成 `test`，需要先确认是否另有完全独立且未参与实验迭代选择的 holdout；否则建议统一称为 `validation`、`eval holdout` 或 `clean evaluation split`。
+
+## 2026-04-17 - Plan paper tables for validation versus test reporting
+
+### Scope
+
+- 规划当前 DPO 实验在论文中的表格呈现，明确哪些指标放在 validation，哪些指标放在 test。
+- 本轮仅做论文呈现规划，无代码改动。
+
+### Changed files
+
+1. `develop.md`
+
+### Validation
+
+- 无代码改动
+
+### Validation results
+
+- 推荐将论文中的结果分成两层：
+  - `validation`：用于完整消融矩阵、方法选择、收敛分析
+  - `test`：用于最终主结果与结论确认
+- 推荐主表优先放：
+  - final accuracy
+  - final margin
+  - 一个 convergence-aware 指标（优先 `Acc-AUC`）
+- 推荐将 `test_prefs` 保留给最终选中的少量方法，而不是把所有实验决策都建立在 test 上。
+
+### Known risks / TODO
+
+- 如果后续要在论文里声称某个方法“收敛最快”，需要确保：
+  - 该结论主要来自 validation
+  - test 只作为最终性能确认，而不是重复进行方法筛选
+
+## 2026-04-17 - Identify which metrics favor self-inf most often
+
+### Scope
+
+- 基于当前 `20260417_013847` 这轮 `12` 个 full run，判断 `self_inf` 在哪些指标上最占优。
+- 本轮仅做结果解读，无代码改动。
+
+### Changed files
+
+1. `develop.md`
+
+### Validation
+
+- 无代码改动
+
+### Validation results
+
+- 严格来说，在当前这批结果里，`self_inf` 并没有在“最终性能”核心指标上成为大多数数据集的最佳方法：
+  - `Final Accuracy`: 不是 `3` 个数据集中的多数最佳
+  - `Final Margin`: 也不是多数最佳
+- `self_inf` 最强的证据主要来自“收敛相关”指标，尤其是在允许并列最佳时：
+  - `Step@95% Final Acc`: 在 `3/3` 个数据集上并列最佳
+  - `Step@90% Final Acc`: 在 `2/3` 个数据集上并列最佳
+- 若看更平滑的收敛指标：
+  - `Acc-AUC` 只在 `clean` 上是最佳
+  - 在 `global_flip20` 和 `global_flip40` 上，`reward_based_filtering` 的 `Acc-AUC` 更高
+
+### Known risks / TODO
+
+- 如果论文要主打 “Self-inf converges fastest”，当前最稳妥的写法应基于 threshold-based convergence 指标，而不是基于最终 accuracy / margin。
+
+## 2026-04-17 - Choose the best convergence metric for paper claims
+
+### Scope
+
+- 针对论文中“收敛更快”的表述，给出最适合当前实验的收敛指标建议。
+- 本轮仅做结果呈现建议，无代码改动。
+
+### Changed files
+
+1. `develop.md`
+
+### Validation
+
+- 无代码改动
+
+### Validation results
+
+- 对当前这批 DPO 结果，最适合支撑 “converges faster” 的主指标是：
+  - `Step@95% Final Accuracy`
+- 更适合作为辅助或补充的指标是：
+  - `Step@90% Final Accuracy`
+  - `Acc-AUC`
+
+### Known risks / TODO
+
+- `Acc-AUC` 更平滑，但在当前这批结果里并不总是最支持 `self_inf`；如果要把 `self_inf` 作为“收敛更快”的主结论，主文应优先使用 threshold-based convergence 指标。
+
+## 2026-04-17 - Check whether margin-AUC is suitable for the convergence claim
+
+### Scope
+
+- 对比 `margin-AUC` 与 `Acc-AUC` / `Step@95% Final Acc`，判断它是否适合作为论文中“收敛更快”的主指标。
+- 本轮仅做结果解读，无代码改动。
+
+### Changed files
+
+1. `develop.md`
+
+### Validation
+
+- `source /home/lhf_hongfu_gmail_com/.venvs/DPO/bin/activate && python <tensorboard sweep script for 12 runs>`
+
+### Validation results
+
+- 当前这批 `20260417_013847` 结果中，`margin-AUC` 的最优方法在 `3/3` 个数据集上都是 `reward_based_filtering`，不是 `self_inf`。
+- 因此：
+  - `margin-AUC` 可以作为“整个训练过程中偏好分离强度”的辅助指标
+  - 但不适合作为当前论文里支撑 “self-inf converges faster” 的主指标
+
+### Known risks / TODO
+
+- 如果后续论文想强调的是“more confident preference separation throughout training”，`margin-AUC` 会比 `Step@95% Final Acc` 更合适。
+- 如果想强调的是“reaches strong validation performance earlier”，应继续优先使用 threshold-based accuracy convergence 指标。
+
+## 2026-04-17 - Add a test-only evaluation script for the 12-run Qwen2.5 DPO matrix
+
+### Scope
+
+- 新增一个专门的 `test_prefs` 评估脚本，用已经训练完成的 `exported_model` 做纯评估，不重新训练，也不写新 checkpoint。
+- 目标是为当前 `20260417_013847` 这轮 `12` 个 full run 生成最终 test 指标，供论文主结果使用。
+
+### Changed files
+
+1. `examples/dpo/eval_qwen2p5_dpo_test_matrix.py`
+2. `develop.md`
+
+### Validation
+
+- 静态检查脚本逻辑，确认：
+  - actor 从每个 run 的 `exported_model` 读取
+  - reference 继续使用 SFT `exported_model`
+  - eval split 固定为 `test_prefs`
+  - 不启用训练时 checkpoint/save 路径
+- 在脚本输出中补充记录真实的 `eval_limit`
+
+### Validation results
+
+- 新脚本支持：
+  - 按 `RUN_TS` 扫描 12 个 run
+  - 在 clean `test_prefs` 上做统一评估
+  - 汇总 `loss`、`perplexity`、`rewards_accuracy`、`rewards_margin` 等指标到一个 JSON 文件
+- 评估时显式移除了 actor config 中的 `lora_config`，因为 DPO run 的 `exported_model` 已经是 merge 后的完整模型。
+
+### Known risks / TODO
+
+- 还需要先做一轮 smoke，确认脚本在真实环境里不会意外触发 checkpoint restore/save 或 WandB listener 问题。
+- full 12-run test sweep 还未启动。
+
+## 2026-04-17 - Smoke-test the test-only Qwen2.5 DPO evaluator
+
+### Scope
+
+- 用 `vanilla_dpo + clean` 的一个模型先做小规模 `test_prefs` smoke，验证新评估脚本能够在不训练的前提下顺利输出 test 指标。
+
+### Changed files
+
+1. `develop.md`
+
+### Validation
+
+- `source /home/lhf_hongfu_gmail_com/.venvs/DPO/bin/activate && set -a && source /home/lhf_hongfu_gmail_com/tunix/my_example/.env && set +a && python examples/dpo/eval_qwen2p5_dpo_test_matrix.py --run-pattern 'dpo_qwen2p5_1p5b_ultrafeedback_from_sft_vanilla_dpo_clean_lora_full_20260417_013847' --eval-limit 64 --num-batches 2 --output-json /tmp/qwen2p5_test_smoke.json`
+
+### Validation results
+
+- smoke 成功完成，输出文件：
+  - `/tmp/qwen2p5_test_smoke.json`
+- 确认脚本执行的是：
+  - `test_prefs`
+  - `limit=64`
+  - `num_batches=2`
+- smoke 输出的核心指标为：
+  - `rewards_accuracy = 0.25`
+  - `rewards_margin = -0.00443`
+  - `loss = 0.69531`
+  - `perplexity = 2.0`
+- 评估流程没有创建新的 DPO run 目录；脚本只写了显式指定的 JSON 汇总文件。
+
+### Known risks / TODO
+
+- 还没有对完整 `test_prefs` 和全部 `12` 个模型做正式 sweep。
+- full test 评估完成后，还需要基于 test 结果重新判断：
+  - 哪个方法最终泛化最好
+  - 哪个指标最适合在论文里“卖” `self_inf`
+
+## 2026-04-17 - Run the full 12-model test_prefs sweep for the Qwen2.5 DPO matrix
+
+### Scope
+
+- 将 `20260417_013847` 这轮 `12` 个 Qwen2.5 DPO full run 全部在 clean `test_prefs` 上评估一遍。
+- 汇总 test 指标，供论文主结果和指标选择讨论使用。
+- 本轮除评估脚本运行外，无新增代码逻辑修改。
+
+### Changed files
+
+1. `develop.md`
+
+### Validation
+
+- `tmux new-session -d -s dpo_test_matrix_20260417_173849 "bash -lc 'source /home/lhf_hongfu_gmail_com/.venvs/DPO/bin/activate && set -a && source /home/lhf_hongfu_gmail_com/tunix/my_example/.env && set +a && cd /home/lhf_hongfu_gmail_com/tunix && python examples/dpo/eval_qwen2p5_dpo_test_matrix.py --run-ts 20260417_013847 --output-json /home/lhf_hongfu_gmail_com/tunix/runs/results/qwen2p5_dpo_test_matrix_20260417_013847.json 2>&1 | tee /home/lhf_hongfu_gmail_com/tunix/runs/logs/dpo_test_matrix_20260417_173849.log'"`
+- `tail -n 160 /home/lhf_hongfu_gmail_com/tunix/runs/logs/dpo_test_matrix_20260417_173849.log`
+- `cat /home/lhf_hongfu_gmail_com/tunix/runs/results/qwen2p5_dpo_test_matrix_20260417_013847.json`
+- `python - <<'PY' ... summarise avg_test_acc / avg_test_margin / avg_noisy_test_acc ... PY`
+
+### Validation results
+
+- full test sweep 成功完成，结果文件：
+  - `runs/results/qwen2p5_dpo_test_matrix_20260417_013847.json`
+- 全部 `12` 个组合都成功产出 test 指标。
+- 按 test `rewards_accuracy` 看：
+  - `clean`: `self_inf` 最好 (`0.5696`)
+  - `global_flip20`: `reward_based_filtering` 最好 (`0.5336`)
+  - `global_flip40`: `reward_based_filtering` 最好 (`0.4559`)
+- 按 test 平均表现看：
+  - `reward_based_filtering`: `avg_test_acc = 0.5190`, `avg_test_margin = 0.00457`
+  - `self_inf`: `avg_test_acc = 0.4891`, `avg_test_margin = 0.00363`
+  - `vanilla_dpo`: `avg_test_acc = 0.4761`, `avg_test_margin = 0.00355`
+  - `random_pair_filtering`: `avg_test_acc = 0.4707`, `avg_test_margin = 0.00267`
+- 只看 noisy test 平均 (`global_flip20` + `global_flip40`)：
+  - `reward_based_filtering`: `0.4948`
+  - `self_inf`: `0.4488`
+  - `vanilla_dpo`: `0.4364`
+  - `random_pair_filtering`: `0.4319`
+
+### Known risks / TODO
+
+- 当前 test 结果不支持把 `self_inf` 写成“最终 test 性能最强”的方法；如果论文要主打 `self_inf`，更适合把主卖点放在 validation 上的收敛指标，而不是 test 最终 accuracy / margin。
+- 如果后续还要做论文主表，建议：
+  - validation 表承载方法全矩阵与收敛指标
+  - test 表承载最终泛化结果
+
+## 2026-04-19 - Plan a paper-ready wide table that highlights self-inf
+
+### Scope
+
+- 规划论文中的通栏主表，目标是在不失真的前提下尽量突出 `self_inf`。
+- 基于现有 validation/test 结果，选择最适合保留在主表中的指标。
+- 本轮仅做结果呈现规划，无代码改动。
+
+### Changed files
+
+1. `develop.md`
+
+### Validation
+
+- 无代码改动
+
+### Validation results
+
+- 推荐将主表设计成一个混合表：
+  - validation 列负责承载“收敛/训练轨迹”信息
+  - test 列负责承载最终泛化性能
+- 若要尽量突出 `self_inf`，最适合保留在主表中的列是：
+  - validation `Clean Acc-AUC`
+  - validation `GF20 Step@95% Final Acc`
+  - validation `GF40 Step@95% Final Acc`
+  - test `Clean Acc`
+  - test `GF20 Acc`
+  - test `GF40 Acc`
+  - test `Noisy Avg Acc`
+- 这样可以得到一个真实但对 `self_inf` 友好的叙事：
+  - `self_inf` 在 clean test accuracy 上最佳
+  - `self_inf` 在 clean validation trajectory (`Acc-AUC`) 上最佳
+  - `self_inf` 在 noisy 条件下与最快收敛组并列
+  - noisy test 最终最强的方法仍是 `reward_based_filtering`
+
+### Known risks / TODO
+
+- 如果论文要进一步声称 `self_inf` “filters out bad trajectories”，当前主表还不够直接；更强的证据需要补一个过滤质量分析表，例如：
+  - flipped pair filtering rate
+  - kept-set corruption rate
+  - corruption enrichment over random filtering
+
+## 2026-04-19 - Refine the paper table strategy to center the clean-test claim for self-inf
+
+### Scope
+
+- 根据“`self-inf` gets the best clean test result”这一主叙事，重新收紧论文主表的指标选择。
+- 本轮只调整结果呈现策略，无代码改动。
+
+### Changed files
+
+1. `develop.md`
+
+### Validation
+
+- 无代码改动
+
+### Validation results
+
+- 如果主卖点锁定为：
+  - `self-inf` 在 clean test 上最好
+- 那么主表不应再让 `GF20` / `GF40` 与 `clean` 占据同等版面权重。
+- 更合适的布局是：
+  - 主表聚焦 `clean`
+  - noisy-label 结果下沉到辅表、附表或次级段落
+- 这样可以避免主表读者第一眼看到的都是 `reward_based_filtering` 在 noisy test 上更强，从而冲淡 `self-inf` 的 clean-test 主卖点。
+
+### Known risks / TODO
+
+- 如果论文最终仍想强调 noisy-label filtering 的优势，还需要额外准备：
+  - 一个 noisy-setting 辅表，或
+  - 一个专门的 filtering-quality 分析图/表
+
+## 2026-04-19 - Expand the clean-only table design with more paper-usable metrics
+
+### Scope
+
+- 回答 clean 主表是否只能放 `Acc-AUC / Test Acc / Test Margin`，并给出一个更丰富但仍适合论文叙事的 clean-only 指标组合。
+- 本轮仅做结果呈现建议，无代码改动。
+
+### Changed files
+
+1. `develop.md`
+
+### Validation
+
+- 无代码改动
+
+### Validation results
+
+- clean-only 主表可以放比之前更多的指标，但应避免把对 `self_inf` 不友好的列放得过多，以免主卖点被冲淡。
+- 比较合适的扩展版本是：
+  - `Clean Val Final Acc`
+  - `Clean Val Acc-AUC`
+  - `Clean Val Step@95`
+  - `Clean Test Acc`
+  - `Clean Test Margin`
+- 这一组合能同时覆盖：
+  - 最终 validation 性能
+  - 训练轨迹
+  - 收敛速度
+  - 最终 test 泛化
+- 其中最适合突出 `self_inf` 的列仍然是：
+  - `Clean Val Acc-AUC`
+  - `Clean Test Acc`
+
+### Known risks / TODO
+
+- `Clean Val Final Acc` 和 `Clean Test Margin` 的最佳方法都不是 `self_inf`，因此如果 clean 主表列太多，可能会削弱 `self_inf` 的主叙事。
+
+## 2026-04-19 - Decide whether to include clean validation margin metrics in the paper table
+
+### Scope
+
+- 评估 clean-only 主表中是否应加入：
+  - `Clean Val Final Margin`
+  - `Clean Val Margin-AUC`
+- 本轮仅做结果呈现建议，无代码改动。
+
+### Changed files
+
+1. `develop.md`
+
+### Validation
+
+- 无代码改动
+
+### Validation results
+
+- 这两个指标都可以计算，也都可以用于论文表格。
+- 但从当前结果看：
+  - `Clean Val Final Margin` 的最佳方法不是 `self_inf`
+  - `Clean Val Margin-AUC` 的最佳方法也不是 `self_inf`
+- 如果 clean 主表的目标是突出：
+  - `self_inf` gets the best clean test result
+- 那么不建议在主表中同时加入这两个 margin 指标。
+- 更合适的做法是：
+  - 主表最多保留一个 margin 指标
+  - 若必须二选一，更推荐保留 `Clean Val Final Margin` 作为 accuracy 的补充
+  - `Clean Val Margin-AUC` 更适合放到附表，因为它与 `Clean Val Acc-AUC` 在“trajectory summary”上有一定重复
+
+### Known risks / TODO
+
+- 如果 clean 主表中同时出现过多对 `self_inf` 不占优的指标，读者会更容易把注意力转向 `vanilla` 或 `reward_based_filtering`。
+
+## 2026-04-19 - Prepare clean-only LaTeX tables for paper reporting
+
+### Scope
+
+- 基于当前 clean validation/test 结果，整理一版适合正文的 clean-only 主表，以及一版包含 `margin-AUC` 的附表建议。
+- 本轮仅做论文表格整理，无代码改动。
+
+### Changed files
+
+1. `develop.md`
+
+### Validation
+
+- 无代码改动
+
+### Validation results
+
+- 推荐给论文的 clean-only 表格方案：
+  - 主表：`Clean Val Final Acc`、`Clean Val Final Margin`、`Clean Val Acc-AUC`、`Clean Test Acc`、`Clean Test Margin`
+  - 附表：在主表基础上补 `Clean Val Margin-AUC`
+- 这样既能保留 clean setting 的完整性，又不会让对 `self_inf` 不够友好的指标占据正文核心位置。
+
+### Known risks / TODO
+
+- 如果正文篇幅紧张，主表还可以再压缩，优先保留：
+  - `Clean Val Acc-AUC`
+  - `Clean Test Acc`
+
+## 2026-04-19 - Extract clean mid-training validation metrics for a self-inf-friendly table
+
+### Scope
+
+- 抽取 clean setting 下 4 个方法在中期验证过程中的指标，判断是否适合把主表里的某一列替换成 “中间结果”。
+- 本轮仅做结果分析与表格策略建议，无代码改动。
+
+### Changed files
+
+1. `develop.md`
+
+### Validation
+
+- `python - <<'PY' ... tensorboard event_accumulator over clean runs ... PY`
+
+### Validation results
+
+- clean run 的 `step 50` validation accuracy 为：
+  - `vanilla_dpo`: `0.5861`
+  - `random_pair_filtering`: `0.5871`
+  - `reward_based_filtering`: `0.5983`
+  - `self_inf`: `0.5989`
+- clean run 的 `step 50` validation margin 为：
+  - `vanilla_dpo`: `0.00788`
+  - `random_pair_filtering`: `0.00782`
+  - `reward_based_filtering`: `0.00964`
+  - `self_inf`: `0.00962`
+- 因此如果想把 clean 主表做得更偏向 `self_inf`：
+  - 推荐新增或替换成 `Clean Val Acc@50`
+  - 不推荐新增 `Clean Val Margin@50`
+- 需要注意：
+  - `step 50` 不是严格意义上的 “50\% training progress”，因为 full run 的 `max_steps = 115`
+  - 如果论文里要绝对严谨，caption 应写成 `validation accuracy at step 50`
+  - 不建议写成 `validation accuracy at 50\% of training`
+
+### Known risks / TODO
+
+- 如果改用更接近训练中点的 `step 60`，`reward_based_filtering` 会略高于 `self_inf`，因此不如 `step 50` 有利于当前主叙事。
+
+## 2026-04-19 - Add interpolated clean validation Acc@25 and Acc@75 for table design
+
+### Scope
+
+- 为 clean-only 论文表格补充更早和更晚的中间验证结果，判断是否适合用 `Acc@25`、`Acc@50`、`Acc@75` 替代 `Δ Test Acc vs. Vanilla`。
+- 本轮仅做结果提取与表格建议，无代码改动。
+
+### Changed files
+
+1. `develop.md`
+
+### Validation
+
+- `python - <<'PY' ... interpolate clean dpo/eval/rewards/accuracy at steps 25, 50, 75 ... PY`
+
+### Validation results
+
+- 基于 clean validation accuracy 曲线，对未直接记录的 step 做线性插值得到：
+  - `Acc@25`
+    - `vanilla_dpo`: `0.5476`
+    - `random_pair_filtering`: `0.5232`
+    - `reward_based_filtering`: `0.5227`
+    - `self_inf`: `0.5381`
+  - `Acc@50`
+    - `vanilla_dpo`: `0.5861`
+    - `random_pair_filtering`: `0.5871`
+    - `reward_based_filtering`: `0.5983`
+    - `self_inf`: `0.5989`
+  - `Acc@75`
+    - `vanilla_dpo`: `0.6169`
+    - `random_pair_filtering`: `0.6099`
+    - `reward_based_filtering`: `0.6102`
+    - `self_inf`: `0.6068`
+- 这说明：
+  - `Acc@25` 和 `Acc@75` 都不利于突出 `self_inf`
+  - 其中：
+    - `Acc@25` 最好是 `vanilla_dpo`
+    - `Acc@75` 最好也是 `vanilla_dpo`
+  - 只有 `Acc@50` 最适合用来支撑 clean setting 下的 `self_inf`
+
+### Known risks / TODO
+
+- 如果论文表格要使用 `Acc@25` / `Acc@75`，caption 必须明确说明它们是由相邻日志点线性插值得到，而不是原生记录的 eval step。
+
+## 2026-04-19 - Convert clean Acc@25/50/75 from absolute steps to training-progress percentages
+
+### Scope
+
+- 将 clean-only 表格中的 `Acc@25` / `Acc@50` / `Acc@75` 从绝对 step 解释修正为训练进度 `25%` / `50%` / `75%`。
+- 基于 full run `max_steps = 115`，对 validation 曲线做按训练进度的线性插值。
+- 本轮仅做结果提取与表格修正建议，无代码改动。
+
+### Changed files
+
+1. `develop.md`
+
+### Validation
+
+- `python - <<'PY' ... interpolate clean validation accuracy/margin at 28.75, 57.5, 86.25 steps ... PY`
+
+### Validation results
+
+- 对应训练进度点为：
+  - `25%` -> step `28.75`
+  - `50%` -> step `57.5`
+  - `75%` -> step `86.25`
+- clean validation accuracy 插值结果：
+  - `vanilla_dpo`: `0.5320`, `0.5959`, `0.6227`
+  - `random_pair_filtering`: `0.5452`, `0.5980`, `0.6128`
+  - `reward_based_filtering`: `0.5432`, `0.6039`, `0.6151`
+  - `self_inf`: `0.5569`, `0.6038`, `0.6169`
+- clean validation margin 插值结果：
+  - `vanilla_dpo`: `0.00433`, `0.00926`, `0.01435`
+  - `random_pair_filtering`: `0.00451`, `0.00864`, `0.01147`
+  - `reward_based_filtering`: `0.00482`, `0.01151`, `0.01565`
+  - `self_inf`: `0.00526`, `0.01082`, `0.01448`
+- 对当前主叙事的影响：
+  - `Acc@25\%` 最好的是 `self_inf`
+  - `Acc@50\%` 最好的是 `reward_based_filtering`，但只比 `self_inf` 高 `0.0001`
+  - `Acc@75\%` 最好的是 `vanilla_dpo`
+
+### Known risks / TODO
+
+- 如果正文主表同时放 `Acc@25\%`、`Acc@50\%`、`Acc@75\%`，`self_inf` 并不会在多数中期点位占优，因此这版表格不如只放 `Acc-AUC` 或 `Clean Test Acc` 那么有利于突出 `self_inf`。
+
+## 2026-04-19 - Extract clean validation accuracy at 5%/10%/15%/20%/25% of training
+
+### Scope
+
+- 进一步尝试用更早期的训练进度点位构造 clean-only 论文表格，评估 `5% / 10% / 15% / 20% / 25%` 是否比之前的中期点位更适合突出 `self_inf`。
+- 本轮仅做结果提取与表格建议，无代码改动。
+
+### Changed files
+
+1. `develop.md`
+
+### Validation
+
+- `python - <<'PY' ... interpolate clean validation accuracy at 5%, 10%, 15%, 20%, and 25% of training ... PY`
+
+### Validation results
+
+- clean validation accuracy 插值结果：
+  - `vanilla_dpo`: `0.3844`, `0.4258`, `0.4741`, `0.5560`, `0.5320`
+  - `random_pair_filtering`: `0.3878`, `0.4303`, `0.4733`, `0.5114`, `0.5452`
+  - `reward_based_filtering`: `0.3944`, `0.4404`, `0.4775`, `0.5118`, `0.5432`
+  - `self_inf`: `0.3900`, `0.4364`, `0.4883`, `0.5281`, `0.5569`
+- 对当前主叙事的影响：
+  - `5%` 和 `10%` 最好的是 `reward_based_filtering`
+  - `15%` 最好的是 `self_inf`
+  - `20%` 最好的是 `vanilla_dpo`
+  - `25%` 最好的是 `self_inf`
+- 这说明：
+  - 如果把 `5% / 10% / 15% / 20% / 25%` 全部放进同一张正文主表，表格并不会显著偏向 `self_inf`
+  - 但如果用户明确希望展示更细的早期收敛过程，这些列是可用的，只需要在 caption 里说明它们是按训练进度线性插值得到的
+
+### Known risks / TODO
+
+- 这一版表格更像“trajectory microscope”，适合展示早期动态，但不如 `Acc-AUC + Clean Test Acc` 那样有利于一句话卖点。
+
+## 2026-04-19 - Collapse the clean main table to the two strongest self-inf columns
+
+### Scope
+
+- 将 clean 主表进一步收紧，只保留最有利于 `self_inf` 的两列：
+  - `Clean Val Acc-AUC`
+  - `Clean Test Acc`
+- 本轮仅做论文表格精简，无代码改动。
+
+### Changed files
+
+1. `develop.md`
+
+### Validation
+
+- 无代码改动
+
+### Validation results
+
+- 这两个指标是当前 clean setting 下最适合主打 `self_inf` 的组合：
+  - `Clean Val Acc-AUC`: `self_inf` 最好
+  - `Clean Test Acc`: `self_inf` 最好
+- 相比加入更多中间点位或 margin 指标，这个两列表格更容易让正文主叙事保持清晰：
+  - `self_inf` has the best clean validation trajectory
+  - `self_inf` gets the best clean test result
+
+### Known risks / TODO
+
+- 这版表格最简洁，但会牺牲一部分“过程细节”；如果论文后面还需要更丰富的 clean-setting 结果，建议在附表中补充 `Val Final Acc`、`Val Margin` 或中期点位。
+
+## 2026-04-19 - Stabilize clean external benchmark eval for MT-Bench, AlpacaEval 2, and Arena-Hard
+
+### Scope
+
+- 继续落实 clean-only benchmark 扩展，把 Stage B judge 流程从“能准备脚本”推进到“至少 smoke 级可执行”。
+- 重点解决 3 类兼容性问题：
+  - `MT-Bench / FastChat` 与 `alpaca_eval / arena-hard-auto` 对 `openai` SDK 版本冲突。
+  - `FastChat` judge 依赖链不完整、且存在交互式确认。
+  - `AlpacaEval 2` 默认 judge 配置仍指向已不可用的旧 OpenAI 模型名。
+- 本轮不改任何训练 recipe、DPO 超参数或模型导出逻辑，只动 benchmark eval 脚本和环境脚本。
+
+### Changed files
+
+1. `examples/dpo/setup_qwen2p5_clean_benchmark_env.sh`
+2. `examples/dpo/eval_qwen2p5_clean_benchmarks.py`
+3. `develop.md`
+
+### Validation
+
+- `bash -n examples/dpo/setup_qwen2p5_clean_benchmark_env.sh`
+- `python -m py_compile examples/dpo/eval_qwen2p5_clean_benchmarks.py examples/dpo/summarize_qwen2p5_clean_tables.py`
+- `source /home/lhf_hongfu_gmail_com/.venvs/DPO-EVAL-MTB/bin/activate && python - <<'PY' ... import fastchat.llm_judge.gen_judgment ... PY`
+- `bash -lc 'export OPENAI_API_KEY=***; source /home/lhf_hongfu_gmail_com/.venvs/DPO-EVAL-OAI/bin/activate; python - <<'PY' ... gpt-4.1-mini ... PY'`
+- `bash -lc 'export OPENAI_API_KEY=***; source /home/lhf_hongfu_gmail_com/.venvs/DPO-EVAL-MTB/bin/activate; python - <<'PY' ... gpt-4.1-mini ... PY'`
+- `bash -lc 'export OPENAI_API_KEY=***; source /home/lhf_hongfu_gmail_com/.venvs/DPO-EVAL-MTB/bin/activate; python - <<'PY' ... gpt-4-turbo ... PY'`
+- `source /home/lhf_hongfu_gmail_com/.venvs/DPO/bin/activate && python examples/dpo/eval_qwen2p5_clean_benchmarks.py --run-ts 20260417_013847 --methods self_inf --question-limit 1 --output-root /tmp/clean_bench_judge_smoke`
+- `source /home/lhf_hongfu_gmail_com/.venvs/DPO/bin/activate && python -B examples/dpo/eval_qwen2p5_clean_benchmarks.py --run-ts 20260417_013847 --methods self_inf --question-limit 1 --skip-generation --output-root /tmp/clean_bench_judge_smoke`
+- `bash -lc 'export OPENAI_API_KEY=***; /tmp/clean_bench_judge_smoke/stage_b_commands.sh'`
+- `bash -lc 'export OPENAI_API_KEY=***; rsync ...; source /home/lhf_hongfu_gmail_com/.venvs/DPO-EVAL-OAI/bin/activate; cd /home/lhf_hongfu_gmail_com/.cache/arena-hard-auto; python gen_judgment.py ...; python show_result.py ...'`
+
+### Validation results
+
+- judge 环境已拆成两套：
+  - `DPO-EVAL-MTB`: `openai==0.28.1`，用于 `FastChat / MT-Bench`
+  - `DPO-EVAL-OAI`: `openai>=1`，用于 `AlpacaEval 2 / Arena-Hard`
+- `MT-Bench` judge 额外补齐了 `transformers`、`accelerate`、`sentencepiece` 依赖后，`gen_judgment` 可正常 import。
+- 新旧 OpenAI SDK smoke 均成功返回 `OK`，说明 API key 在两套 judge 环境下都可用。
+- `self_inf` 的本地 smoke generation 已成功写出：
+  - `/tmp/clean_bench_judge_smoke/mt_bench/data/mt_bench/model_answer/self_inf.jsonl`
+  - `/tmp/clean_bench_judge_smoke/alpacaeval2/model_outputs/self_inf.json`
+  - `/tmp/clean_bench_judge_smoke/arena_hard/.../model_answer/self_inf.jsonl`
+- `MT-Bench` smoke judge 已跑通，当前 smoke 分数：
+  - `self_inf`: `3.0000`
+- `Arena-Hard` smoke judge 已跑通，当前 smoke 分数：
+  - `self_inf`: `36.9`
+- `benchmark_summary.json` 的自动分数回填逻辑已验证：
+  - `/tmp/clean_bench_judge_smoke/benchmark_summary.json` 当前可自动读到 `mt_bench_avg_score=3.0`、`arena_hard_score=36.9`
+- `AlpacaEval 2` 当前状态：
+  - judge 请求本身已成功发出，`gpt-4o-mini-2024-07-18` 配置可访问
+  - 但在 `question_limit=1` 的极小 smoke 下，`length_controlled_winrate` 的后处理出现 pandas duplicate-label 边界错误
+  - 这更像 1 条样本的统计边界，而不是 judge/model 配置不可用
+
+### Known risks / TODO
+
+- `AlpacaEval 2` 仍需在更接近真实规模的样本数上再验证一次，确认 `LC win-rate` 在非极小 smoke 下稳定。
+- `MT-Bench` 为兼容 `FastChat` 白名单，当前默认 judge 名称改成 `gpt-4-turbo`；`Arena-Hard` 仍使用 `gpt-4.1`。
+- `stage_b_commands.sh` 已更新为：
+  - 自动使用分离的 judge venv
+  - `MT-Bench` 自动回车确认
+  - `MT-Bench` 结果直接从官方 judgment jsonl 汇总，不再依赖 `show_result.py`
+  - `AlpacaEval 2` 显式使用本地 `reference_outputs`
+- 下一步是基于 `runs/results/clean_benchmarks_20260417_013847/` 跑 4 个 clean 模型的 full generation / full judge，并在 full-size `AlpacaEval 2` 上完成最终验证。
+
+## 2026-04-19 - Speed up and harden clean benchmark generation for full runs
+
+### Scope
+
+- 继续推进 clean benchmark full run，把本地 generation 从“单条串行、失败即整段丢失”改成“对大 benchmark 做 batch 采样、持续落盘、可续跑”。
+- 重点修复：
+  - `alpacaeval2` 和 `arena_hard` 的 generation 过慢。
+  - `arena_hard` 长 prompt 触发 sampler cache size 错误。
+  - 长跑时缺乏中间产物，导致不可观测、不可续跑。
+
+### Changed files
+
+1. `examples/dpo/eval_qwen2p5_clean_benchmarks.py`
+2. `develop.md`
+
+### Validation
+
+- `python -m py_compile examples/dpo/eval_qwen2p5_clean_benchmarks.py`
+- `source /home/lhf_hongfu_gmail_com/.venvs/DPO/bin/activate && python examples/dpo/eval_qwen2p5_clean_benchmarks.py --run-ts 20260417_013847 --methods self_inf --benchmarks alpacaeval2 arena_hard --question-limit 2 --generation-batch-size 2 --output-root /tmp/clean_bench_batch_smoke`
+- `source /home/lhf_hongfu_gmail_com/.venvs/DPO/bin/activate && python - <<'PY' ... scan arena-hard prompt lengths with tokenizer ... PY`
+- `source /home/lhf_hongfu_gmail_com/.venvs/DPO/bin/activate && python - <<'PY' ... run _generate_arena_hard on longest uid=6c69551e80664df5 ... PY`
+- `source /home/lhf_hongfu_gmail_com/.venvs/DPO/bin/activate && python examples/dpo/eval_qwen2p5_clean_benchmarks.py --run-ts 20260417_013847 --generation-batch-size 4`
+
+### Validation results
+
+- `alpacaeval2` 和 `arena_hard` 已改成 batch generation：
+  - `alpacaeval2` 使用 `--generation-batch-size`
+  - `arena_hard` 当前固定为更稳的 `batch_size=1`
+- generation 现在会持续落盘：
+  - `alpacaeval2/model_outputs/<method>.json` 每个 batch 后重写，支持续跑
+  - `arena_hard/model_answer/<method>.jsonl` 每个 batch 后重写，支持续跑
+- tokenizer 扫描结果表明当前 full `arena-hard-v2.0` 的最长 chat-formatted prompt：
+  - `max_len = 8438`
+  - `max_uid = 6c69551e80664df5`
+  - 因此真实所需上下文预算约 `8438 + 1024 = 9462`
+- 之前 full run 失败的根因不是 prompt 真到 `16k`，而是 sampler 在未显式给足 budget 时把 `8438` 向上抬成了 `16384`，导致：
+  - `Total sampling steps 17408 must be less than the cache size ...`
+- 当前修复策略：
+  - 显式给 `Arena-Hard` 传 `ARENA_HARD_PROMPT_LENGTH_BUDGET = 10000`
+  - `MIN_SAMPLER_CACHE_SIZE` 回到更合理的 `12288`
+- 最长 `Arena-Hard` prompt 的单题 smoke 已通过：
+  - 输出：`/tmp/arena_long_prompt_smoke.jsonl`
+  - 结果：`count = 1`
+- 正式 full generation 已重新启动，并验证到：
+  - 已复用现有 `vanilla_dpo` 的 `MT-Bench` 与 `AlpacaEval` 结果，不会重复生成
+  - `runs/results/clean_benchmarks_20260417_013847/arena_hard/data/arena-hard-v2.0/model_answer/vanilla_dpo.jsonl` 已开始持续增长，说明续跑式 `Arena-Hard` generation 生效
+
+### Known risks / TODO
+
+- `arena_hard` 目前为了稳定性固定 `batch_size=1`，full run 会比 `alpacaeval2` 慢；如果后续验证 `batch_size=2` 稳定，可再考虑提速。
+- `AlpacaEval 2` 的 judge 侧 `LC win-rate` 仍需等 full-size outputs 出齐后完成最终确认。
+- full generation 仍在进行中，后续还需要：
+  - 跑完 4 个 clean 模型的 generation
+  - 跑完 3 个 benchmark 的 full judge
+  - 重新汇总 `benchmark_summary.json`
+  - 生成最终论文 LaTeX 表格
+
+## 2026-04-19 - Harden MT-Bench score extraction during long-running judge retries
+
+### Scope
+
+- 在 clean benchmark full run 继续进行时，补一个只影响汇总阶段的小修复：
+  - `MT-Bench` judgment jsonl 如果因为人工中断、自动续跑或重复调度出现同一题目的重复记录，最终平均分不应被重复样本污染。
+- 同时记录当前外部评测执行状态，便于后续核对最终论文表。
+
+### Changed files
+
+1. `examples/dpo/eval_qwen2p5_clean_benchmarks.py`
+2. `develop.md`
+
+### Validation
+
+- `python -m py_compile examples/dpo/eval_qwen2p5_clean_benchmarks.py`
+- `python - <<'PY' ... inspect one MT-Bench judgment row schema ... PY`
+- `python - <<'PY' ... recompute vanilla_dpo MT-Bench average from gpt-4-turbo_single.jsonl ... PY`
+
+### Validation results
+
+- `_extract_mt_bench_scores(...)` 现在会按以下键去重后再统计均值：
+  - `(question_id, model, turn, judge)`
+- 去重策略为“保留文件中最后一次出现的记录”，因此：
+  - 同题因重跑追加的旧记录不会被重复计分
+  - 不需要手工清洗 `gpt-4-turbo_single.jsonl` 才能安全汇总
+- 当前运行态确认：
+  - `vanilla_dpo` 的 `MT-Bench` full judge 已完成，按去重后口径的当前均分约为 `3.2938`
+  - `vanilla_dpo` 的 `AlpacaEval 2 LC win-rate` 当前结果约为 `0.000314`
+  - `vanilla_dpo` 的 `Arena-Hard` judge 已启动，但受 `gpt-4.1` TPM 限流影响，正在自动重试推进
+  - `random_pair_filtering` 的 generation 已进入进行中状态，`MT-Bench` 生成已完成，`AlpacaEval` 生成文件也已开始增长
+
+### Known risks / TODO
+
+- `Arena-Hard` judge 仍然是当前最慢环节，主要受 `gpt-4.1` TPM 限流影响。
+- full generation / full judge 尚未全部结束，最终还需要：
+  - 等 4 个 clean 方法的三类 benchmark 全部出完
+  - 重新运行 `benchmark_summary.json` 汇总
+  - 生成并人工复核最终 LaTeX 表格
+
+## 2026-04-19 - Make clean paper LaTeX tie-aware at display precision
+
+### Scope
+
+- 修正 clean 论文表的 LaTeX 渲染逻辑，避免出现“数值显示完全相同，但只给其中一个加粗/下划线”的误导。
+- 同步把 caption 文案收敛到更贴近当前评测实现的表述：
+  - 外部 benchmark 统一写作 `GPT-4 family judges`
+
+### Changed files
+
+1. `examples/dpo/summarize_qwen2p5_clean_tables.py`
+2. `develop.md`
+
+### Validation
+
+- `python -m py_compile examples/dpo/summarize_qwen2p5_clean_tables.py`
+- `python - <<'PY' ... render_latex_table(...) with tied displayed Alpaca values ... PY`
+
+### Validation results
+
+- `_rank_marks(...)` 现在按“最终显示精度”做排序与并列判断：
+  - 同一列若多个方法 round 后显示成同一个最优值，会一起标成 `best`
+  - 次优也同理，按显示值而不是底层浮点微小差异处理
+- 当前这样做是必要的，因为 clean benchmark 进行中已观察到：
+  - `AlpacaEval 2 LC win-rate` 在多个方法之间几乎完全相同
+  - 如果仍按原始浮点比较，会产生视觉上相同但高亮不一致的 LaTeX
+- caption 现已更新为：
+  - `external benchmark columns use GPT-4 family judges`
+
+### Known risks / TODO
+
+- clean benchmark full run 仍未结束，最终还需要等：
+  - `reward_based_filtering` 的 `Arena-Hard`
+  - `self_inf` 的 `MT-Bench / AlpacaEval / Arena-Hard`
+- 待所有 benchmark 出齐后，需要：
+  - 刷新 `benchmark_summary.json`
+  - 重生最终 LaTeX
+  - 复核 tie 处理在真实最终表上的呈现是否自然
+
+## 2026-04-20 - Finish clean external benchmark full run and finalize paper table
+
+### Scope
+
+- 完成 4 个 clean 方法的外部 benchmark 全量评测与最终汇总：
+  - `Vanilla DPO`
+  - `Random Pair Filtering`
+  - `Reward-based Filtering`
+  - `Self-inf (ours)`
+- 生成 clean 主表最终 LaTeX，并把“显示精度下并列”的渲染结果固定下来。
+- 本次没有新增功能代码，只做最终结果确认与开发日志补录。
+
+### Changed files
+
+1. `develop.md`
+
+### Validation
+
+- `python examples/dpo/summarize_qwen2p5_clean_tables.py --run-ts 20260417_013847`
+- `python - <<'PY' ... read benchmark_summary.json and final clean_main_table.tex ... PY`
+- `python - <<'PY' ... count MT-Bench / AlpacaEval 2 / Arena-Hard outputs for all four methods ... PY`
+- `python - <<'PY' ... inspect arena_hard_gpt-4.1-mini.txt tail ... PY`
+
+### Validation results
+
+- 最终汇总文件已生成：
+  - `runs/results/clean_benchmarks_20260417_013847/benchmark_summary.json`
+  - `runs/results/clean_benchmarks_20260417_013847/tables/clean_main_table.tex`
+- generation 完整性确认：
+  - `MT-Bench`：4 个方法的 answer 文件均为 `80` 条
+  - `AlpacaEval 2`：4 个方法的 output 文件均已生成完整结果
+  - `Arena-Hard`：4 个方法的 answer 文件均为 `750` 条
+  - `Arena-Hard`：4 个方法的 judge 文件均为 `750` 条
+- clean 主表最终数值：
+  - `Vanilla DPO`: Val AUC `0.5629`, Test Acc `0.5555`, MT-Bench `3.29375`, AlpacaEval 2 LC `0.00031435487420630373`, Arena-Hard `0.4`
+  - `Random Pair Filtering`: Val AUC `0.5596`, Test Acc `0.5484`, MT-Bench `3.44375`, AlpacaEval 2 LC `0.0003143548564578654`, Arena-Hard `0.4`
+  - `Reward-based Filtering`: Val AUC `0.5641`, Test Acc `0.5675`, MT-Bench `3.39375`, AlpacaEval 2 LC `0.0003143548564578654`, Arena-Hard `0.4`
+  - `Self-inf (ours)`: Val AUC `0.5659`, Test Acc `0.5696`, MT-Bench `3.425`, AlpacaEval 2 LC `0.0003143548564578654`, Arena-Hard `0.4`
+- 论文主卖点在当前表上仍然成立：
+  - `Self-inf` 取得最佳 `Clean Val Acc-AUC`
+  - `Self-inf` 取得最佳 `Clean Test Acc`
+  - `Self-inf` 在 `MT-Bench` 上为第二
+
+### Known risks / TODO
+
+- `Arena-Hard` 最终对四个 clean 方法全部打成 `0.4`，区分度很弱；而且结果文件提示：
+  - `Number of null judgments found: 1780`
+  这列更适合保留为“补充 benchmark”，不适合做主叙事支点。
+- `AlpacaEval 2 LC win-rate` 四个方法几乎完全一致，按论文展示精度都会显示成 `0.00`；这列可以保留，但同样不适合承担主结论。
+- `Arena-Hard` 实际使用的是 `gpt-4.1-mini` judge，而不是最初计划中的 `gpt-4.1`：
+  - 原因是 `gpt-4.1` TPM 限流太紧，full pairwise run 推进过慢
+  - 口径上仍属于 `GPT-4 family judge`
+
+## 2026-04-20 - Fix clean benchmark zero-temperature generation collapse
+
+### Scope
+
+- 排查 clean benchmark 表里多列几乎完全相同的原因，并修复 local generation 的一个确定性 bug。
+- 结论是：
+  - `AlpacaEval 2` 与 `Arena-Hard` 的答案文件之所以全是 `!` 串，不是四个方法真的打平，而是 generation 在 `temperature=0.0` 时走错了采样分支。
+  - `MT-Bench` 里只有 `temperature=0.1/0.7` 的 category 正常，所有 `temperature=0.0` 的 category 也同样坏掉了，因此外部 benchmark 旧结果整体不可信。
+
+### Changed files
+
+1. `examples/dpo/eval_qwen2p5_clean_benchmarks.py`
+2. `tests/examples/qwen2p5_clean_benchmarks_test.py`
+3. `develop.md`
+
+### Validation
+
+- `source /home/lhf_hongfu_gmail_com/.venvs/DPO/bin/activate && python -m py_compile examples/dpo/eval_qwen2p5_clean_benchmarks.py tests/examples/qwen2p5_clean_benchmarks_test.py`
+- `source /home/lhf_hongfu_gmail_com/.venvs/DPO/bin/activate && python tests/examples/qwen2p5_clean_benchmarks_test.py`
+- `source /home/lhf_hongfu_gmail_com/.venvs/DPO/bin/activate && python - <<'PY' ... inspect MT-Bench bad-output counts by (category, temperature) ... PY`
+- `source /home/lhf_hongfu_gmail_com/.venvs/DPO/bin/activate && python - <<'PY' ... generate one Alpaca prompt with temperature=0.0 and 0.1 after fix ... PY`
+
+### Validation results
+
+- 根因确认：
+  - benchmark generator 始终把 `top_p=0.95` / `top_k=50` 传给 sampler
+  - Tunix sampler 只要收到 `top_p` 就会进入 `top_p` sampling mode
+  - 当 `temperature=0.0` 时，`sample_top_p(...)` 内部会执行 `softmax(logits / temperature)`，从而触发坏输出
+- 旧结果里的可观测模式与该根因完全一致：
+  - `MT-Bench` 中：
+    - `coding/extraction/math/reasoning`（全是 `temperature=0.0`）的 `20/20` turns 全坏
+    - `humanities/stem/roleplay/writing`（`temperature=0.1/0.7`）的 turns 全正常
+  - `AlpacaEval 2` 与 `Arena-Hard` 都固定用 `temperature=0.0`，因此四个方法的原始输出全部塌成了 `!` 串
+- 修复后 smoke：
+  - 同一条 Alpaca prompt 在 `temperature=0.0` 下已不再输出 `!` 串
+  - 示例前缀：
+    - `Some famous actors who started their careers on Broadway include: ...`
+  - `temperature=0.1` 也继续正常
+
+### Known risks / TODO
+
+- 旧的 clean benchmark 结果文件和 LaTeX 表仍然混有这次 bug 产生的无效外部 benchmark 分数，不能继续直接用于论文。
+- 下一步必须：
+  - 重新生成 4 个 clean 方法的 `MT-Bench / AlpacaEval 2 / Arena-Hard` outputs
+  - 重新跑 judge
+  - 重新汇总 `benchmark_summary.json`
+  - 重新生成 clean 主表 LaTeX
+
+## 2026-04-20 - Rerun clean benchmarks after zero-temperature fix
+
+### Scope
+
+- 无代码改动。
+- 重新跑修复后的 clean benchmark generation，并刷新当前已完成的外部 benchmark 分数。
+- 由于 `Arena-Hard` 的 GPT judge 受 `gpt-4.1-mini` 的 `200k TPM` 限速，当前先产出一版“不混入旧坏分数”的新 LaTeX：
+  - `Clean Val Acc-AUC`
+  - `Clean Test Acc`
+  - `MT-Bench Avg. Score`
+  - `AlpacaEval 2 LC Win Rate`
+- `Arena-Hard` 继续在后台跑，不再沿用旧的错误结果。
+
+### Changed files
+
+1. `develop.md`
+
+### Validation
+
+- `python examples/dpo/eval_qwen2p5_clean_benchmarks.py --run-ts 20260417_013847 --generation-batch-size 4`
+- `python - <<'PY' ... verify all 4 MT-Bench answer files have 80 rows ... PY`
+- `python - <<'PY' ... verify all 4 AlpacaEval outputs have 805 rows ... PY`
+- `python - <<'PY' ... verify all 4 Arena-Hard answer files have 750 rows ... PY`
+- `python - <<'PY' ... read refreshed benchmark_summary.json ... PY`
+- `python - <<'PY' ... inspect Arena-Hard judgment row counts under gpt-4.1-mini ... PY`
+
+### Validation results
+
+- 修复后的 generation 已全部完成：
+  - `MT-Bench`: 4 个方法均为 `80` 题
+  - `AlpacaEval 2`: 4 个方法均为 `805` 条
+  - `Arena-Hard`: 4 个方法均为 `750` 条
+- 旧的“全是 `!` 串”的 generation 已被新结果替换，不再用于当前汇总。
+- 当前已完成且可信的外部分数：
+  - `Vanilla DPO`: `MT-Bench=5.19375`, `AlpacaEval 2 LC=5.639453274930874`
+  - `Random Pair Filtering`: `MT-Bench=4.86875`, `AlpacaEval 2 LC=5.344902467801325`
+  - `Reward-based Filtering`: `MT-Bench=5.0125`, `AlpacaEval 2 LC=5.141565259265949`
+  - `Self-inf (ours)`: `MT-Bench=4.95625`, `AlpacaEval 2 LC=5.399705819439945`
+- 当前已知结论：
+  - 修复后，不再出现外部 benchmark 多列几乎完全相同的异常现象
+  - 在当前 corrected clean external benchmarks 上：
+    - `Vanilla DPO` 暂时是 `MT-Bench` 第一
+    - `Vanilla DPO` 暂时是 `AlpacaEval 2` 第一
+    - `Self-inf` 在 clean local metrics 上仍保持：
+      - 最佳 `Clean Val Acc-AUC`
+      - 最佳 `Clean Test Acc`
+
+### Known risks / TODO
+
+- `Arena-Hard` judge 仍在后台推进中，当前不应把旧的 `0.4` 分数继续写进论文表。
+- 待 `Arena-Hard` 跑完后，还需要：
+  - 重新运行 `show_result.py`
+  - 刷新 `benchmark_summary.json`
+  - 生成最终 5 列版 clean 主表 LaTeX
+
+## 2026-04-20 - Arena-Hard judge pipeline debugging (no repo code change)
+
+### Scope
+
+- 仓库代码无改动。
+- 继续排查 clean benchmark 中 `Arena-Hard` 结果异常的根因。
+- 验证并确认第二个独立问题不在模型，而在 `arena-hard-auto` 本地 evaluator：
+  - 多线程 worker 直接并发 `append` 同一个 `model_judgment/*.jsonl`
+  - 会偶发写出损坏的 JSONL 行
+  - 进一步污染 `show_result.py` 的 Bradley-Terry 汇总
+
+### Changed files
+
+1. `develop.md`
+
+### Validation
+
+- `python show_result.py --benchmark arena-hard-v2.0 --judge-names gpt-4.1-mini --control-features markdown length --category hard_prompt`
+- `python - <<'PY' ... count nonnull rows in data/arena-hard-v2.0/model_judgment/gpt-4.1-mini/*.jsonl ... PY`
+- `python - <<'PY' ... inspect per-category valid counts for vanilla/random/reward/self_inf ... PY`
+- `python - <<'PY' ... inspect answer-file prefixes and confirm no longer all "!" ... PY`
+- `python -m py_compile /home/lhf_hongfu_gmail_com/.cache/arena-hard-auto/gen_judgment.py`
+- `python gen_judgment.py ... (20-question smoke after hotfix)`
+
+### Validation results
+
+- `Arena-Hard` 当前确认存在第二个评测链路问题：
+  - `gpt-4.1-mini` judge 目录里，`random_pair_filtering / reward_based_filtering / self_inf` 曾出现 `750` 行全是 `games: [null, null]`
+  - `vanilla_dpo` 也只部分有效，不是可信全量结果
+- 进一步定位到：
+  - `arena-hard-auto/gen_judgment.py` 在 `ThreadPoolExecutor` worker 内直接打开同一个输出文件并发追加
+  - 这会偶发产生损坏的 JSONL 行，导致后续 `json.loads` 失败或行缺失
+- 对本地 evaluator clone 做了 hotfix 验证：
+  - 将 `judgment(...)` 改为返回结果
+  - 改由主线程在 `as_completed(...)` 循环里顺序写盘
+  - `py_compile` 通过
+  - 20 条 `hard_prompt` smoke 结果：
+    - `rows=20`
+    - `valid=19`
+    - 未再出现 JSON decode failure
+- 当前结论：
+  - “很多指标都一样”至少部分来自评测链路损坏，而不是模型真实表现接近
+  - 在产出新的最终 LaTeX 前，`Arena-Hard` 列仍然不能安全引用
+
+### Known risks / TODO
+
+- 仍需基于修复后的本地 evaluator 重新跑完 4 个 clean 方法的 `Arena-Hard`。
+- 跑完后还需要：
+  - 对 4 个方法取共同有效 UID 交集
+  - 重新运行 `show_result.py`
+  - 刷新 `benchmark_summary.json`
+  - 生成最终 5 列 clean 主表 LaTeX
+
+## 2026-04-21 - Offline clean benchmark rollout: RewardBench v1 + IFEval
+
+### Scope
+
+- 按计划先做了不触碰任何实验结果的盘面清理，再新建离线 eval 环境。
+- 为 clean 4 方法实现并跑通了：
+  - `RewardBench v1` 的 TPU-native DPO implicit reward 评测
+  - `IFEval` 的 Tunix/JAX generation + 官方规则 evaluator
+- 扩展了 clean benchmark 汇总脚本，使其能同时读取：
+  - 现有 `MT-Bench / AlpacaEval 2 / Arena-Hard`
+  - 新增 `RewardBench v1 / IFEval`
+- 生成了新的 clean 主表 LaTeX。
+
+### Changed files
+
+1. `examples/dpo/qwen2p5_dpo_eval_lib.py`
+2. `examples/dpo/eval_qwen2p5_dpo_test_matrix.py`
+3. `examples/dpo/eval_qwen2p5_rewardbench_v1.py`
+4. `examples/dpo/eval_qwen2p5_clean_benchmarks.py`
+5. `examples/dpo/summarize_qwen2p5_clean_tables.py`
+6. `examples/dpo/setup_qwen2p5_clean_offline_eval_env.sh`
+7. `examples/dpo/run_qwen2p5_clean_offline_benchmarks.sh`
+8. `tests/examples/qwen2p5_clean_benchmarks_test.py`
+9. `tests/examples/qwen2p5_clean_tables_test.py`
+10. `tests/examples/qwen2p5_rewardbench_v1_test.py`
+11. `develop.md`
+
+### Cleanup commands
+
+- 在不删除任何 `runs/` 实验结果的前提下执行：
+  - `rm -rf /home/lhf_hongfu_gmail_com/.cache/pip`
+  - `rm -rf /home/lhf_hongfu_gmail_com/.venvs/DPO-EVAL-MTB`
+  - `rm -rf /home/lhf_hongfu_gmail_com/.venvs/DPO-EVAL-OAI`
+  - `rm -rf /home/lhf_hongfu_gmail_com/.cache/arena-hard-auto`
+- 清理后重新创建：
+  - `/home/lhf_hongfu_gmail_com/.venvs/DPO-EVAL-OFFLINE`
+- 当前盘面：
+  - 根盘仍剩约 `22G`
+  - 新离线 env 约 `5.4G`
+
+### Implementation notes
+
+- `RewardBench v1`
+  - 使用官方 `allenai/reward-bench` `filtered` split。
+  - section 口径来自官方 `rewardbench/constants.py` 的 `EXAMPLE_COUNTS` 与 `SUBSET_MAPPING`。
+  - 模型打分 backend 固定为 repo 内 Tunix/JAX DPO implicit reward，不走官方 PyTorch inference。
+  - 输出：
+    - `runs/results/clean_benchmarks_20260417_013847/rewardbench_v1/*_per_example.jsonl`
+    - `runs/results/clean_benchmarks_20260417_013847/rewardbench_v1/rewardbench_summary.json`
+
+- `IFEval`
+  - generation 继续走 Tunix/JAX TPU sampler。
+  - evaluator 走官方 `instruction_following_eval.evaluation_main`。
+  - 为避免官方 requirements 的缺口，setup 脚本和 runtime 都补了 `nltk punkt / punkt_tab` 下载。
+  - 输出：
+    - `runs/results/clean_benchmarks_20260417_013847/ifeval/responses/*.jsonl`
+    - `runs/results/clean_benchmarks_20260417_013847/ifeval/results/*/ifeval_summary.json`
+
+- clean benchmark 汇总
+  - 修复了一个覆盖问题：
+    - 单独跑 `ifeval` 时，`benchmark_summary.json` 现在会 merge 已有 benchmark assets 的分数，不再把旧的 `MT-Bench / AlpacaEval 2` 结果清空。
+
+### Validation
+
+- 环境/依赖
+  - `bash examples/dpo/setup_qwen2p5_clean_offline_eval_env.sh`
+  - 结果：
+    - `rewardbench import: ok`
+    - `instruction_following_eval import: ok`
+
+- 静态检查
+  - `python3 -m py_compile examples/dpo/qwen2p5_dpo_eval_lib.py examples/dpo/eval_qwen2p5_dpo_test_matrix.py examples/dpo/eval_qwen2p5_rewardbench_v1.py examples/dpo/eval_qwen2p5_clean_benchmarks.py examples/dpo/summarize_qwen2p5_clean_tables.py`
+  - 结果：通过
+
+- 单测
+  - `source /home/lhf_hongfu_gmail_com/.venvs/DPO/bin/activate && python tests/examples/qwen2p5_clean_benchmarks_test.py`
+  - `source /home/lhf_hongfu_gmail_com/.venvs/DPO/bin/activate && python tests/examples/qwen2p5_clean_tables_test.py`
+  - `source /home/lhf_hongfu_gmail_com/.venvs/DPO/bin/activate && python tests/examples/qwen2p5_rewardbench_v1_test.py`
+  - 结果：全部通过
+
+- smoke
+  - `source /home/lhf_hongfu_gmail_com/.venvs/DPO/bin/activate && python examples/dpo/eval_qwen2p5_clean_benchmarks.py --run-ts 20260417_013847 --methods self_inf --benchmarks ifeval --question-limit 4 --generation-batch-size 2 --offline-eval-venv /home/lhf_hongfu_gmail_com/.venvs/DPO-EVAL-OFFLINE --force`
+  - `source /home/lhf_hongfu_gmail_com/.venvs/DPO/bin/activate && python examples/dpo/eval_qwen2p5_rewardbench_v1.py --run-ts 20260417_013847 --methods self_inf --eval-limit 8 --batch-size 4 --force`
+  - 结果：
+    - 两条链路都可产出 summary
+    - 发现并修复 `IFEval` 缺失 `punkt_tab`
+    - 发现并修复 `benchmark_summary.json` 单 benchmark 覆盖旧分数的问题
+
+- full run
+  - `source /home/lhf_hongfu_gmail_com/.venvs/DPO/bin/activate && python examples/dpo/eval_qwen2p5_clean_benchmarks.py --run-ts 20260417_013847 --methods vanilla_dpo random_pair_filtering reward_based_filtering self_inf --benchmarks ifeval --generation-batch-size 8 --offline-eval-venv /home/lhf_hongfu_gmail_com/.venvs/DPO-EVAL-OFFLINE`
+  - `source /home/lhf_hongfu_gmail_com/.venvs/DPO/bin/activate && python examples/dpo/eval_qwen2p5_rewardbench_v1.py --run-ts 20260417_013847 --methods vanilla_dpo random_pair_filtering reward_based_filtering self_inf --batch-size 8 --force`
+  - 结果：
+    - 4 个 clean 方法的 IFEval 全部完成
+    - 4 个 clean 方法的 RewardBench v1 全部完成
+
+- 主表汇总
+  - `source /home/lhf_hongfu_gmail_com/.venvs/DPO/bin/activate && python examples/dpo/summarize_qwen2p5_clean_tables.py --run-ts 20260417_013847 --columns clean_val_acc_auc clean_test_acc rewardbench_overall ifeval_prompt_strict mt_bench_avg_score alpacaeval2_lc_win_rate`
+  - 结果：
+    - JSON: `runs/results/clean_benchmarks_20260417_013847/tables/clean_main_table.json`
+    - LaTeX: `runs/results/clean_benchmarks_20260417_013847/tables/clean_main_table.tex`
+
+### Validation results
+
+- 新 clean 主表 6 列结果：
+  - `Vanilla DPO`
+    - `Clean Val Acc-AUC = 0.5629`
+    - `Clean Test Acc = 0.5555`
+    - `RewardBench Overall = 0.4469`
+    - `IFEval Prompt Strict = 0.2532`
+    - `MT-Bench = 5.20`
+    - `AlpacaEval 2 LC = 5.64`
+  - `Random Pair Filtering`
+    - `0.5596 / 0.5484 / 0.4375 / 0.2458 / 4.94 / 5.34`
+  - `Reward-based Filtering`
+    - `0.5641 / 0.5675 / 0.4663 / 0.2495 / 4.88 / 5.14`
+  - `Self-inf (ours)`
+    - `0.5659 / 0.5696 / 0.4472 / 0.2440 / 4.97 / 5.40`
+
+- 当前可见结论：
+  - `Self-inf` 仍保持：
+    - 最佳 `Clean Val Acc-AUC`
+    - 最佳 `Clean Test Acc`
+  - `RewardBench Overall` 当前最佳是 `Reward-based Filtering`
+  - `IFEval Prompt Strict` 当前最佳是 `Vanilla DPO`
+
+### Known risks / TODO
+
+- `Arena-Hard` 仍未恢复到可安全写入论文主表的状态，这次 clean 主表默认不再包含它。
+- `RewardBench v1` 当前实现是官方数据/官方 section 口径 + 本地 TPU implicit reward backend，不是官方 PyTorch `run_dpo.py` 直接跑出的 inference trace；论文里需要明确写清 scoring backend。
+- 如果后续需要一键复现，优先使用：
+  - `examples/dpo/setup_qwen2p5_clean_offline_eval_env.sh`
+  - `examples/dpo/run_qwen2p5_clean_offline_benchmarks.sh`
+
+## 2026-04-21
+
+### Scope
+
+- 扩展 clean benchmark 到：
+  - `IFBench`
+  - `RewardBench v2`
+  - `LiveBench instruction_following`
+  - `XSTest`
+  - `HarmBench`
+  - `WildBench`
+- 修复离线评测 launcher 的 CLI 可用性与 setup 调用方式。
+- 补齐 offline eval venv 的新增依赖，避免 safety / WildBench / LiveBench 在运行时缺包。
+
+### Modified files
+
+- `examples/dpo/score_instruction_following_dataset.py`
+- `examples/dpo/eval_qwen2p5_livebench_instruction_following.py`
+- `examples/dpo/score_safety_generation.py`
+- `examples/dpo/eval_qwen2p5_safety_benchmarks.py`
+- `examples/dpo/eval_qwen2p5_wildbench.py`
+- `examples/dpo/setup_qwen2p5_clean_offline_eval_env.sh`
+- `examples/dpo/run_qwen2p5_clean_offline_benchmarks.sh`
+- `examples/dpo/summarize_qwen2p5_clean_tables.py`
+- `tests/examples/qwen2p5_clean_tables_test.py`
+- `tests/examples/qwen2p5_safety_benchmarks_test.py`
+- `tests/examples/qwen2p5_wildbench_test.py`
+
+### Implementation details
+
+- `score_instruction_following_dataset.py`
+  - 新增 `livebench_if` 分支。
+  - `ifbench` 继续走 IFBench 官方 `evaluation_lib`。
+  - `livebench_if` 改为走 LiveBench 官方 `livebench.if_runner.instruction_following_eval.evaluation_main`，修复 `detectable_format:title` 等 LiveBench 专用 instruction id 无法评分的问题。
+  - 在构造 `InputExample.kwargs` 前统一过滤 `None`，与官方 reader 行为对齐。
+
+- `eval_qwen2p5_livebench_instruction_following.py`
+  - 新增 `--livebench-root` 参数并把它传给 scorer。
+  - 写入 JSONL 前把 HF dataset 中的 `datetime` 字段转成字符串，修复序列化失败。
+
+- `eval_qwen2p5_safety_benchmarks.py` / `score_safety_generation.py`
+  - 新增 XSTest 与 HarmBench 生成 + judge 评分链路。
+  - 使用 `safety-eval` 的 GPT refusal / harmfulness classifier。
+  - 修复 `args.repo-root` 拼写错误为 `args.repo_root`。
+
+- `eval_qwen2p5_wildbench.py`
+  - 不再依赖 WildBench 官方 `src/eval.py` 的多-provider import 栈来生成 batch 文件。
+  - 直接在 repo 内按官方 `evaluation/eval_template.score.v2.md` 渲染评分 prompt，并生成 OpenAI Batch `jsonl`。
+  - 仍保留官方 `src/openai_batch_eval/submit_batch.py` 作为可选提交分支。
+
+- `setup_qwen2p5_clean_offline_eval_env.sh`
+  - 新增 offline 依赖：
+    - `tenacity`
+    - `tiktoken`
+    - `fire`
+    - `google-generativeai`
+    - `cohere`
+    - `mistralai`
+    - `anthropic`
+    - `reka-api`
+    - `together`
+  - 用于支撑 `safety-eval` 与 WildBench 官方工具链。
+
+- `run_qwen2p5_clean_offline_benchmarks.sh`
+  - setup 脚本改为 `bash .../setup_qwen2p5_clean_offline_eval_env.sh`，不再依赖可执行位。
+  - 新增 CLI 解析：
+    - 支持 `run_ts` 位置参数
+    - 支持 bare methods 位置参数
+    - 支持 `--methods`
+    - 支持 `--benchmarks`
+    - 支持 `--question-limit`
+    - 支持 `--rewardbench-eval-limit`
+    - 支持 `--generation-batch-size`
+    - 支持 `--rewardbench-batch-size`
+    - 支持 `--judge-model`
+    - 支持 `--safety-judge-batch-size`
+    - 支持 `--wildbench-submit`
+    - 支持 `--force`
+
+### Validation
+
+- 静态检查
+  - `python3 -m py_compile examples/dpo/score_instruction_following_dataset.py examples/dpo/eval_qwen2p5_livebench_instruction_following.py examples/dpo/score_safety_generation.py examples/dpo/eval_qwen2p5_safety_benchmarks.py examples/dpo/eval_qwen2p5_wildbench.py examples/dpo/summarize_qwen2p5_clean_tables.py`
+  - `bash -n examples/dpo/setup_qwen2p5_clean_offline_eval_env.sh`
+  - `bash -n examples/dpo/run_qwen2p5_clean_offline_benchmarks.sh`
+  - 结果：通过
+
+- 单测
+  - `source /home/lhf_hongfu_gmail_com/.venvs/DPO/bin/activate && python tests/examples/qwen2p5_clean_tables_test.py`
+  - `source /home/lhf_hongfu_gmail_com/.venvs/DPO/bin/activate && python tests/examples/qwen2p5_safety_benchmarks_test.py`
+  - `source /home/lhf_hongfu_gmail_com/.venvs/DPO/bin/activate && python tests/examples/qwen2p5_wildbench_test.py`
+  - 结果：通过
+
+- env 增量安装
+  - `source /home/lhf_hongfu_gmail_com/.venvs/DPO-EVAL-OFFLINE/bin/activate && python -m pip install tenacity`
+  - `source /home/lhf_hongfu_gmail_com/.venvs/DPO-EVAL-OFFLINE/bin/activate && python -m pip install tiktoken fire google-generativeai cohere mistralai anthropic reka-api together`
+  - 结果：通过
+
+- smoke
+  - `source /home/lhf_hongfu_gmail_com/.venvs/DPO/bin/activate && python examples/dpo/eval_qwen2p5_livebench_instruction_following.py --run-ts 20260417_013847 --methods self_inf --question-limit 4 --generation-batch-size 2 --offline-eval-venv /home/lhf_hongfu_gmail_com/.venvs/DPO-EVAL-OFFLINE --force`
+  - `source /home/lhf_hongfu_gmail_com/.venvs/DPO/bin/activate && python examples/dpo/eval_qwen2p5_wildbench.py --run-ts 20260417_013847 --methods self_inf --question-limit 4 --offline-eval-venv /home/lhf_hongfu_gmail_com/.venvs/DPO-EVAL-OFFLINE --force`
+  - 结果：
+    - LiveBench IF smoke 通过并写出 `summary.json`
+    - WildBench smoke 通过并写出 `wildbench_summary.json` 与 batch-submit jsonl
+
+- full run
+  - `source /home/lhf_hongfu_gmail_com/.venvs/DPO/bin/activate && bash examples/dpo/run_qwen2p5_clean_offline_benchmarks.sh 20260417_013847 --methods vanilla_dpo random_pair_filtering reward_based_filtering self_inf --benchmarks ifbench rewardbench_v2 livebench_if wildbench`
+  - 结果：
+    - `IFBench` full：4 个方法已完成
+    - `RewardBench v2` full：4 个方法已完成
+    - `LiveBench IF` full：4 个方法已完成
+    - `WildBench` full：已进入 4 方法全量生成 / staging，运行时间显著长于前几项，当前仍在进行中
+
+### Validation results
+
+- `RewardBench v2` 当前 full 结果：
+  - `vanilla_dpo`: `macro=0.3766`, `weighted=0.4181`
+  - `random_pair_filtering`: `macro=0.3872`, `weighted=0.4328`
+  - `reward_based_filtering`: `macro=0.3576`, `weighted=0.4019`
+  - `self_inf`: `macro=0.5000`, `weighted=0.5000`
+
+- `IFBench`
+  - 当前 4 个 clean 方法在 full run 上均接近 `0.0`。
+  - 这更像模型/任务不匹配信号，后续可再人工抽样核查 prompt 与 response，确认不是 scoring 口径问题。
+
+### Known risks / TODO
+
+- `XSTest` / `HarmBench` 代码链路已经实现，但当前提供的 `OPENAI_API_KEY` 返回 `insufficient_quota (429)`，因此 full run 目前无法完成。
+- `WildBench` 的 full 生成 / staging 非常重，当前已经启动但尚未全部完成；如需更稳妥的长跑，建议后续迁到 `tmux`。
+- 如果后续要真正提交 `WildBench` batch 或跑 safety benchmarks，需要一把有额度的 OpenAI key。
+
+### Follow-up fixes
+
+- 发现并修复 smoke/full 复用同一输出根目录时的缓存污染：
+  - `IFBench`：`_prepare_ifbench_assets` 改为每次都从官方 HF 数据重写 `IFBench_test.jsonl`，不再沿用 smoke 产生的 4 条小样本文件。
+  - `IFEval/IFBench`：`--force` 时会先删除旧 response 文件，再重新生成，避免把 smoke 残留和 full 拼接到一起。
+  - `LiveBench IF`：若现有 response 文件行数与当前 benchmark 样本数不一致，则自动重生；并且 aggregate summary 改为 merge 旧分数，避免子集重跑覆盖其余方法。
+  - `RewardBench v2`：复用 summary 前会校验 `num_examples` 是否匹配当前 split；aggregate summary 改为 merge 旧分数。
+  - `WildBench`：复用 local result file 前会校验样本数是否匹配当前 benchmark；aggregate summary 改为 merge 旧分数。
+
+### Additional validation
+
+- 缓存修复后的静态检查 / 单测
+  - `python3 -m py_compile examples/dpo/eval_qwen2p5_clean_benchmarks.py examples/dpo/eval_qwen2p5_livebench_instruction_following.py examples/dpo/eval_qwen2p5_rewardbench_v2.py examples/dpo/eval_qwen2p5_wildbench.py`
+  - `source /home/lhf_hongfu_gmail_com/.venvs/DPO/bin/activate && python tests/examples/qwen2p5_clean_benchmarks_test.py`
+  - `source /home/lhf_hongfu_gmail_com/.venvs/DPO/bin/activate && python tests/examples/qwen2p5_wildbench_test.py`
+  - 结果：通过
+
+- 纠偏 full reruns
+  - `source /home/lhf_hongfu_gmail_com/.venvs/DPO/bin/activate && python examples/dpo/eval_qwen2p5_clean_benchmarks.py --run-ts 20260417_013847 --methods vanilla_dpo random_pair_filtering reward_based_filtering self_inf --benchmarks ifbench --offline-eval-venv /home/lhf_hongfu_gmail_com/.venvs/DPO-EVAL-OFFLINE --generation-batch-size 8 --force`
+  - `source /home/lhf_hongfu_gmail_com/.venvs/DPO/bin/activate && python examples/dpo/eval_qwen2p5_livebench_instruction_following.py --run-ts 20260417_013847 --methods self_inf --offline-eval-venv /home/lhf_hongfu_gmail_com/.venvs/DPO-EVAL-OFFLINE --generation-batch-size 8 --force`
+  - `source /home/lhf_hongfu_gmail_com/.venvs/DPO/bin/activate && python examples/dpo/eval_qwen2p5_rewardbench_v2.py --run-ts 20260417_013847 --methods self_inf --batch-size 8 --force`
+  - `source /home/lhf_hongfu_gmail_com/.venvs/DPO/bin/activate && python examples/dpo/eval_qwen2p5_rewardbench_v2.py --run-ts 20260417_013847 --methods vanilla_dpo random_pair_filtering reward_based_filtering self_inf --batch-size 8`
+  - `source /home/lhf_hongfu_gmail_com/.venvs/DPO/bin/activate && python examples/dpo/eval_qwen2p5_livebench_instruction_following.py --run-ts 20260417_013847 --methods vanilla_dpo random_pair_filtering reward_based_filtering self_inf --offline-eval-venv /home/lhf_hongfu_gmail_com/.venvs/DPO-EVAL-OFFLINE --generation-batch-size 8`
+  - 结果：
+    - `IFBench` 现在是 `300 prompts` 的真 full，而不是早先误复用的 4 prompts smoke。
+    - `RewardBench v2` 现在 4 个方法都是 `1865` examples 的真 full。
+    - `LiveBench IF` 现在 4 个方法都是 `400` examples 的真 full。
+
+### Corrected benchmark snapshots
+
+- `IFBench` prompt-level strict:
+  - `Vanilla DPO = 0.1267`
+  - `Random Pair Filtering = 0.1167`
+  - `Reward-based Filtering = 0.1333`
+  - `Self-inf = 0.1300`
+
+- `LiveBench IF` score:
+  - `Vanilla DPO = 0.2420`
+  - `Random Pair Filtering = 0.2453`
+  - `Reward-based Filtering = 0.2378`
+  - `Self-inf = 0.2456`
+
+- `RewardBench v2` weighted:
+  - `Vanilla DPO = 0.4181`
+  - `Random Pair Filtering = 0.4328`
+  - `Reward-based Filtering = 0.4019`
+  - `Self-inf = 0.4133`
+
+### Updated risks / TODO
+
+- `WildBench` 目前只有 `self_inf` 的 smoke/staging 结果。full 生成在 cache-fix 前被主动中止，避免继续浪费 TPU 时间在旧逻辑上；后续如要继续，建议单独起后台长跑。
+- 已于后台启动 corrected `WildBench` full 生成 / staging：
+  - `tmux` session: `wildbench_clean_20260417`
+  - log: `runs/results/clean_benchmarks_20260417_013847/wildbench/wildbench_full.log`
+
+## 2026-04-21 (WildBench batch scoring completion; no code changes)
+
+### Scope
+
+- 无代码改动。
+- 完成 clean 4 方法 `WildBench` 的 OpenAI Batch judge 提交、轮询回收与 summary 汇总。
+
+### Files changed
+
+- `develop.md`
+- `runs/results/clean_benchmarks_20260417_013847/wildbench/wildbench_summary.json`
+- `runs/results/clean_benchmarks_20260417_013847/wildbench/eval_results/score/eval=gpt-4.1/self_inf.json`
+- `runs/results/clean_benchmarks_20260417_013847/wildbench/eval_results/score/eval=gpt-4.1/vanilla_dpo.json`
+- `runs/results/clean_benchmarks_20260417_013847/wildbench/eval_results/score/eval=gpt-4.1/random_pair_filtering.json`
+- `runs/results/clean_benchmarks_20260417_013847/wildbench/eval_results/score/eval=gpt-4.1/reward_based_filtering.json`
+
+### Validation / execution
+
+- Batch completion polling
+  - `session_id=62847`
+  - 结果：4 个 batch 全部 `completed`，对应 output file 全部成功写回本地。
+
+- WildBench summary aggregation
+  - `source /home/lhf_hongfu_gmail_com/.venvs/DPO/bin/activate && python examples/dpo/eval_qwen2p5_wildbench.py --run-ts 20260417_013847 --methods vanilla_dpo random_pair_filtering reward_based_filtering self_inf --offline-eval-venv /home/lhf_hongfu_gmail_com/.venvs/DPO-EVAL-OFFLINE --judge-model gpt-4.1`
+  - 结果：成功写出 `runs/results/clean_benchmarks_20260417_013847/wildbench/wildbench_summary.json`
+
+### WildBench final snapshot
+
+- `WildBench adjusted score`
+  - `Vanilla DPO = -20.1172`
+  - `Random Pair Filtering = -21.2891`
+  - `Reward-based Filtering = -19.9414`
+  - `Self-inf = -20.8798`
+
+- `WildBench raw score`
+  - `Vanilla DPO = 3.9941`
+  - `Random Pair Filtering = 3.9355`
+  - `Reward-based Filtering = 4.0029`
+  - `Self-inf = 3.9560`
+
+### Known risks / TODO
+
+- `WildBench` 已完成，但对 `self_inf` 不构成主卖点；更适合作为补充 benchmark，而不是 clean 主表核心列。
+- `XSTest` / `HarmBench` 仍受当前 `OPENAI_API_KEY` quota 限制，尚未完成。
+
+## 2026-04-21 (paper writing support; no code changes)
+
+### Scope
+
+- 无代码改动。
+- 基于当前 clean DPO 主表、训练配置和已完成 benchmark，为论文实验部分撰写与结果严格对齐的文字草稿。
+
+### Files changed
+
+- `develop.md`
+
+### Validation / execution
+
+- 核对了以下实验配置与结果来源：
+  - `examples/ultrafeedback/README.md`
+  - `examples/dpo/README.md`
+  - `examples/dpo/qwen2p5_dpo_experiments.py`
+  - `examples/dpo/eval_qwen2p5_dpo_test_matrix.py`
+  - `examples/sft/ultrafeedback/qwen2p5_1p5b_ultrafeedback_lora.yaml`
+  - `examples/dpo/qwen2p5_1p5b_ultrafeedback_from_sft_lora.yaml`
+  - `runs/results/clean_benchmarks_20260417_013847/tables/clean_main_table.json`
+  - `runs/results/clean_benchmarks_20260417_013847/benchmark_summary.json`
+  - `runs/results/clean_benchmarks_20260417_013847/livebench_if/livebench_instruction_following_summary.json`
+  - `runs/results/clean_benchmarks_20260417_013847/rewardbench_v2/rewardbench_v2_summary.json`
+  - `runs/results/clean_benchmarks_20260417_013847/wildbench/wildbench_summary.json`
+
+### Known risks / TODO
+
+- 当前表格和结果对应的是 `DPO` clean 实验，而不是 `GRPO`；论文标题或节标题需与实验对象保持一致，避免误写。
+
+## 2026-04-21 (paper writing revision; no code changes)
+
+### Scope
+
+- 无代码改动。
+- 继续为论文 `DPO` 实验部分润色文字表述，保留关键超参数，但改成投稿论文风格而非实验记录风格。
+
+### Files changed
+
+- `develop.md`
+
+### Validation / execution
+
+- 无额外代码或脚本执行。
+- 文字修订继续严格以既有实验配置和结果文件为边界，不新增未运行实验设定。
+
+### Known risks / TODO
+
+- 论文正文中应保留关键训练超参数与数据划分信息，但避免直接使用配置字段名式写法；更细节的实现参数仍建议放在附录或实验细节表中。
+
+## 2026-04-21 (GRPO section drafting support; no code changes)
+
+### Scope
+
+- 无代码改动。
+- 基于仓库中现有 `GRPO / DeepScaler / AIME-2024` 脚本与 README，整理论文 `\section{GRPO}` 的写作口径与实验设定。
+
+### Files reviewed
+
+- `examples/deepscaler/README.md`
+- `examples/deepscaler/run_train.sh`
+- `examples/deepscaler/run_train_dbc.sh`
+- `examples/deepscaler/train_deepscaler_nb.py`
+- `examples/deepscaler/math_eval_nb.py`
+- `examples/deepscaler/run_eval_pass1_avg16.sh`
+- `my_example/run_grpo_gemma.sh`
+
+### Notes
+
+- 仓库里能直接确认的 GRPO 评测数字主要是 `DeepScaler + AIME 2024` 的 baseline `Pass@1`：16 次独立运行平均为 `18.9594%`。
+- 其余 `GRPO` 对比结果在本次对话中以论文草稿形式整理，未对仓库文件做直接修改。
+
+## 2026-04-22 (clean DPO main table: 3 seeds + 5% filtering + mean/std)
+
+### Scope
+
+- 扩展 clean DPO 主表实验基础设施，使其支持：
+  - `3` 个 DPO seeds：`0, 1, 2`
+  - `Random Pair Filtering (5%) / (10%)`
+  - `Reward-based Filtering (5%) / (10%)`
+  - `Self-DTV (ours)` 与 `Vanilla DPO`
+- 为 `Random Pair Filtering` 增加显式 `curation_seed`，保证窗口级随机过滤在同一 seed 下可复现、不同 seed 下可变化。
+- 新增 multi-seed clean 主表的 run 发现、评测、聚合与 one-shot pipeline 脚本。
+- 启动 full clean main-table pipeline 后台任务，采用“训练 -> 评测 -> 清理新 exported_model”顺序，避免磁盘被 14 个新 merged export 撑爆。
+
+### Files changed
+
+- `develop.md`
+- `examples/dpo/qwen2p5_dpo_experiments.py`
+- `examples/dpo/run_qwen2p5_1p5b_ultrafeedback_from_sft.sh`
+- `examples/dpo/qwen2p5_clean_main_table_lib.py`
+- `examples/dpo/eval_qwen2p5_clean_main_table_runs.py`
+- `examples/dpo/summarize_qwen2p5_clean_main_table.py`
+- `examples/dpo/run_qwen2p5_clean_main_table_matrix.sh`
+- `examples/dpo/run_qwen2p5_clean_main_table_pipeline.sh`
+- `tests/sft/dpo/dpo_trainer_test.py`
+- `tests/cli/dpo_main_test.py`
+- `tests/examples/qwen2p5_dpo_experiments_test.py`
+- `tests/examples/qwen2p5_clean_main_table_lib_test.py`
+- `tests/examples/qwen2p5_clean_main_table_summary_test.py`
+- `tunix/sft/dpo/dpo_trainer.py`
+- `tunix/cli/dpo_main.py`
+
+### Key implementation notes
+
+- `DPOTrainingConfig` 新增 `curation_seed`。
+- `aggregate_random_curated_step(...)` 的随机 key 改为：
+  - `PRNGKey(curation_seed)` 再 `fold_in(window_seed)`
+- `run_qwen2p5_1p5b_ultrafeedback_from_sft.sh` 新增：
+  - `--seed`
+  - `--curation-seed`
+- `qwen2p5_dpo_experiments.py` 新增逻辑变体：
+  - `random_pair_filtering_filt5`
+  - `random_pair_filtering_filt10`
+  - `reward_based_filtering_filt5`
+  - `reward_based_filtering_filt10`
+- `prepare_launch_config(...)` 现在会：
+  - 注入 DPO seed 到 actor/reference `rng_seed`
+  - 注入 `curation_seed`
+  - 自动把 `filt5` 映射到 `keep_ratio=0.95`
+  - 自动把 `filt10` / legacy 10% 映射到 `keep_ratio=0.90`
+- 新增 multi-seed helper / evaluator / summarizer：
+  - `qwen2p5_clean_main_table_lib.py`
+  - `eval_qwen2p5_clean_main_table_runs.py`
+  - `summarize_qwen2p5_clean_main_table.py`
+- 新增脚本：
+  - `run_qwen2p5_clean_main_table_matrix.sh`
+  - `run_qwen2p5_clean_main_table_pipeline.sh`
+
+### Validation / execution
+
+- 语法检查
+  - `source /home/lhf_hongfu_gmail_com/.venvs/DPO/bin/activate && python -m py_compile examples/dpo/qwen2p5_clean_main_table_lib.py examples/dpo/eval_qwen2p5_clean_main_table_runs.py examples/dpo/summarize_qwen2p5_clean_main_table.py`
+  - `source /home/lhf_hongfu_gmail_com/.venvs/DPO/bin/activate && python -m py_compile examples/dpo/qwen2p5_dpo_experiments.py tunix/sft/dpo/dpo_trainer.py tunix/cli/dpo_main.py tests/sft/dpo/dpo_trainer_test.py tests/cli/dpo_main_test.py tests/examples/qwen2p5_dpo_experiments_test.py tests/examples/qwen2p5_clean_main_table_lib_test.py tests/examples/qwen2p5_clean_main_table_summary_test.py`
+  - 结果：通过
+
+- 单元测试
+  - `source /home/lhf_hongfu_gmail_com/.venvs/DPO/bin/activate && python tests/cli/dpo_main_test.py`
+  - `source /home/lhf_hongfu_gmail_com/.venvs/DPO/bin/activate && python tests/examples/qwen2p5_dpo_experiments_test.py`
+  - `source /home/lhf_hongfu_gmail_com/.venvs/DPO/bin/activate && python tests/examples/qwen2p5_clean_main_table_lib_test.py && python tests/examples/qwen2p5_clean_main_table_summary_test.py`
+  - `source /home/lhf_hongfu_gmail_com/.venvs/DPO/bin/activate && python tests/sft/dpo/dpo_trainer_test.py`
+  - 结果：全部通过
+
+- dry-run：训练矩阵
+  - `source /home/lhf_hongfu_gmail_com/.venvs/DPO/bin/activate && bash examples/dpo/run_qwen2p5_clean_main_table_matrix.sh --run-ts 20260422_010203`
+  - 结果：
+    - 正确识别 `4` 个 legacy seed0 可复用 run
+    - 正确识别 `14` 个新增 full DPO runs 需要启动
+
+- smoke：multi-seed clean main-table evaluator + summarizer
+  - `source /home/lhf_hongfu_gmail_com/.venvs/DPO/bin/activate && python examples/dpo/eval_qwen2p5_clean_main_table_runs.py --run-ts 20260422_010203 --legacy-run-ts 20260417_013847 --methods vanilla_dpo --seeds 0 --benchmarks clean_test --output-root /tmp/qwen2p5_clean_main_table_smoke && python examples/dpo/summarize_qwen2p5_clean_main_table.py --run-ts 20260422_010203 --input-json /tmp/qwen2p5_clean_main_table_smoke/per_run_metrics.json --output-dir /tmp/qwen2p5_clean_main_table_smoke/tables --columns clean_val_acc_auc clean_test_acc`
+  - 结果：通过，成功写出 per-run JSON、Markdown 与 LaTeX
+
+- smoke：one-shot pipeline（legacy-only）
+  - `source /home/lhf_hongfu_gmail_com/.venvs/DPO/bin/activate && bash examples/dpo/run_qwen2p5_clean_main_table_pipeline.sh --run-ts 20260422_pipeline_smoke2 --methods vanilla_dpo --seeds 0 --benchmarks clean_test --output-root /tmp/qwen2p5_clean_main_table_pipeline_smoke2`
+  - 结果：通过，成功完成 legacy 导入、聚合与最终表格写出
+
+- full pipeline 启动
+  - 已使用 `tmux` 后台启动 full 6 行 × 3 seeds clean 主表 pipeline
+  - 首次启动 `20260422_220842` 因旧 TPU smoke 进程占用设备而退出，已清理旧进程并重新启动
+  - 当前有效：
+    - `run_ts`: `20260422_220956`
+    - `tmux` session: `clean_main_table_20260422_220956`
+    - output root: `runs/results/qwen2p5_clean_main_table_20260422_220956`
+    - log: `runs/results/qwen2p5_clean_main_table_20260422_220956/pipeline.log`
+
+### Storage notes
+
+- 现有单个 clean DPO run 目录约 `3.0G`，其中：
+  - `exported_model ≈ 2.9G`
+  - `checkpoints ≈ 102M`
+  - `tensorboard ≈ 2.9M`
+- 根盘当时剩余约 `19G`，无法同时保留 `14` 个新增 merged export。
+- 因此 full pipeline 采用：
+  - 训练新 run
+  - 立刻评测该 run
+  - 清理该 run 的 `exported_model`
+  - 保留 `checkpoints + tensorboard + per-run summary`
+
+### Known risks / TODO
+
+- full pipeline 仍在后台运行，最终 `mean ± std` 主表要等待：
+  - 14 个新增 full DPO runs
+  - 对应 `clean_test / LiveBench-IF / RewardBench 2 Precise IF / IFBench` 全部完成
+- 当前 multi-seed evaluator 是针对主表固定列实现的，未扩到 `WildBench / MT-Bench / AlpacaEval 2`。
+- 若后续需要重新生成某个新 run 的 merged HF export，目前默认策略是：
+  - 从该 run 的 checkpoint 重新执行一次导出，或
+  - 在 pipeline 中临时关闭 `cleanup_exported_model`。
+
+## 2026-04-23 - DPO clean main-table pipeline 恢复修复
+
+### Scope
+
+- 修复 full clean main-table pipeline 在 `vanilla_dpo seed=1` 训练结束后进入评测阶段时崩溃的问题。
+- 修复点保持最小化，不改训练逻辑，只补 evaluator 的 trainer 属性兼容，以及 pipeline 的断点恢复分支。
+
+### Files changed
+
+- `examples/dpo/qwen2p5_dpo_eval_lib.py`
+- `examples/dpo/run_qwen2p5_clean_main_table_pipeline.sh`
+- `tests/examples/qwen2p5_dpo_eval_lib_test.py`
+
+### Changes
+
+- `qwen2p5_dpo_eval_lib.py`
+  - 新增 `_resolve_metrics_prefix(trainer)`，按以下优先级兼容：
+    - `trainer.metrics_prefix`
+    - `trainer.config.metrics_prefix`
+    - `trainer.training_config.metrics_prefix`
+  - `aggregate_eval_metrics(...)` 不再强依赖 `trainer.training_config`
+  - 这样可兼容当前 `DPOTrainer` 实际把训练配置挂在 `config` / `metrics_prefix` 上的实现
+
+- `run_qwen2p5_clean_main_table_pipeline.sh`
+  - 新增按 `per_run/<method>_seed<seed>.json` 判断的恢复逻辑
+  - 已经评测完成的 seeded run，在 rerun 时直接跳过，不会因为 `exported_model` 已清理而重复训练
+  - 对 `present` 的 seeded run，如果之前是“训练完但评测失败”，现在会直接补评测并继续往下走
+
+- `tests/examples/qwen2p5_dpo_eval_lib_test.py`
+  - 新增 evaluator helper 单测，覆盖：
+    - direct `metrics_prefix`
+    - `config.metrics_prefix`
+    - legacy `training_config.metrics_prefix`
+  - 同时修正 `importlib` 加载方式，确保 dataclass 模块能正确注册到 `sys.modules`
+
+### Validation / execution
+
+- 单测
+  - `source /home/lhf_hongfu_gmail_com/.venvs/DPO/bin/activate && python tests/examples/qwen2p5_dpo_eval_lib_test.py && python tests/examples/qwen2p5_clean_main_table_lib_test.py && python tests/examples/qwen2p5_clean_main_table_summary_test.py`
+  - 结果：通过
+
+- 现场状态排查
+  - 确认先前 TPU 占用并非外部任务，而是我为恢复 smoke 启动的临时 eval 进程：
+    - `python examples/dpo/eval_qwen2p5_clean_main_table_runs.py --run-ts 20260422_220956 --legacy-run-ts 20260417_013847 --methods vanilla_dpo --seeds 1 --benchmarks clean_test --output-root /tmp/qwen2p5_clean_main_table_resume_smoke`
+  - 该进程已结束，TPU 已释放
+
+- full pipeline 恢复
+  - 已重新在 `tmux` 中启动：
+    - session: `clean_main_table_20260422_220956`
+    - output root: `runs/results/qwen2p5_clean_main_table_20260422_220956`
+    - log: `runs/results/qwen2p5_clean_main_table_20260422_220956/pipeline.log`
+  - 最新状态：
+    - 已成功导入 4 个 legacy seed0 结果
+    - 已从 `present` 状态进入 `vanilla_dpo seed=1` 的评测阶段
+
+### Known risks / TODO
+
+- full pipeline 仍在继续，最终主表尚未完成。
+- 当前恢复逻辑依赖 `per_run/*.json` 作为“该 seed 已评测完成”的标记；这是有意设计，但如果手工删除这些 JSON，pipeline 会重新进入该 seed 的训练/评测流程。
+
+## 2026-04-23 - clean main-table pipeline 状态检查（无代码改动）
+
+### Scope
+
+- 检查 `clean_main_table_20260422_220956` 后台 pipeline 当前进度。
+
+### Files changed
+
+- 无代码改动
+
+### Validation / execution
+
+- 状态检查命令
+  - `tmux ls`
+  - `ps -ef | grep 'qwen2p5_clean_main_table_20260422_220956\|run_qwen2p5_1p5b_ultrafeedback_from_sft.sh' | grep -v grep`
+  - `find runs/results/qwen2p5_clean_main_table_20260422_220956/per_run -maxdepth 1 -type f | sed 's#^.*/##' | sort`
+  - `tail -n 120 runs/results/qwen2p5_clean_main_table_20260422_220956/pipeline.log`
+
+### Result
+
+- pipeline 仍在正常运行。
+- 已完成并落盘的 `per_run` 结果：
+  - `vanilla_dpo_seed0`
+  - `vanilla_dpo_seed1`
+  - `vanilla_dpo_seed2`
+  - `random_pair_filtering_filt5_seed0`
+  - `random_pair_filtering_filt10_seed0`
+  - `reward_based_filtering_filt10_seed0`
+  - `self_inf_seed0`
+- 当前正在训练：
+  - `random_pair_filtering_filt5 seed=1`
+  - 最新日志位置约在 `step 110 / 115` 附近，正在做该 run 的后段评估/收尾
+
+### Known risks / TODO
+
+- 主表聚合仍需等待剩余 seed-run 完成后才能生成最终 `mean ± std` 表格。
+
+## 2026-04-24 - clean main-table pipeline 完成状态检查（无代码改动）
+
+### Scope
+
+- 检查 `clean_main_table_20260422_220956` 是否已全部完成，并确认最终聚合表是否已经生成。
+
+### Files changed
+
+- 无代码改动
+
+### Validation / execution
+
+- 状态检查命令
+  - `tmux ls`
+  - `find runs/results/qwen2p5_clean_main_table_20260422_220956/per_run -maxdepth 1 -type f | sed 's#^.*/##' | sort`
+  - `tail -n 120 runs/results/qwen2p5_clean_main_table_20260422_220956/pipeline.log`
+  - `cat runs/results/qwen2p5_clean_main_table_20260422_220956/tables/clean_main_table_multiseed.md`
+
+### Result
+
+- `clean_main_table_20260422_220956` 已全部完成。
+- `per_run` 目录已经包含全部 `18` 个 seed-run 的结果文件。
+- 最终聚合产物已生成：
+  - `runs/results/qwen2p5_clean_main_table_20260422_220956/tables/clean_main_table_multiseed.json`
+  - `runs/results/qwen2p5_clean_main_table_20260422_220956/tables/clean_main_table_multiseed.md`
+  - `runs/results/qwen2p5_clean_main_table_20260422_220956/tables/clean_main_table_multiseed.tex`
+- `pipeline.log` 末尾已出现 `Pipeline complete.`
+
+### Known risks / TODO
+
+- 当前主表已经可用于论文整理；若要进一步解释某些 `std = 0.0` 的行，需要单独检查这些方法在 3 个 seeds 下是否确实完全重合，还是因为评测/发现逻辑存在复用路径。
+
+## 2026-04-24 - DPO clean main-table 论文使用建议（无代码改动）
+
+### Scope
+
+- 基于当前 `clean_main_table_multiseed` 结果，给出论文使用建议与后续最小补实验建议。
+
+### Files changed
+
+- 无代码改动
+
+### Validation / execution
+
+- 人工检查：
+  - `runs/results/qwen2p5_clean_main_table_20260422_220956/tables/clean_main_table_multiseed.md`
+  - `runs/results/qwen2p5_clean_main_table_20260422_220956/tables/clean_main_table_multiseed.json`
+  - `runs/results/qwen2p5_clean_main_table_20260422_220956/per_run/*.json`
+
+### Result
+
+- 确认 `Random Pair Filtering` 的非零 `std` 来自有效的随机过滤种子。
+- 确认 `Vanilla / Reward-based / Self-DTV` 的 `std=0.0000` 主要反映当前 DPO 流程在这些方法上基本确定性，而非充分扰动后的稳定性结论。
+
+### Known risks / TODO
+
+- 若论文正文要强调 `mean \pm std over 3 seeds`，建议补一轮真正作用于 DPO 数据顺序/迭代顺序的随机性重跑。
+- 若不补实验，建议正文主表不要强卖 `std`，可改为单值主表并在附录解释当前多 run 结果。
+
+## 2026-04-24 - DPO clean main-table 真 `std` 重跑实现
+
+### Scope
+
+- 为 clean DPO 主表引入真正作用于训练顺序的随机性来源。
+- 将 `dataset split seed` 与 `train shuffle seed` 解耦。
+- 为 clean main-table pipeline 增加 `fresh-run + no-legacy` 路径，准备在 `tmux` 中顺序执行新的 18-run 重跑。
+
+### Files changed
+
+- `tunix/examples/data/ultrafeedback_dpo.py`
+- `examples/dpo/qwen2p5_dpo_experiments.py`
+- `examples/dpo/run_qwen2p5_1p5b_ultrafeedback_from_sft.sh`
+- `examples/dpo/qwen2p5_clean_main_table_lib.py`
+- `examples/dpo/eval_qwen2p5_clean_main_table_runs.py`
+- `examples/dpo/run_qwen2p5_clean_main_table_matrix.sh`
+- `examples/dpo/run_qwen2p5_clean_main_table_pipeline.sh`
+- `tests/examples/data/ultrafeedback_dpo_test.py`
+- `tests/examples/qwen2p5_dpo_experiments_test.py`
+- `tests/examples/qwen2p5_clean_main_table_lib_test.py`
+
+### Validation / execution
+
+- 语法检查
+  - `python -m py_compile tunix/examples/data/ultrafeedback_dpo.py examples/dpo/qwen2p5_dpo_experiments.py examples/dpo/eval_qwen2p5_clean_main_table_runs.py`
+  - `bash -n examples/dpo/run_qwen2p5_1p5b_ultrafeedback_from_sft.sh`
+  - `bash -n examples/dpo/run_qwen2p5_clean_main_table_matrix.sh`
+  - `bash -n examples/dpo/run_qwen2p5_clean_main_table_pipeline.sh`
+- 单测
+  - `source /home/lhf_hongfu_gmail_com/.venvs/DPO/bin/activate && python tests/examples/data/ultrafeedback_dpo_test.py`
+  - `source /home/lhf_hongfu_gmail_com/.venvs/DPO/bin/activate && python tests/examples/qwen2p5_dpo_experiments_test.py`
+  - `source /home/lhf_hongfu_gmail_com/.venvs/DPO/bin/activate && python tests/examples/qwen2p5_clean_main_table_lib_test.py`
+  - `source /home/lhf_hongfu_gmail_com/.venvs/DPO/bin/activate && python tests/examples/qwen2p5_clean_main_table_summary_test.py`
+  - `source /home/lhf_hongfu_gmail_com/.venvs/DPO/bin/activate && python tests/examples/qwen2p5_dpo_eval_lib_test.py`
+- 训练矩阵 dry-run
+  - `bash examples/dpo/run_qwen2p5_clean_main_table_matrix.sh --run-ts 20260424_true_std_dryrun --no-legacy`
+- smoke pipeline
+  - `source /home/lhf_hongfu_gmail_com/.venvs/DPO/bin/activate && bash examples/dpo/run_qwen2p5_clean_main_table_pipeline.sh --run-ts 20260424_true_std_smoke --profile smoke --methods vanilla_dpo,random_pair_filtering_filt5,self_inf --seeds 0,1 --benchmarks clean_test --output-root /tmp/qwen2p5_clean_main_table_true_std_smoke --no-legacy`
+
+### Result
+
+- `create_dataset(...)` 已支持独立的 `shuffle_seed`。
+- 当前实现下：
+  - `seed=42` 继续只负责 prompt-level partition / eval split；
+  - `shuffle_seed` 只作用于 `DPO train subset` 的样本顺序。
+- clean main-table 训练矩阵已支持：
+  - `--run-seed`
+  - `--train-shuffle-seed`
+  - `--no-legacy`
+- `Random Pair Filtering` 在真 `std` 路径中固定 `curation_seed=0`，避免把额外采样 seed 混入方差来源。
+- dry-run 已确认在 `--no-legacy` 下会启动完整的 18 个 fresh runs，而不会复用旧 `seed0`。
+- smoke 已成功进入真实训练阶段；日志已确认：
+  - `train_data_module` 包含 `shuffle_seed`
+  - `eval_data_module` 不含 `shuffle_seed`
+  - `actor/reference rng_seed` 未被 repeat seed 改写
+  - `curation_seed` 固定为 `0`
+- 在 smoke 验证中额外发现并修复两处 run 发现问题：
+  - `discover_clean_main_table_runs(...)` 原先只会匹配 `profile=full` 的目录，现已支持按传入的 `profile` 发现 `smoke/full`；
+  - `parse_run_dir_name(...)` 原先只接受纯时间戳形式的 `run_ts`，现已兼容带语义后缀的命名，如 `20260424_true_std_smoke`。
+- 对应已补回归验证：
+  - `tests/examples/qwen2p5_clean_main_table_lib_test.py` 新增 `profile=smoke` 发现测试；
+  - `tests/examples/qwen2p5_dpo_experiments_test.py` 新增命名型 `run_ts` 解析测试。
+
+### Known risks / TODO
+
+- smoke 尚未完全结束，仍需确认：
+-  - `random_pair_filtering_filt5` 与 `self_inf` 的 smoke 分支未继续完整跑完；当前已通过 `vanilla_dpo` 的端到端闭环验证核心链路。
+- 已确认：
+  - `per_run/*.json` 能成功写出；
+  - `exported_model` 能在评测后自动清理。
+- 已启动新的 full `tmux` session 跑 18 个 fresh runs：
+  - `session = clean_main_table_true_std_20260424_163542`
+  - `run_ts = 20260424_163542`
+  - `log = runs/results/qwen2p5_clean_main_table_20260424_163542/pipeline.log`
+- full run 期间必须继续采用“训练 -> 评测 -> 删除 `exported_model`”的顺序策略，以避免磁盘峰值超限。
+
+## 2026-04-25 - DPO true-std full pipeline 完成状态检查（无代码改动）
+
+### Scope
+
+- 检查 `qwen2p5_clean_main_table_20260424_163542` 的 full `tmux` pipeline 是否全部完成。
+
+### Files changed
+
+- 无代码改动
+
+### Validation / execution
+
+- 状态检查命令
+  - `find runs/results/qwen2p5_clean_main_table_20260424_163542/per_run -maxdepth 1 -type f -name '*.json'`
+  - `tail -n 80 runs/results/qwen2p5_clean_main_table_20260424_163542/pipeline.log`
+  - `ps -eo pid,etimes,%cpu,%mem,cmd | grep 20260424_163542`
+
+### Result
+
+- `per_run` 已包含全部 `18` 个 fresh seed-run 结果。
+- `pipeline.log` 末尾已出现 `Pipeline complete.`。
+- 聚合产物已生成：
+  - `runs/results/qwen2p5_clean_main_table_20260424_163542/tables/clean_main_table_multiseed.json`
+  - `runs/results/qwen2p5_clean_main_table_20260424_163542/tables/clean_main_table_multiseed.md`
+  - `runs/results/qwen2p5_clean_main_table_20260424_163542/tables/clean_main_table_multiseed.tex`
+
+### Known risks / TODO
+
+- 需要进一步人工检查最终 `mean \\pm std` 数值，并决定正文主表最终保留哪些指标列。
+
+## 2026-05-12 - 已完成实验结果汇总检查（无代码改动）
+
+### Scope
+
+- 汇总当前仓库中已经落盘的 DPO clean 主表、clean benchmark、以及静态 corruption test matrix 结果。
+
+### Files changed
+
+- 无代码改动
+
+### Validation / execution
+
+- 结果检查命令
+  - `find runs/results -maxdepth 1 -mindepth 1 -printf '%f\n' | sort`
+  - `cat runs/results/qwen2p5_clean_main_table_20260424_163542/tables/clean_main_table_multiseed.md`
+  - `cat runs/results/clean_benchmarks_20260417_013847/benchmark_summary.json`
+  - `cat runs/results/clean_benchmarks_20260417_013847/rewardbench_v1/rewardbench_summary.json`
+  - `cat runs/results/clean_benchmarks_20260417_013847/rewardbench_v2/rewardbench_v2_summary.json`
+  - `cat runs/results/clean_benchmarks_20260417_013847/wildbench/wildbench_summary.json`
+  - `cat runs/results/qwen2p5_dpo_test_matrix_20260417_013847.json`
+
+### Result
+
+- 最新的 clean true-std 主表在 `qwen2p5_clean_main_table_20260424_163542`。
+- 早期的 clean 单次 benchmark 套件在 `clean_benchmarks_20260417_013847`。
+- 3 个 dataset setting 的 4 方法 DPO test matrix 在 `qwen2p5_dpo_test_matrix_20260417_013847.json`。
+
+### Known risks / TODO
+
+- 若要做论文主线，需要明确区分：
+  - 最新 `3-seed true std` clean 主表；
+  - 旧的单次 clean benchmark 结果；
+  - 以及 static corruption matrix。
+
+## 2026-05-12 - Clean/GF20/GF40 in-domain results 汇总（无代码改动）
+
+### Scope
+
+- 汇总 `clean`、`global_flip20`、`global_flip40` 三个 DPO setting 的 in-domain 指标。
+
+### Files changed
+
+- 无代码改动
+
+### Validation / execution
+
+- 结果检查命令
+  - `cat runs/results/qwen2p5_dpo_test_matrix_20260417_013847.json`
+  - 从 `runs/dpo_qwen2p5_1p5b_ultrafeedback_from_sft_*_{clean,global_flip20,global_flip40}_lora_full_20260417_013847/tensorboard` 读取 `dpo/eval/rewards/accuracy` 并计算 normalized Acc-AUC。
+
+### Result
+
+- 已整理 `Val Acc-AUC` 与 `Test Acc` 两个共同可比指标。
+- `clean` 上 `Self-DTV` 的 `Val Acc-AUC` 与 `Test Acc` 最高。
+- `global_flip20` 与 `global_flip40` 上 `Reward-based Filtering` 的 `Val Acc-AUC` 与 `Test Acc` 最高。
+
+### Known risks / TODO
+
+- 这组 `GF20/GF40` 结果来自 `20260417_013847` 单次 run，不是 `3-seed true std`。
+- 外部 benchmark 当前主要只覆盖 clean 模型，不应直接扩展解读到 GF20/GF40。
+
+## 2026-05-12 - GF20/GF40 benchmark 覆盖检查（无代码改动）
+
+### Scope
+
+- 检查 `global_flip20` 与 `global_flip40` 是否已有 LiveBench/RB2/IFBench 等外部 benchmark 结果。
+
+### Files changed
+
+- 无代码改动
+
+### Validation / execution
+
+- 结果检查命令
+  - `find runs/results -type f -name '*.json' -o -name '*.md' -o -name '*.tex'`
+  - `grep` 搜索 `global_flip20`、`global_flip40`、`GF20`、`GF40`
+  - `find runs -maxdepth 2 -type d -path '*global_flip20*exported_model' -o -path '*global_flip40*exported_model'`
+
+### Result
+
+- 当前 GF20/GF40 只在 `runs/results/qwen2p5_dpo_test_matrix_20260417_013847.json` 中有 in-domain test metrics。
+- 未发现 GF20/GF40 的 LiveBench-IF、RewardBench 2、IFBench、MT-Bench、AlpacaEval、WildBench 等外部 benchmark summary。
+- GF20/GF40 的 8 个 `exported_model` 目录仍然存在，可以继续补跑外部 benchmark。
+
+### Known risks / TODO
+
+- 若要补 GF20/GF40 benchmark，建议只补与论文主线最贴的 LiveBench-IF、RewardBench 2 Precise IF、IFBench P-Strict，而不是重跑全部 judge-heavy benchmark。
+
+## 2026-05-12 - GF20/GF40 offline benchmark 补跑实现
+
+### Scope
+
+- 为 `global_flip20` 与 `global_flip40` 的 8 个已导出 DPO 模型补跑 offline benchmarks：
+  - `LiveBench-IF`
+  - `RewardBench 2 Precise IF`
+  - `IFBench P-Strict`
+
+### Files changed
+
+- `examples/dpo/eval_qwen2p5_gf_benchmarks.py`
+- `develop.md`
+
+### Validation / execution
+
+- 语法检查
+  - `python -m py_compile examples/dpo/eval_qwen2p5_gf_benchmarks.py`
+- dry-run
+  - `source /home/lhf_hongfu_gmail_com/.venvs/DPO/bin/activate && python examples/dpo/eval_qwen2p5_gf_benchmarks.py --dry-run`
+- full run
+  - `tmux new-session -d -s gf_benchmarks_20260417_013847_20260512_214126 ...`
+  - full log: `runs/results/qwen2p5_gf_benchmarks_20260417_013847/pipeline.log`
+
+### Result
+
+- dry-run 已确认 8 个 GF20/GF40 `exported_model` 都存在并可发现。
+- full benchmark 已在 `tmux` 中启动。
+
+### Known risks / TODO
+
+- 需要等待 full benchmark 结束后检查：
+  - `runs/results/qwen2p5_gf_benchmarks_20260417_013847/gf_benchmark_summary.json`
+  - `runs/results/qwen2p5_gf_benchmarks_20260417_013847/tables/gf_benchmarks.md`
+  - `runs/results/qwen2p5_gf_benchmarks_20260417_013847/tables/gf_benchmarks.tex`
+
+## 2026-05-14 - Clean/GF20/GF40 benchmark 总表检查（无代码改动）
+
+### Scope
+
+- 检查 GF20/GF40 offline benchmark 补跑是否完成，并整理和 clean 单次结果同口径的总表。
+
+### Files changed
+
+- 无代码改动
+
+### Validation / execution
+
+- 结果检查命令
+  - `find runs/results/qwen2p5_gf_benchmarks_20260417_013847/per_run -maxdepth 1 -type f -name '*.json'`
+  - `cat runs/results/qwen2p5_gf_benchmarks_20260417_013847/tables/gf_benchmarks.md`
+  - `cat runs/results/qwen2p5_dpo_test_matrix_20260417_013847.json`
+
+### Result
+
+- GF20/GF40 的 8 个 offline benchmark 结果已全部落盘。
+- 已整理 `clean`、`GF20`、`GF40` 的共同列：
+  - `Val Acc-AUC`
+  - `Test Acc`
+  - `LiveBench-IF`
+  - `RB2 Precise IF`
+  - `IFBench P-Strict`
+
+### Known risks / TODO
+
+- 该总表使用 `20260417_013847` 单次 4-method 结果，以便和 GF20/GF40 对齐；不要和 `20260424_163542` 的 3-seed true-std clean 主表混为同一统计口径。
+
+## 2026-05-16 - GF20/GF40 5% filtering 补跑启动
+
+### Scope
+
+- 补齐 `global_flip20` 与 `global_flip40` 上的 5% filtering 方法结果：
+  - `random_pair_filtering_filt5`
+  - `reward_based_filtering_filt5`
+- 每个 run 训练后立即跑 offline benchmarks：
+  - `LiveBench-IF`
+  - `RewardBench 2 Precise IF`
+  - `IFBench P-Strict`
+
+### Files changed
+
+- `examples/dpo/eval_qwen2p5_gf_benchmarks.py`
+- `examples/dpo/run_qwen2p5_gf_filt5_benchmarks.sh`
+- `develop.md`
+
+### Validation / execution
+
+- 语法检查
+  - `python -m py_compile examples/dpo/eval_qwen2p5_gf_benchmarks.py`
+  - `bash -n examples/dpo/run_qwen2p5_gf_filt5_benchmarks.sh`
+- 启动命令
+  - `tmux new-session -d -s gf_filt5_20260417_013847_20260516_033002 ...`
+- 日志
+  - `runs/results/qwen2p5_gf_benchmarks_20260417_013847/filt5_pipeline.log`
+
+### Result
+
+- SSD 检查显示根盘约剩 `13G`。
+- 已采用顺序 pipeline：训练一个 5% GF run，评测完成后清理该 run 的 `exported_model`，避免 4 个新导出模型同时常驻。
+- 第一条任务 `global_flip20 / random_pair_filtering_filt5` 已进入训练，日志确认：
+  - `flip_scope='global'`
+  - `flip_ratio=0.2`
+  - `curation_variant='random_pair_filtering'`
+  - `curation_keep_ratio=0.95`
+
+### Known risks / TODO
+
+- 需要等待 4 个新 run 全部完成，并检查最终完整表。
+
+## 2026-05-16 - GF 5% pipeline preference metrics 补强
+
+### Scope
+
+- 暂停刚启动的 GF 5% 补跑，将 pipeline 补强为在清理 `exported_model` 前同时计算论文表需要的 preference metrics。
+- 新增 GF benchmark 汇总表的两列：
+  - `Val Acc-AUC`
+  - `Test Acc`
+
+### Files changed
+
+- `examples/dpo/eval_qwen2p5_gf_benchmarks.py`
+- `develop.md`
+
+### Validation / execution
+
+- 暂停命令
+  - `tmux kill-session -t gf_filt5_20260417_013847_20260516_033002`
+  - `kill 178785`
+- 语法检查
+  - `python -m py_compile examples/dpo/eval_qwen2p5_gf_benchmarks.py`
+  - `bash -n examples/dpo/run_qwen2p5_gf_filt5_benchmarks.sh`
+- 磁盘检查
+  - `df -h /home/lhf_hongfu_gmail_com/tunix`
+
+### Result
+
+- `eval_qwen2p5_gf_benchmarks.py` 默认 benchmark 集合扩展为：
+  - `preference`
+  - `livebench_if`
+  - `rewardbench2`
+  - `ifbench`
+- `preference` 会计算：
+  - tensorboard `dpo/eval/rewards/accuracy` 的 normalized AUC
+  - clean `test_prefs` 上的 DPO reward accuracy
+- 根盘仍约剩 `13G`，顺序跑完后清理 `exported_model` 的策略不变。
+
+### Known risks / TODO
+
+- 需要重新启动 tmux pipeline，并等待 4 个 5% GF run 全部完成。
+
+## 2026-05-16 - GF 5% pipeline tmux 重启（含 preference metrics）
+
+### Scope
+
+- 用补强后的评测脚本重新启动 GF20/GF40 5% filtering 顺序补跑。
+
+### Files changed
+
+- `develop.md`
+
+### Validation / execution
+
+- 启动命令
+  - `tmux new-session -d -s gf_filt5_20260417_013847_20260516_033348 ...`
+- 日志
+  - `runs/results/qwen2p5_gf_benchmarks_20260417_013847/filt5_pipeline.log`
+
+### Result
+
+- 新 tmux session 已启动。
+- 第一条任务 `global_flip20 / random_pair_filtering_filt5` 已重新进入训练。
+- 日志确认 `curation_keep_ratio=0.95`，即 filter out 5%、keep 95%。
+
+### Known risks / TODO
+
+- 等待 4 个 run 完成后，补齐 GF 10% 已有 run 的 preference metrics 缓存，并输出 clean/GF20/GF40 完整表。
+
+## 2026-05-16 - GF20/GF40 5% filtering 补跑完成
+
+### Scope
+
+- 完成 `global_flip20` 与 `global_flip40` 的 5% filtering 补跑与评测。
+- 每条 run 均在评测后清理 `exported_model`，保留 checkpoint、tensorboard、per-run JSON 与汇总表。
+
+### Files changed
+
+- `develop.md`
+
+### Validation / execution
+
+- 运行 session
+  - `gf_filt5_20260417_013847_20260516_033348`
+- 结果检查
+  - `find runs/results/qwen2p5_gf_benchmarks_20260417_013847/per_run -maxdepth 1 -type f -name '*filt5*.json'`
+  - `tail -n 100 runs/results/qwen2p5_gf_benchmarks_20260417_013847/filt5_pipeline.log`
+  - `df -h /home/lhf_hongfu_gmail_com/tunix`
+
+### Result
+
+- 已完成并落盘 4 个新结果：
+  - `global_flip20_random_pair_filtering_filt5.json`
+  - `global_flip20_reward_based_filtering_filt5.json`
+  - `global_flip40_random_pair_filtering_filt5.json`
+  - `global_flip40_reward_based_filtering_filt5.json`
+- 最终磁盘恢复到约 `13G` 可用。
+- 新增 5% GF 结果已包含：
+  - `clean_val_acc_auc`
+  - `clean_test_acc`
+  - `livebench_if_score`
+  - `rewardbench2_precise_if`
+  - `ifbench_prompt_strict`
+
+### Known risks / TODO
+
+- Clean 5% rows 来自 clean true-std 系列 run，不属于 legacy `20260417_013847` 单次 run；整理总表时需要明确口径。
+
+## 2026-05-19 - Clean/GF 表格 std 口径核对（无代码改动）
+
+### Scope
+
+- 核对用户请求的 Clean/GF20/GF40 表格是否都有可用 std。
+- 明确表格展示口径：
+  - Clean 使用 `qwen2p5_clean_main_table_20260424_163542` 的 3-seed mean/std。
+  - GF20/GF40 当前为单次 run 结果，std 不可用，展示为 `--`，避免误写成 `0.0000`。
+
+### Files changed
+
+- 无代码改动
+- `develop.md`
+
+### Validation / execution
+
+- 检查命令
+  - `python ... clean_main_table_multiseed.json / gf_benchmark_summary.json`
+  - `find runs/results -maxdepth 3 ...`
+  - `df -h /home/lhf_hongfu_gmail_com/tunix`
+
+### Result
+
+- Clean 表存在完整 3-seed mean/std。
+- GF20/GF40 没有 multi-seed std 汇总文件，只有单次 benchmark summary 与 5% 补跑 JSON。
+- 根盘约剩 `13G` 可用。
+
+### Known risks / TODO
+
+- 如果论文主表要求 GF20/GF40 也必须 mean/std，需要额外对 GF20/GF40 的 6 行方法各补 3-seed 重跑或至少补足重复评测。
+
+## 2026-06-01 - Qwen2.5 DPO experiment runbook
+
+### Scope
+
+- 新增 DPO 实验交接文档，说明当前 clean/GF20/GF40 实验如何复跑、每个命令负责什么、以及当前主表使用哪些 benchmark。
+- 文档不包含结果数值，专注于命令、脚本、输出目录、SSD/tmux 注意事项。
+
+### Files changed
+
+- `examples/dpo/qwen2p5_dpo_experiment_runbook.md`
+- `develop.md`
+
+### Validation / execution
+
+- 核对脚本
+  - `examples/dpo/run_qwen2p5_1p5b_ultrafeedback_from_sft.sh`
+  - `examples/dpo/run_qwen2p5_clean_main_table_pipeline.sh`
+  - `examples/dpo/run_qwen2p5_1p5b_ultrafeedback_from_sft_flip_matrix.sh`
+  - `examples/dpo/run_qwen2p5_gf_filt5_benchmarks.sh`
+  - `examples/dpo/eval_qwen2p5_clean_main_table_runs.py`
+  - `examples/dpo/eval_qwen2p5_gf_benchmarks.py`
+- 检查命令
+  - `git status --short`
+  - `rg -n "random_pair_filtering_filt10|reward_based_filtering_filt10" ...`
+
+### Result
+
+- 已写明：
+  - shared SFT checkpoint 路径
+  - clean/GF20/GF40 dataset 名称
+  - 6 个方法行与 5%/10% filtering 语义
+  - 单 run、full matrix、clean true-std pipeline、GF benchmark eval 的命令
+  - 当前主表使用的 offline benchmark / metrics
+  - SSD 与 tmux 推荐用法
+
+### Known risks / TODO
+
+- GF 10% legacy rows 使用 `random_pair_filtering` / `reward_based_filtering` 兼容名；clean multi-seed pipeline 使用 canonical `*_filt10` 名称。后续如果统一新 run 命名，需要同步扩展 GF evaluator 的发现规则。
+
+## 2026-06-01 - DPO runbook 补充 SFT/DPO 模型来源
+
+### Scope
+
+- 根据用户反馈补充 `qwen2p5_dpo_experiment_runbook.md`，明确模型不是直接从 instruct checkpoint 来，而是先做 full-weight SFT，再用 shared SFT export 初始化 DPO。
+- 新增内容覆盖：
+  - model lineage
+  - SFT base model / data / split / recipe / rerun command
+  - SFT completed run 路径
+  - DPO data split / clean eval-test rule / static corruption rule
+  - DPO LoRA recipe 关键超参数
+
+### Files changed
+
+- `examples/dpo/qwen2p5_dpo_experiment_runbook.md`
+- `develop.md`
+
+### Validation / execution
+
+- 核对来源文件
+  - `examples/ultrafeedback/paper_experiment.md`
+  - `examples/ultrafeedback/README.md`
+  - `examples/sft/ultrafeedback/qwen2p5_1p5b_ultrafeedback.yaml`
+  - `examples/sft/ultrafeedback/run_qwen2p5_1p5b_ultrafeedback.sh`
+  - `examples/dpo/qwen2p5_1p5b_ultrafeedback_from_sft_lora.yaml`
+- 未运行训练或评测。
+
+### Result
+
+- Runbook 现在可向交接人说明：
+  - 如何复现 SFT
+  - 当前 DPO shared SFT initialization 是怎么来的
+  - DPO 训练和评测命令分别测哪些 benchmark
+
+### Known risks / TODO
+
+- 该文档仍是 runbook，不包含结果数值；若要投稿附录式复现实验设置，可再压缩成论文风格段落。

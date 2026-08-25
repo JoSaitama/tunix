@@ -436,37 +436,6 @@ def aggregate_curated_step(
   keep_mask = finite_mask & (per_sample_grad_norms <= cutoff)
   fallback_mask = _fallback_keep_mask(finite_mask)
   keep_mask = jnp.where(jnp.any(keep_mask), keep_mask, fallback_mask)
-
-  # Optional plot diagnostics for the main DTV mechanism figure.
-  # These values are raw-scale decompositions for interpretability:
-  #   DTV_raw = ||g_j||^2 + g_j^T sum_{i!=j} g_i
-  #   LOO_raw = g_j^T sum_{i!=j} g_i
-  # The training score itself remains unchanged.
-  dtv_plot_diag_aux = {}
-  if (
-      str(os.environ.get("DPO_DTV_PLOT_DIAG", "")).lower()
-      in ("1", "true", "yes", "y", "on")
-      and score_mode in ("full", "loo")
-  ):
-    leaves = jax.tree_util.tree_leaves(per_sample_grads)
-    batch_size = leaves[0].shape[0]
-    self_sq_norm = _tree_dot_per_sample(per_sample_grads, per_sample_grads)
-    if score_mode == "full":
-      batch_scale = jnp.asarray(batch_size, dtype=self_inf_scores.dtype)
-      dtv_raw_score = self_inf_scores * batch_scale
-      cross_raw_score = dtv_raw_score - self_sq_norm
-    else:
-      denom = jnp.asarray(max(batch_size - 1, 1), dtype=self_inf_scores.dtype)
-      cross_raw_score = self_inf_scores * denom
-      dtv_raw_score = self_sq_norm + cross_raw_score
-
-    dtv_plot_diag_aux = {
-        "dbc/dtv_diag_dtv_score": dtv_raw_score,
-        "dbc/dtv_diag_self_term": self_sq_norm,
-        "dbc/dtv_diag_cross_term": cross_raw_score,
-        "dbc/dtv_diag_loo_score": cross_raw_score,
-    }
-
   return _finalize_curated_step(
       per_sample_grads=per_sample_grads,
       per_sample_losses=per_sample_losses,
@@ -780,37 +749,6 @@ def aggregate_self_influence_curated_step(
   keep_mask = finite_mask & (self_inf_scores >= dot_threshold)
   fallback_mask = _fallback_keep_mask(finite_mask)
   keep_mask = jnp.where(jnp.any(keep_mask), keep_mask, fallback_mask)
-
-  # Optional plot diagnostics for the main DTV mechanism figure.
-  # These values are raw-scale decompositions for interpretability:
-  #   DTV_raw = ||g_j||^2 + g_j^T sum_{i!=j} g_i
-  #   LOO_raw = g_j^T sum_{i!=j} g_i
-  # The training score itself remains unchanged.
-  dtv_plot_diag_aux = {}
-  if (
-      str(os.environ.get("DPO_DTV_PLOT_DIAG", "")).lower()
-      in ("1", "true", "yes", "y", "on")
-      and score_mode in ("full", "loo")
-  ):
-    leaves = jax.tree_util.tree_leaves(per_sample_grads)
-    batch_size = leaves[0].shape[0]
-    self_sq_norm = _tree_dot_per_sample(per_sample_grads, per_sample_grads)
-    if score_mode == "full":
-      batch_scale = jnp.asarray(batch_size, dtype=self_inf_scores.dtype)
-      dtv_raw_score = self_inf_scores * batch_scale
-      cross_raw_score = dtv_raw_score - self_sq_norm
-    else:
-      denom = jnp.asarray(max(batch_size - 1, 1), dtype=self_inf_scores.dtype)
-      cross_raw_score = self_inf_scores * denom
-      dtv_raw_score = self_sq_norm + cross_raw_score
-
-    dtv_plot_diag_aux = {
-        "dbc/dtv_diag_dtv_score": dtv_raw_score,
-        "dbc/dtv_diag_self_term": self_sq_norm,
-        "dbc/dtv_diag_cross_term": cross_raw_score,
-        "dbc/dtv_diag_loo_score": cross_raw_score,
-    }
-
   return _finalize_curated_step(
       per_sample_grads=per_sample_grads,
       per_sample_losses=per_sample_losses,
@@ -840,7 +778,6 @@ def aggregate_self_influence_curated_step(
               }[score_mode],
               dtype=jnp.float32,
           ),
-          **dtv_plot_diag_aux,
       },
   )
 
@@ -1277,10 +1214,6 @@ class CuratedDPOTrainer(DPOTrainer):
         "dbc/filter_keep_mask",
         "dbc/filter_finite_mask",
         "dbc/filter_method_code",
-        "dbc/dtv_diag_dtv_score",
-        "dbc/dtv_diag_self_term",
-        "dbc/dtv_diag_cross_term",
-        "dbc/dtv_diag_loo_score",
     ]
     diag = {}
     for key in keys:
@@ -1331,39 +1264,6 @@ class CuratedDPOTrainer(DPOTrainer):
 
       step = int(getattr(self, "_train_steps", -1))
       variant = str(getattr(self, "curation_variant", "unknown"))
-
-      # Optional plot diagnostics for DTV decomposition.
-      # This is intentionally a lazy import so the core trainer does not
-      # depend on examples/dpo unless DPO_DTV_PLOT_DIAG is enabled.
-      if (
-          str(os.environ.get("DPO_DTV_PLOT_DIAG", "")).lower()
-          in ("1", "true", "yes", "y", "on")
-          and "dbc/dtv_diag_dtv_score" in diag
-          and "dbc/dtv_diag_self_term" in diag
-      ):
-        try:
-          from examples.dpo.dtv_diagnosis import maybe_log_dtv_decomposition
-
-          n_for_index = int(
-              np.asarray(diag["dbc/dtv_diag_dtv_score"]).reshape(-1).size
-          )
-          window_index = np.arange(n_for_index, dtype=np.int64)
-          global_window_index = step * n_for_index + window_index
-
-          maybe_log_dtv_decomposition(
-              run_dir=self._filter_diag_summary_path.parent.parent,
-              step=step,
-              variant=variant,
-              method_code=method_code,
-              dtv_score=diag["dbc/dtv_diag_dtv_score"],
-              self_term=diag["dbc/dtv_diag_self_term"],
-              cross_term=diag.get("dbc/dtv_diag_cross_term"),
-              loo_score=diag.get("dbc/dtv_diag_loo_score"),
-              window_index=window_index,
-              global_window_index=global_window_index,
-          )
-        except Exception as exc:
-          print(f"[dtv_plot_diagnostics] skipped due to error: {exc}", flush=True)
 
       with self._filter_diag_summary_path.open("a", newline="") as f:
         writer = csv.writer(f)
