@@ -213,6 +213,15 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--show-retention-notes",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Show/hide the actual joint retained fraction in the lower-right "
+            "corner of the Decomposition and Conflict panels (default: show)."
+        ),
+    )
+    parser.add_argument(
         "--conflict-central-coverage",
         type=float,
         default=0.975,
@@ -765,7 +774,7 @@ def _draw_mean_std(
             band_lower,
             band_upper,
             color=fill_color,
-            alpha=0.35,
+            alpha=0.40,
             linewidth=0,
             zorder=zorder - 1,
         )
@@ -776,6 +785,23 @@ def _draw_mean_std(
         linewidth=LINE_W,
         label=label,
         zorder=zorder,
+    )
+
+
+def _annotate_retained_fraction(
+    ax: plt.Axes,
+    retained_fraction: float,
+) -> None:
+    ax.text(
+        0.98,
+        0.03,
+        f"R = {100.0 * retained_fraction:.1f}%",
+        transform=ax.transAxes,
+        ha="right",
+        va="bottom",
+        color=COLOR_DARK_GRAY,
+        fontsize=LEGEND_FS,
+        zorder=30,
     )
 
 
@@ -836,6 +862,8 @@ def plot_score_decomposition(
     coverage_y_ticks: tuple[float, ...],
     coverage_alpha: float,
     coverage_marker_max: float,
+    retained_fraction: float,
+    show_retention_notes: bool,
 ) -> None:
     summary = smooth_for_display(
         summary,
@@ -889,6 +917,8 @@ def plot_score_decomposition(
     ax.set_ylim(*y_limits)
     ax.set_yticks(y_ticks)
     style_axes(ax)
+    if show_retention_notes:
+        _annotate_retained_fraction(ax, retained_fraction)
     handles, labels = ax.get_legend_handles_labels()
     if show_coverage_markers:
         ax.set_position(COVERAGE_AXES_POSITION)
@@ -1177,6 +1207,8 @@ def plot_conflict_means(
     hide_above_limit: bool,
     overflow_bin_size: int,
     overflow_marker_threshold: float,
+    retained_fraction: float,
+    show_retention_notes: bool,
 ) -> pd.DataFrame:
     conflicts = smooth_for_display(
         conflicts,
@@ -1247,6 +1279,8 @@ def plot_conflict_means(
     ax.set_ylim(*y_limits)
     ax.set_yticks(y_ticks)
     style_axes(ax)
+    if show_retention_notes:
+        _annotate_retained_fraction(ax, retained_fraction)
     marker_rows = overflow[
         overflow["above_upper_fraction"] > overflow_marker_threshold
     ]
@@ -1792,6 +1826,8 @@ def main() -> None:
         tuple(args.coverage_y_ticks),
         args.coverage_alpha,
         args.coverage_marker_max,
+        len(trend_samples) / len(analysis_samples),
+        args.show_retention_notes,
     )
     _, actual_drop_y_limits = plot_drop_ratio_story(
         threshold_summary,
@@ -1817,6 +1853,8 @@ def main() -> None:
         args.conflict_hide_above_limit,
         args.conflict_overflow_bin_size,
         args.conflict_overflow_marker_threshold,
+        conflict_retained_fraction,
+        args.show_retention_notes,
     )
     log_scatter_report = plot_log_log_self_protection(
         samples,
@@ -1839,6 +1877,7 @@ def main() -> None:
         "completion_central_coverage": args.completion_central_coverage,
         "completion_quantile_bounds": completion_bounds,
         "trend_retained_fraction": len(trend_samples) / len(analysis_samples),
+        "show_retention_notes": args.show_retention_notes,
         "decomposition_y_ticks": list(args.decomposition_y_ticks),
         "coverage_bin_size": args.coverage_bin_size,
         "coverage_y_limits": list(args.coverage_y_limits),
