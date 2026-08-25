@@ -794,13 +794,13 @@ def _annotate_retained_fraction(
 ) -> None:
     ax.text(
         0.98,
-        0.03,
+        0.00,
         f"R = {100.0 * retained_fraction:.1f}%",
         transform=ax.transAxes,
         ha="right",
         va="bottom",
         color=COLOR_DARK_GRAY,
-        fontsize=LEGEND_FS,
+        fontsize=LEGEND_FS - 2,
         zorder=30,
     )
 
