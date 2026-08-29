@@ -508,6 +508,13 @@ def _sampling_diagnostics(
 
 def run_eval(args: argparse.Namespace) -> dict[str, Any]:
   _maybe_initialize_jax_distributed()
+  print(
+      "EVAL_DISTRIBUTED_IDENTITY "
+      f"hostname={os.uname().nodename} "
+      f"process_index={jax.process_index()} "
+      f"process_count={jax.process_count()}",
+      flush=True,
+  )
   if jax.process_index() != 0:
     print(
         f"Process {jax.process_index()} initialized; primary process performs "

@@ -180,9 +180,54 @@ WORKER_COMMAND="cd $(printf '%q' "$REPO") && export PYTHONPATH=$(printf '%q' "$R
 WORKER_LOG_DIR="${LOG_DIR}/workers"
 mkdir -p "$WORKER_LOG_DIR"
 
-# Worker 0 is the directly connected host. Run it locally so output files are
-# owned by the invoking user. Only Worker 1 is launched through gcloud, whose
-# SSH identity may be a service account with no write access to OUTPUT_DIR.
+sync_remote_primary_artifacts() {
+  local artifact
+  local staging_dir
+  staging_dir="$(mktemp -d "${OUTPUT_DIR}/.remote_primary.XXXXXX")"
+
+  for artifact in samples.jsonl summary.json .primary_done; do
+    if ! gcloud alpha compute tpus tpu-vm scp \
+      --zone="$ZONE" \
+      --worker=1 \
+      --internal-ip \
+      "${TPU_NAME}:${OUTPUT_DIR}/${artifact}" \
+      "${staging_dir}/${artifact}"; then
+      rm -f "${staging_dir}/samples.jsonl" \
+        "${staging_dir}/summary.json" \
+        "${staging_dir}/.primary_done"
+      rmdir "$staging_dir"
+      return 1
+    fi
+  done
+
+  if [[ ! -s "${staging_dir}/samples.jsonl" || \
+        ! -s "${staging_dir}/summary.json" || \
+        ! -s "${staging_dir}/.primary_done" ]]; then
+    echo "Remote primary eval artifacts are incomplete." >&2
+    rm -f "${staging_dir}/samples.jsonl" \
+      "${staging_dir}/summary.json" \
+      "${staging_dir}/.primary_done"
+    rmdir "$staging_dir"
+    return 1
+  fi
+  if [[ "$(wc -l < "${staging_dir}/samples.jsonl")" -ne "$EXPECTED_SAMPLES" ]]; then
+    echo "Remote primary sample count is not ${EXPECTED_SAMPLES}." >&2
+    rm -f "${staging_dir}/samples.jsonl" \
+      "${staging_dir}/summary.json" \
+      "${staging_dir}/.primary_done"
+    rmdir "$staging_dir"
+    return 1
+  fi
+
+  mv "${staging_dir}/samples.jsonl" "${OUTPUT_DIR}/samples.jsonl"
+  mv "${staging_dir}/summary.json" "${OUTPUT_DIR}/summary.json"
+  mv "${staging_dir}/.primary_done" "${OUTPUT_DIR}/.primary_done"
+  rmdir "$staging_dir"
+  echo "REMOTE_PRIMARY_ARTIFACTS_SYNCED worker=1 output=${OUTPUT_DIR}"
+}
+
+# Worker 0 is the directly connected host. Logical JAX process 0 may land on
+# either physical worker, so results are collected below after ranks are known.
 REMOTE_SCRIPT="${WORKER_COMMAND}; worker_status=\$?; echo HOST=\$(hostname) STATUS=\${worker_status}; exit \${worker_status}"
 
 set +e
@@ -212,6 +257,8 @@ if [[ -z "$remote_status" ]]; then
 fi
 
 status=0
+primary_location="unknown"
+remote_primary_artifacts_synced=0
 if [[ "$local_status" -ne 0 || "$remote_status" -ne 0 ]]; then
   status=1
 fi
@@ -220,7 +267,34 @@ cat "${WORKER_LOG_DIR}/local.log" \
   "${WORKER_LOG_DIR}/remote.log" > "${LOG_DIR}/launcher.log"
 
 if [[ "$status" -eq 0 ]]; then
+  local_primary_count="$(grep -c \
+    '^EVAL_DISTRIBUTED_IDENTITY .* process_index=0 ' \
+    "${WORKER_LOG_DIR}/local.log" || true)"
+  remote_primary_count="$(grep -c \
+    '^EVAL_DISTRIBUTED_IDENTITY .* process_index=0 ' \
+    "${WORKER_LOG_DIR}/remote.log" || true)"
+  if [[ "$local_primary_count" -eq 1 && "$remote_primary_count" -eq 0 ]]; then
+    primary_location="worker0"
+    echo "EVAL_PRIMARY_LOCATION=worker0"
+  elif [[ "$local_primary_count" -eq 0 && "$remote_primary_count" -eq 1 ]]; then
+    primary_location="worker1"
+    echo "EVAL_PRIMARY_LOCATION=worker1"
+    if sync_remote_primary_artifacts; then
+      remote_primary_artifacts_synced=1
+    else
+      status=1
+    fi
+  else
+    echo "Unable to identify exactly one logical eval process 0: " \
+      "local=${local_primary_count} remote=${remote_primary_count}." >&2
+    status=1
+  fi
+fi
+
+if [[ "$status" -eq 0 ]]; then
   if [[ ! -f "${OUTPUT_DIR}/summary.json" || ! -f "${OUTPUT_DIR}/.primary_done" ]]; then
+    status=1
+  elif [[ ! -f "${OUTPUT_DIR}/samples.jsonl" ]]; then
     status=1
   elif [[ "$(wc -l < "${OUTPUT_DIR}/samples.jsonl")" -ne "$EXPECTED_SAMPLES" ]]; then
     status=1
@@ -232,6 +306,8 @@ EXIT_CODE=${status}
 LOCAL_STATUS=${local_status}
 REMOTE_SSH_STATUS=${remote_ssh_status}
 REMOTE_STATUS=${remote_status}
+EVAL_PRIMARY_LOCATION=${primary_location}
+REMOTE_PRIMARY_ARTIFACTS_SYNCED=${remote_primary_artifacts_synced}
 FINISHED_UTC=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 SUMMARY_PRESENT=$([[ -f "${OUTPUT_DIR}/summary.json" ]] && echo 1 || echo 0)
 SAMPLES_PRESENT=$([[ -f "${OUTPUT_DIR}/samples.jsonl" ]] && echo 1 || echo 0)
