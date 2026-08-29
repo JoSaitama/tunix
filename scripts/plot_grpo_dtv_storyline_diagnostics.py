@@ -1682,8 +1682,19 @@ def plot_weak_negative_cross_dynamics(
     ax.set_xlabel("Training step", fontsize=LABEL_FS)
     ax.set_ylabel("Negative cross-term magnitude", labelpad=8, fontsize=LABEL_FS)
     style_axes(ax)
+    handles, labels = ax.get_legend_handles_labels()
+    legend_items = {label: handle for handle, label in zip(handles, labels)}
+    legend_order = [
+        label
+        for label in ("Median", "IQR", "p10-p90")
+        if label in legend_items
+    ]
     ax.legend(
-        loc="upper right",
+        [legend_items[label] for label in legend_order],
+        legend_order,
+        loc="upper center",
+        bbox_to_anchor=(0.5, 1.0),
+        ncol=3,
         frameon=False,
         fontsize=LEGEND_FS,
         handlelength=1.0,

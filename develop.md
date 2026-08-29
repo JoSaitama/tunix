@@ -11269,3 +11269,12 @@ This file tracks engineering changes made in this repository.
 - 07图调整：legend改为顶部居中、一行两列；曲线、bin计算、band和输出文件不变。
 - 验证命令与结果：`python3 -m py_compile scripts/plot_grpo_dtv_storyline_diagnostics.py`与`git diff --check`均通过。使用标准库按新增图的`seed×20-step bin`等权quantile口径复核35个bins：首bin p10/p25/median/p75/p90为0.174/0.477/1.318/3.624/9.028，末bin为0.046/0.116/0.370/1.083/2.449，确认median及整个分布区间均明显向0收缩。当前本机Python缺少Matplotlib/Pandas，实际渲染仍需用户DPO环境。
 - 已知风险/待办：该图使用seed-balanced quantile aggregation，caption需注明band是completion分布的IQR而不是跨seed std/SEM；raw magnitude只适合GSM8K内部解释，跨任务仍应使用无量纲relative contribution。
+
+## 2026-08-29 — 弱负Cross图legend与论文样式复核
+
+- 改动范围：仅调整`10_weak_negative_cross_dynamics`的legend布局与项目顺序，不修改bin、quantile或任何数据计算。
+- 修改文件：`scripts/plot_grpo_dtv_storyline_diagnostics.py`、`develop.md`。
+- Legend调整：顶部居中、单行最多三列，顺序固定为`Median`、`IQR`、`p10-p90`；未启用`--show-weak-negative-whiskers`时不虚构第三项，legend保持同一行的两项。
+- 样式复核：figure size复用`MAIN_FIGSIZE=(5.9,5.2)`；轴标题/刻度/legend分别复用`LABEL_FS=24`、`TICK_FS=22`、`LEGEND_FS=19`；median主线复用`LINE_W=1.0`；IQR band透明度0.40与现有decomposition/conflict band一致；spine 0.9、grid 0.7及axes position均由`style_axes`统一。p10–p90 whisker线宽0.7、alpha 0.35，作为次级分布提示有意弱于主线。
+- 验证命令与结果：`python3 -m py_compile scripts/plot_grpo_dtv_storyline_diagnostics.py`与`git diff --check`均通过；复核确认08 DTV-lambda legend仍为原来的右上角，只有10弱负Cross图使用新的顶部三列布局。
+- 已知风险/待办：三列legend只有启用whiskers时包含三项；否则显示Median与IQR两项，避免图例声明未绘制的统计量。
