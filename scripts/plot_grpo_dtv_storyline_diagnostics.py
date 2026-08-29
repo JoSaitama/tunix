@@ -300,6 +300,66 @@ def parse_args() -> argparse.Namespace:
         help="Explicit drop-ratio limits; default chooses a non-clipping upper bound.",
     )
     parser.add_argument(
+        "--relative-cross-bin-size",
+        type=int,
+        default=50,
+        help=(
+            "Training-step bin width for relative Cross-contribution dynamics "
+            "(default: 50)."
+        ),
+    )
+    parser.add_argument(
+        "--relative-cross-band-mode",
+        choices=("std", "sem", "none"),
+        default="std",
+        help=(
+            "Across-seed uncertainty band for relative Cross-contribution "
+            "dynamics (default: std)."
+        ),
+    )
+    parser.add_argument(
+        "--relative-cross-y-limits",
+        nargs=2,
+        type=float,
+        default=(0.0, 0.30),
+        metavar=("YMIN", "YMAX"),
+        help="Explicit relative Cross-contribution y-axis limits.",
+    )
+    parser.add_argument(
+        "--relative-cross-y-ticks",
+        nargs="+",
+        type=float,
+        default=(0.0, 0.1, 0.2, 0.3),
+        help="Explicit relative Cross-contribution y ticks.",
+    )
+    parser.add_argument(
+        "--lambda-grid-size",
+        type=int,
+        default=101,
+        help="Number of equally spaced DTV-lambda values in [0, 1].",
+    )
+    parser.add_argument(
+        "--lambda-band-mode",
+        choices=("std", "sem", "none"),
+        default="std",
+        help="Across-seed uncertainty band for the DTV-lambda path.",
+    )
+    parser.add_argument(
+        "--lambda-y-limits",
+        nargs=2,
+        type=float,
+        default=(0.0, 0.35),
+        metavar=("YMIN", "YMAX"),
+        help="Explicit DTV-lambda drop-ratio y-axis limits.",
+    )
+    parser.add_argument(
+        "--lambda-y-ticks",
+        nargs="+",
+        type=float,
+        default=(0.0, 0.1, 0.2, 0.3),
+        help="Explicit DTV-lambda drop-ratio y ticks.",
+    )
+    parser.add_argument(
         "--smooth-window",
         type=int,
         default=1,
@@ -321,6 +381,10 @@ def parse_args() -> argparse.Namespace:
         parser.error("--scatter-quantile must be in (0.5, 1.0)")
     if args.drop_bin_size <= 0:
         parser.error("--drop-bin-size must be positive")
+    if args.relative_cross_bin_size <= 0:
+        parser.error("--relative-cross-bin-size must be positive")
+    if args.lambda_grid_size < 2:
+        parser.error("--lambda-grid-size must be at least 2")
     if args.coverage_bin_size <= 0:
         parser.error("--coverage-bin-size must be positive")
     if not 0.0 <= args.coverage_alpha <= 1.0:
@@ -351,6 +415,8 @@ def parse_args() -> argparse.Namespace:
         "decision_y_limits",
         "drop_y_limits",
         "coverage_y_limits",
+        "relative_cross_y_limits",
+        "lambda_y_limits",
     ):
         limits = getattr(args, option)
         if limits is None:
@@ -1044,6 +1110,328 @@ def plot_drop_ratio_story(
     return binned, y_limits
 
 
+def build_relative_cross_dynamics(
+    samples: pd.DataFrame,
+    bin_size: int,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Aggregate bounded per-completion Cross contribution without trimming."""
+    work = samples[
+        ["seed", "step", "self_term", "cross_term", "kept_dtv", "kept_loo"]
+    ].copy()
+    denominator = work["self_term"] + work["cross_term"].abs()
+    valid = np.isfinite(denominator) & (denominator > 0.0)
+    work = work[valid].copy()
+    if work.empty:
+        raise ValueError("no nonzero samples for relative Cross contribution")
+
+    work["relative_cross_contribution"] = (
+        work["cross_term"].abs()
+        / (work["self_term"] + work["cross_term"].abs())
+    )
+    work["self_protected_conflict"] = work["kept_dtv"] & ~work["kept_loo"]
+    work["step_bin"] = (work["step"].astype(int) - 1) // bin_size
+
+    all_per_seed = (
+        work.groupby(["seed", "step_bin"], as_index=False, sort=True)
+        .agg(
+            step=("step", "mean"),
+            eta_all=("relative_cross_contribution", "median"),
+            all_nonzero_count=("relative_cross_contribution", "size"),
+        )
+    )
+    conflict_per_seed = (
+        work[work["self_protected_conflict"]]
+        .groupby(["seed", "step_bin"], as_index=False, sort=True)
+        .agg(
+            eta_conflict=("relative_cross_contribution", "median"),
+            conflict_count=("relative_cross_contribution", "size"),
+        )
+    )
+    per_seed = all_per_seed.merge(
+        conflict_per_seed,
+        on=["seed", "step_bin"],
+        how="left",
+        validate="one_to_one",
+    )
+    summary = (
+        per_seed.groupby("step_bin", as_index=False, sort=True)
+        .agg(
+            step=("step", "mean"),
+            eta_all_mean=("eta_all", "mean"),
+            eta_all_std=("eta_all", "std"),
+            eta_all_seed_count=("eta_all", "count"),
+            eta_conflict_mean=("eta_conflict", "mean"),
+            eta_conflict_std=("eta_conflict", "std"),
+            eta_conflict_seed_count=("eta_conflict", "count"),
+            all_nonzero_count=("all_nonzero_count", "sum"),
+            conflict_count=("conflict_count", "sum"),
+        )
+    )
+    summary[["eta_all_std", "eta_conflict_std"]] = summary[
+        ["eta_all_std", "eta_conflict_std"]
+    ].fillna(0.0)
+    summary["conflict_count"] = summary["conflict_count"].fillna(0).astype(int)
+    return work, per_seed, summary
+
+
+def plot_relative_cross_contribution_dynamics(
+    samples: pd.DataFrame,
+    output_dir: Path,
+    bin_size: int,
+    band_mode: str,
+    y_limits: tuple[float, float],
+    y_ticks: tuple[float, ...],
+) -> dict[str, Any]:
+    work, per_seed, summary = build_relative_cross_dynamics(samples, bin_size)
+    x = summary["step"].to_numpy(dtype=np.float64)
+    suffix = {
+        "std": " median ± 1 std",
+        "sem": " median ± 1 sem",
+        "none": " median",
+    }[band_mode]
+
+    fig, ax = plt.subplots(figsize=MAIN_FIGSIZE)
+    _draw_mean_std(
+        ax,
+        x,
+        summary["eta_all_mean"].to_numpy(dtype=np.float64),
+        summary["eta_all_std"].to_numpy(dtype=np.float64),
+        COLOR_DTV,
+        COLOR_DTV_FILL,
+        "All nonzero:" + suffix,
+        5,
+        y_limits,
+        band_mode,
+        summary["eta_all_seed_count"].to_numpy(dtype=np.float64),
+    )
+    _draw_mean_std(
+        ax,
+        x,
+        summary["eta_conflict_mean"].to_numpy(dtype=np.float64),
+        summary["eta_conflict_std"].to_numpy(dtype=np.float64),
+        COLOR_LOO,
+        COLOR_LOO_FILL,
+        "Conflicts:" + suffix,
+        6,
+        y_limits,
+        band_mode,
+        summary["eta_conflict_seed_count"].to_numpy(dtype=np.float64),
+    )
+    ax.set_xlabel("Training step", fontsize=LABEL_FS)
+    ax.set_ylabel("Relative cross contribution", labelpad=8, fontsize=LABEL_FS)
+    ax.set_ylim(*y_limits)
+    ax.set_yticks(y_ticks)
+    style_axes(ax)
+    ax.legend(
+        loc="upper right",
+        frameon=False,
+        fontsize=LEGEND_FS,
+        handlelength=1.0,
+        handletextpad=0.35,
+        labelspacing=0.35,
+        borderpad=0.0,
+    )
+    savefig(fig, output_dir / "07_relative_cross_contribution_dynamics.png")
+    per_seed.to_csv(
+        output_dir / "grpo_dtv_relative_cross_contribution_per_seed_bin.csv",
+        index=False,
+    )
+    summary.to_csv(
+        output_dir / "grpo_dtv_relative_cross_contribution_dynamics.csv",
+        index=False,
+    )
+
+    all_values = work["relative_cross_contribution"].to_numpy(dtype=np.float64)
+    conflict_values = work.loc[
+        work["self_protected_conflict"], "relative_cross_contribution"
+    ].to_numpy(dtype=np.float64)
+    report = {
+        "relative_cross_nonzero_samples": int(len(work)),
+        "relative_cross_zero_denominator_samples": int(len(samples) - len(work)),
+        "eta_all_median": float(np.median(all_values)),
+        "eta_conflict_samples": int(len(conflict_values)),
+        "eta_conflict_median": float(np.median(conflict_values)),
+        "relative_cross_bin_size": int(bin_size),
+        "relative_cross_band_mode": band_mode,
+    }
+    path = output_dir / "grpo_dtv_relative_cross_contribution_summary.json"
+    path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+    print(f"[SAVE] {path}")
+    return report
+
+
+def build_lambda_retention_path(
+    samples: pd.DataFrame,
+    grid_size: int,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Re-evaluate zero-threshold decisions on a fixed trajectory over lambda."""
+    lambdas = np.linspace(0.0, 1.0, grid_size, dtype=np.float64)
+    rows: list[dict[str, float | str]] = []
+    for seed, group in samples.groupby("seed", sort=False):
+        self_term = group["self_term"].to_numpy(dtype=np.float64)
+        cross_term = group["cross_term"].to_numpy(dtype=np.float64)
+        scores = cross_term[:, None] + self_term[:, None] * lambdas[None, :]
+        dropped = scores < 0.0
+        loo_dropped = cross_term < 0.0
+        additional_retained = loo_dropped[:, None] & ~dropped
+        loo_drop_count = int(np.sum(loo_dropped))
+        conditional_rescue = (
+            additional_retained.mean(axis=0) * len(group) / loo_drop_count
+            if loo_drop_count > 0
+            else np.zeros_like(lambdas)
+        )
+        for index, lambda_value in enumerate(lambdas):
+            rows.append(
+                {
+                    "seed": str(seed),
+                    "lambda": float(lambda_value),
+                    "drop_ratio": float(dropped[:, index].mean()),
+                    "additional_retained_ratio": float(
+                        additional_retained[:, index].mean()
+                    ),
+                    "conditional_rescue_fraction": float(
+                        conditional_rescue[index]
+                    ),
+                }
+            )
+
+    per_seed = pd.DataFrame(rows)
+    summary = (
+        per_seed.groupby("lambda", as_index=False, sort=True)
+        .agg(
+            drop_ratio_mean=("drop_ratio", "mean"),
+            drop_ratio_std=("drop_ratio", "std"),
+            seed_count=("drop_ratio", "count"),
+            additional_retained_ratio_mean=("additional_retained_ratio", "mean"),
+            additional_retained_ratio_std=("additional_retained_ratio", "std"),
+            conditional_rescue_fraction_mean=(
+                "conditional_rescue_fraction",
+                "mean",
+            ),
+            conditional_rescue_fraction_std=(
+                "conditional_rescue_fraction",
+                "std",
+            ),
+        )
+    )
+    std_columns = [column for column in summary if column.endswith("_std")]
+    summary[std_columns] = summary[std_columns].fillna(0.0)
+    return per_seed, summary
+
+
+def plot_lambda_retention_path(
+    samples: pd.DataFrame,
+    output_dir: Path,
+    grid_size: int,
+    band_mode: str,
+    y_limits: tuple[float, float],
+    y_ticks: tuple[float, ...],
+) -> dict[str, Any]:
+    per_seed, summary = build_lambda_retention_path(samples, grid_size)
+    x = summary["lambda"].to_numpy(dtype=np.float64)
+    mean = summary["drop_ratio_mean"].to_numpy(dtype=np.float64)
+    std = summary["drop_ratio_std"].to_numpy(dtype=np.float64)
+    suffix = {
+        "std": r" mean $\pm$ 1 std",
+        "sem": r" mean $\pm$ 1 sem",
+        "none": " mean",
+    }[band_mode]
+
+    fig, ax = plt.subplots(figsize=MAIN_FIGSIZE)
+    _draw_mean_std(
+        ax,
+        x,
+        mean,
+        std,
+        COLOR_DTV,
+        COLOR_DTV_FILL,
+        r"DTV-$\lambda$" + suffix,
+        5,
+        y_limits,
+        band_mode,
+        summary["seed_count"].to_numpy(dtype=np.float64),
+    )
+    ax.scatter(
+        [0.0, 1.0],
+        [mean[0], mean[-1]],
+        s=38,
+        color=[COLOR_LOO, COLOR_DTV],
+        edgecolors="none",
+        zorder=8,
+    )
+    ax.annotate(
+        "DTV-Loo",
+        (0.0, mean[0]),
+        xytext=(7, 6),
+        textcoords="offset points",
+        ha="left",
+        va="bottom",
+        fontsize=max(14, LEGEND_FS - 3),
+        color=COLOR_LOO,
+    )
+    ax.annotate(
+        "DTV",
+        (1.0, mean[-1]),
+        xytext=(-7, 6),
+        textcoords="offset points",
+        ha="right",
+        va="bottom",
+        fontsize=max(14, LEGEND_FS - 3),
+        color=COLOR_DTV,
+    )
+    ax.set_xlim(0.0, 1.0)
+    ax.set_xticks(np.arange(0.0, 1.01, 0.2))
+    ax.set_ylim(*y_limits)
+    ax.set_yticks(y_ticks)
+    ax.set_xlabel(r"Self-term weight $\lambda$", fontsize=LABEL_FS)
+    ax.set_ylabel("Drop ratio", labelpad=8, fontsize=LABEL_FS)
+    style_axes(ax)
+    ax.legend(
+        loc="upper right",
+        frameon=False,
+        fontsize=LEGEND_FS,
+        handlelength=1.0,
+        handletextpad=0.35,
+        labelspacing=0.35,
+        borderpad=0.0,
+    )
+    savefig(fig, output_dir / "08_dtv_lambda_retention_path.png")
+    per_seed.to_csv(
+        output_dir / "grpo_dtv_lambda_retention_path_per_seed.csv", index=False
+    )
+    summary.to_csv(
+        output_dir / "grpo_dtv_lambda_retention_path.csv", index=False
+    )
+
+    self_term = samples["self_term"].to_numpy(dtype=np.float64)
+    cross_term = samples["cross_term"].to_numpy(dtype=np.float64)
+    conflicts = (cross_term < 0.0) & (cross_term + self_term >= 0.0) & (self_term > 0.0)
+    critical_lambda = np.abs(cross_term[conflicts]) / self_term[conflicts]
+    loo_drop_ratio = float(np.mean(cross_term < 0.0))
+    dtv_drop_ratio = float(np.mean(cross_term + self_term < 0.0))
+    additional_retained_ratio = float(
+        np.mean((cross_term < 0.0) & (cross_term + self_term >= 0.0))
+    )
+    report = {
+        "lambda_grid_size": int(grid_size),
+        "lambda_band_mode": band_mode,
+        "lambda_0_loo_drop_ratio": loo_drop_ratio,
+        "lambda_1_dtv_drop_ratio": dtv_drop_ratio,
+        "lambda_1_additional_retained_ratio": additional_retained_ratio,
+        "lambda_1_conditional_rescue_fraction": float(
+            additional_retained_ratio / loo_drop_ratio
+        ) if loo_drop_ratio > 0.0 else 0.0,
+        "critical_lambda_samples": int(len(critical_lambda)),
+        "critical_lambda_median": float(np.median(critical_lambda)),
+        "critical_lambda_p25": float(np.quantile(critical_lambda, 0.25)),
+        "critical_lambda_p75": float(np.quantile(critical_lambda, 0.75)),
+    }
+    path = output_dir / "grpo_dtv_lambda_retention_summary.json"
+    path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+    print(f"[SAVE] {path}")
+    return report
+
+
 def classify_decisions(samples: pd.DataFrame) -> pd.Series:
     kept_dtv = samples["kept_dtv"].to_numpy(dtype=bool)
     kept_loo = samples["kept_loo"].to_numpy(dtype=bool)
@@ -1570,6 +1958,10 @@ def write_validation_report(
             "Conflict plots use raw threshold disagreements; exact-zero samples "
             "are retained by both methods and therefore are not conflicts.",
             "LOO decisions use the raw zero-score threshold, not the final cap mask.",
+            "Relative Cross contribution uses untrimmed finite units with "
+            "Self+abs(Cross)>0; exact-zero units remain in filtering statistics.",
+            "The DTV-lambda curve is an offline decision-sensitivity analysis "
+            "on the observed trajectory, not a lambda performance ablation.",
             "No advantage or reward fields are loaded or analyzed.",
         ],
     }
@@ -1866,6 +2258,22 @@ def main() -> None:
         samples,
         output_dir,
     )
+    relative_cross_report = plot_relative_cross_contribution_dynamics(
+        analysis_samples,
+        output_dir,
+        args.relative_cross_bin_size,
+        args.relative_cross_band_mode,
+        tuple(args.relative_cross_y_limits),
+        tuple(args.relative_cross_y_ticks),
+    )
+    lambda_retention_report = plot_lambda_retention_path(
+        analysis_samples,
+        output_dir,
+        args.lambda_grid_size,
+        args.lambda_band_mode,
+        tuple(args.lambda_y_limits),
+        tuple(args.lambda_y_ticks),
+    )
     plot_config = {
         "analysis_population": args.analysis_population,
         "analysis_population_samples": len(analysis_samples),
@@ -1900,6 +2308,16 @@ def main() -> None:
         "drop_bin_size": args.drop_bin_size,
         "drop_ymin": actual_drop_y_limits[0],
         "drop_ymax": actual_drop_y_limits[1],
+        "relative_cross_bin_size": args.relative_cross_bin_size,
+        "relative_cross_band_mode": args.relative_cross_band_mode,
+        "relative_cross_y_limits": list(args.relative_cross_y_limits),
+        "relative_cross_y_ticks": list(args.relative_cross_y_ticks),
+        "relative_cross_report": relative_cross_report,
+        "lambda_grid_size": args.lambda_grid_size,
+        "lambda_band_mode": args.lambda_band_mode,
+        "lambda_y_limits": list(args.lambda_y_limits),
+        "lambda_y_ticks": list(args.lambda_y_ticks),
+        "lambda_retention_report": lambda_retention_report,
         "smooth_window": args.smooth_window,
     }
     write_validation_report(

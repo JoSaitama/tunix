@@ -10580,3 +10580,646 @@ This file tracks engineering changes made in this repository.
 - 修改文件：新增 `AIME_POLICY_METHOD_PORT_REFERENCE.md`；更新 `develop.md`。无 Python、Shell 或训练逻辑改动。
 - 验证命令与结果：使用 `git show --name-only` 核对功能提交 `bedb18c`、`8b5396f`、`db67150`、`2d13863`、`86445a5`、`66659ad`、`8e119d8` 的实际文件范围；清单与提交记录一致。
 - 已知风险/待办：AIME 为 Agentic GRPO + distributed vLLM，公共 learner/cluster/CLI 文件只能逐段适配；不能用 GSM8K 文件整文件覆盖。
+
+## 2026-08-03：确定 Clean 五 Seed 补充方案
+
+- 改动范围：将 Clean 主实验的五个 matched seeds 固定为 `0, 5, 13, 21, 42`；建议按单个 seed、三个方法顺序运行，以便在两个 seed 之间核验并释放模型空间。
+- 修改文件：仅更新 `develop.md`；无代码改动。
+- 验证命令与结果：未启动训练；确认现有 suite 支持 `--seeds`、`--mismatch`、`--methods` 参数。
+- 已知风险/待办：所有后续 Baseline、DTV、Random、Reward 方法必须复用相同 seed 集；删除模型/checkpoint 前必须确认训练成功且结果日志完整。
+
+## 2026-08-04：核对 Reward Filter 与 DTV Scope 的当前实现
+
+- 改动范围：定点核对 Group/Batch DTV、Group/Batch Reward Filter 和 LOO 的公式、排序范围及 Full-mask 更新流程。
+- 修改文件：仅更新 `develop.md`；无代码改动。
+- 验证命令与结果：确认 Reward Filter 使用完整 prompt group 计算得到的 observed advantage；Group scope 独立对每组 Bottom-K，Batch scope 对当前训练 batch 全体 advantage Bottom-K；LOO 仅改变 DTV 参考梯度，不参与 Reward Filter。
+- 已知风险/待办：固定比例使用随机舍入，因此单步实际过滤数可波动，但长期期望比例等于配置值。
+
+## 2026-08-23：确认 Reward Filter 与 DTV Scope 的关系
+
+- 改动范围：确认当前 Reward Filter 使用完整 prompt group 计算的 observed advantage，并分别在 Group 或 Batch 范围内执行固定期望比例的 Bottom-K；DTV-Loo 仅改变梯度参考方向，不影响 Reward Filter。
+- 修改文件：仅更新 `develop.md`；无代码改动。
+- 验证命令与结果：复用 2026-08-04 已完成的定点代码核对结果，本轮未重新搜索或执行训练。
+- 已知风险/待办：Group 固定比例因每组仅四个 completion 而采用随机舍入，单组实际比例会离散波动。
+
+## 2026-08-16：GRPO/GSM8K 论文资料的代码与结果证据核对
+
+- 改动范围：只读核对 GSM8K 最终训练入口、配置、数据/评估协议、Policy-DTV/Policy-DTV-LOO、Random/Reward fixed filter 与 clean/mismatch 实现，并盘点本地可用结果证据；无训练代码或脚本改动（无代码改动）。
+- 修改文件：`develop.md`。
+- 验证命令与结果：使用 `rg`、`sed`、`find` 检查 `my_example/`、`tunix/rl/`、`scripts/grpo_three_seed_audit.sh`、`develop.md` 及 AIME 姐妹工作区；确认当前 GSM8K 实际入口为 Gemma-3-1B-IT、4 prompts × 4 completions、691 updates、beta 0.08、Policy-score/Full-mask 主方法路径；确认 filtering unit 是单条 completion gradient，Group 仅定义打分参照集。
+- 结果证据：本地无 `logs/`、`runs/` 或服务器导出的 raw CSV/JSON/TensorBoard/figure artifacts；仅 `develop.md` 保留部分已接受的 seed-0、clean three-seed aggregate 和 preliminary mismatch 摘要，因此不将未保存的 raw 表、显著性、convergence 图或 timing 结论补猜为论文事实。
+- 已知风险/待办：论文冻结前需从服务器导出最终 5-seed clean/mismatch 的 raw `eval_accuracy_meta.json`、selection JSONL、TensorBoard scalars 与作图产物；当前本地证据不足以确认最终实际跑齐的 Random/Reward ratios、显著性、fidelity/convergence 命名或当前 AIME 方法结果。
+
+## 2026-08-16：新增 GRPO/GSM8K 论文实验交接文档
+
+- 改动范围：将已核对的 GRPO setup、GSM8K 数据/评估协议、DTV/LOO/fixed-filter/mismatch 实现、可用历史结果和缺失资料整理为独立 Markdown 交接文档；无训练代码或脚本改动。
+- 修改文件：新增 `GRPO_GSM8K_PAPER_HANDOFF.md`；更新 `develop.md`。
+- 验证命令与结果：运行 `git diff --check`，并检查文档标题、主要章节和源文件列表；Markdown 文档已生成。
+- 已知风险/待办：文档中的数值部分仍受本地缺少服务器 raw logs/results/figures 限制；收到最终五-seed 原始产物后需再更新结果表、显著性、convergence 和 AIME 章节。
+
+## 2026-08-22：评估 GSM8K Group Policy-DTV-LOO JSONL 的 self/cross 作图可行性
+
+- 改动范围：只读审计用户提供的 DPO 诊断绘图脚本和一份 GSM8K Group Policy-DTV-LOO selection JSONL，评估是否能在不重跑梯度的前提下生成 DTV self/cross 分解、冲突样本和 filtering-region 图；无训练代码、脚本或绘图文件改动（无代码改动）。
+- 修改文件：`develop.md`。
+- 验证命令与结果：使用 Python 标准库逐行解析 `selfinf-group_loo_policy__grpo_20260803_234541__selection.jsonl`；确认 691 条记录对应 steps 1--691，每步 16 个样本，group/generation indices 严格为 4 prompts x 4 completions，元数据为 `scope=group`、`num_generations=4`、`min_keep_fraction=0.25`、`score_objective=policy`；所有必要数组长度正确，无 NaN/Inf，threshold/cap masks 与公式一致。
+- 数据结论：JSONL 直接包含 `raw_self`、`raw_cross_sum`、standard self/cross/DTV score、strict LOO score、threshold mask 和 cap 后 final mask，足以支持 DPO 图 01/03/04 的 GRPO 版本并可额外生成 02 drop-ratio 图。当前文件不包含 advantage/reward，因此不支持 advantage-conditioned 分层或相关性图；但这不阻塞原三张 self-protection 图。
+- 已知风险/待办：附件只有一个 seed，最终 5-seed 图需其余四份同 schema JSONL 及明确 seed/path 映射；GRPO self term 有极大尖峰（单个样本最大约 `1.57e7`），不能直接复用 DPO 的固定 y 轴，需在不改变原始统计口径的前提下明确 robust display/inset 方案；主图的 DTV-LOO decision region 建议使用 raw threshold mask，将 25% cap 后 actual mask 单独报告，避免与 `cross=0` 理论边界混淆。
+
+## 2026-08-22：新增 GSM8K GRPO DTV self/cross 五-seed 绘图脚本
+
+- 改动范围：根据用户确认的方案，新增一个仅面向 GSM8K Group Policy-DTV-LOO selection JSONL 的绘图脚本；直接接收五份 JSONL 路径，不读取或分析 advantage/reward，不修改训练实现。
+- 修改文件：新增 `scripts/plot_grpo_dtv_storyline_diagnostics.py`；更新 `develop.md`。
+- 实现要点：使用 `standard_self_term`、`standard_cross_term` 和二者之和构造可加的 DTV decomposition；DTV-LOO 决策使用 raw `loo_score >= 0`，不使用 cap 后 final mask；01/04 的 mean 和 sample std 使用全量原始数值；03 scatter 仅在显示层按中心分位数自动设置横纵轴，不影响任何统计或 CSV。
+- 输出：生成风格与 DPO 图一致的 01 score decomposition、02 drop-ratio、03 decision-region scatter、04 self-protected-conflict mean/std PNG/PDF，并输出 samples、per-seed-step、five-seed per-step、conflict 和 overall summary CSV 以及 input validation JSON。
+- 验证命令与结果：`python3 -m py_compile scripts/plot_grpo_dtv_storyline_diagnostics.py` 通过；`git diff --check` 通过；脚本已设为可执行。当前本地 Python 缺少 NumPy，未伪造五份输入运行绘图；最终五-seed 验证需在服务器使用五份真实 JSONL 执行。
+- 已知风险/待办：当前本地 Python 环境未安装 NumPy/Pandas/Matplotlib，因此本地只能执行语法/静态验证；服务器 DPO 环境需包含这三个已有作图依赖。用户提供的单 seed JSONL 实际记录了 cap 触发，但本脚本按理论决策边界要求明确忽略 final cap mask。
+
+## 2026-08-22：诊断 GRPO 五-seed 绘图启动路径错误
+
+- 改动范围：只读诊断服务器上 `plot_grpo_dtv_storyline_diagnostics.py` 的 `FileNotFoundError`；无代码或脚本改动（无代码改动）。
+- 修改文件：`develop.md`。
+- 验证与结果：对照 `run_seeded_full.sh` 和各 method launcher 的输出结构，确认 selection JSONL 存放在 `results/` 而不是 `result/`；用户命令中 `JSON21` 误指 seed42 目录，`JSON42` 误指 seed5 目录，两者目录 seed 与文件 timestamp 也不一致。
+- 已知风险/待办：应先用 `find` 在每个明确 run directory 内解析唯一 `*selection.jsonl`，逐个执行 `test -f` 后再绘图；当前五份数据均为 `mismatch0p2`，图标题与输出目录不应标为 Clean。
+
+## 2026-08-22：改善 GRPO DTV storyline 图的异常值与密集 step 显示
+
+- 改动范围：仅调整 GSM8K GRPO DTV 诊断图的显示层，不改变 self/cross/DTV 的全量均值、标准差、decision 分类或 CSV 数据。
+- 修改文件：`scripts/plot_grpo_dtv_storyline_diagnostics.py`；更新 `develop.md`。
+- 实现要点：01/04 默认固定 score y 轴为 `[-10, 30]`，极端值仍参与 mean/std 但在图外裁切；03 默认固定 x 轴 `[-45, 90]`、y 轴 `[0, 500]` 并使用稀疏刻度；02 默认将相邻 20 个 training steps 的 drop ratio 平均为一个 stacked bar，降低 691 根细线造成的视觉噪声。以上范围和 bin size 均可由 CLI 覆盖；旧 `--scatter-quantile` 参数保留兼容但不再控制坐标。
+- 验证命令与结果：`python3 -m py_compile scripts/plot_grpo_dtv_storyline_diagnostics.py` 与 `git diff --check` 均通过；本机直接执行 `--help` 因未安装 Matplotlib 而停止，未进行本地渲染。
+- 单 seed 辅助核对：对现有 691-step JSONL 用标准库重新统计 raw threshold decisions，共 11,056 completions，其中 both-keep 78.98%、DTV-only keep 19.26%、both-drop 1.76%、LOO-only keep 0%；这说明该 seed 上 DTV 与 LOO 的主要差异同时包含显著的 retention-rate 差异，不能只凭 self-term 大小推断最终 accuracy 原因。
+- 已知风险/待办：本地环境仍缺少 NumPy/Pandas/Matplotlib，无法用五份服务器 JSONL 完成渲染验收；固定坐标之外的点仅从图面裁切，仍完整保留在统计和导出文件中。
+
+## 2026-08-22：拆分 GRPO mean/std 坐标并增加显示平滑
+
+- 改动范围：继续改善 GSM8K GRPO DTV 诊断图的显示控制，并静态复核五-seed std 聚合口径；不改变原始 score、raw threshold decision 或 CSV 数据。
+- 修改文件：`scripts/plot_grpo_dtv_storyline_diagnostics.py`；更新 `develop.md`。
+- 实现要点：decision 图横纵刻度改由 Matplotlib 根据任意 CLI axis limits 自动生成；drop-ratio y 轴固定为 `[0, 0.4]`；01 decomposition 和 04 conflict 分别使用 `--decomposition-y-limits` 与 `--conflict-y-limits`，旧 `--score-y-limits` 仅作为兼容 alias；新增 `--smooth-window`，默认 1 保留单步曲线，2 以上仅对绘图 mean/std 作 centered rolling average，raw CSV 不变。
+- std 核对：01 先在每个 seed/step 内对 16 completions 求 mean，再对同一 step 的五个 seed means 求 sample std，口径正确；04 仅对当步实际存在 self-protected conflict 的 seeds 求 std，因此 `seeds_with_conflicts` 随 step 变化，不能解读为每一步固定五-seed uncertainty。
+- 验证命令与结果：运行 `python3 -m py_compile scripts/plot_grpo_dtv_storyline_diagnostics.py` 与 `git diff --check`。
+- 已知风险/待办：平滑是展示层处理，不应用于显著性或数值报告；极端 self-term 仍进入原始 mean/std，较大的平滑窗口可能掩盖短期事件，论文图应同时保留未经平滑的 CSV 和明确披露窗口宽度。
+
+## 2026-08-22：修复 GRPO mean/std 实线并采用有效梯度分母
+
+- 改动范围：修复绘图回归，明确 inactive completion 的统计口径，并微调所有图的 y 轴视觉格式；不修改训练实现或 JSONL 原始数据。
+- 修改文件：`scripts/plot_grpo_dtv_storyline_diagnostics.py`；更新 `develop.md`。
+- 修复内容：恢复 `_draw_mean_std` 中因上一轮重构误置到 `return` 后的 mean line 绘制；此前浅色输出只有 fill band、没有实线，属于绘图代码错误。drop-ratio y 上限改为 0.35；所有图隐藏最高可见 y tick 的数字但保留边框/网格。
+- 有效分母：以严格的 `raw_self > 0` 标记 nonzero policy-gradient signal；per-step score mean/std、drop ratio、decision scatter 和 overall summary 排除 `raw_self == 0`，samples CSV 保留全部记录并新增 `active_gradient` 字段，validation report 同时报告 active/inactive 数量。
+- 单 seed 核对：11,056 completions 中 6,376 个 active、4,680 个严格零梯度；在 active 分母下 DTV raw-threshold drop ratio 为 3.06%，DTV-Loo 为 36.45%，修正了此前包含零梯度项所得的 1.76%/21.02%。
+- 验证命令与结果：运行 `python3 -m py_compile scripts/plot_grpo_dtv_storyline_diagnostics.py` 与 `git diff --check`。
+- 已知风险/待办：`raw_self == 0` 是当前日志中可直接验证的零 policy-gradient 判据，但它不能区分 advantage 为零、token mask 为空或其他导致梯度为零的具体来源；需要额外 advantage/reward 日志才能细分原因。
+
+## 2026-08-22：最小调整 GRPO 图例与自然坐标刻度
+
+- 改动范围：按用户要求仅调整标签和 tick 行为，并只读统计放在仓库同级目录的五份 selection JSONL；未加入 winsorization、log scale 或新的数据变换。
+- 修改文件：`scripts/plot_grpo_dtv_storyline_diagnostics.py`；更新 `develop.md`。
+- 显示调整：04 图例改为 Unicode `mean ± 1 std`；移除手工隐藏最高 y tick label 的逻辑，恢复 Matplotlib 根据 axis upper limit 与 locator 自然决定最后一个可见刻度。drop-ratio 仍为 DTV + `max(LOO-DTV, 0)` 的 stacked bars，`--smooth-window` 从未应用于该图，y 上限保持 0.35。
+- 五 seed 数据核对：发现并解析 `tunix` 同级目录五份 `*selection*.jsonl`，合计 33,553 个 active-gradient completions；所有统计仅排除严格 `raw_self == 0`，未排除任何非零极值。
+- 验证命令与结果：`python3 -m py_compile scripts/plot_grpo_dtv_storyline_diagnostics.py` 与 `git diff --check` 均通过；分位数由 Python 标准库直接从五份 JSONL 计算。
+- 已知风险/待办：raw score 分布为重尾且 cross-term 可为负，不适合普通 log y 轴；是否采用裁剪/稳健统计应由论文想表达的 estimand 决定，不能仅为美观静默删除极值。
+
+## 2026-08-22：评估 GRPO GSM8K 三联分析图新规格
+
+- 改动范围：只读评估用户提供的 figure specification 与五份 selection JSONL/当前绘图脚本的兼容性；无绘图代码改动。
+- 修改文件：仅更新 `develop.md`；无代码改动。
+- 可行性结论：固定线性坐标、off-scale 点转 NaN 断线、50-step overflow markers、conflict-conditioned log-log scatter、固定 20-step drop bins 及完整统计导出均可由现有 self/cross/raw-self 字段实现，无需重跑训练或梯度。
+- 口径核对：active-only 聚合并非每一步都有五个有效 seed；691 steps 中 598 steps 有 5 个 active seeds、88 steps 有 4 个、5 steps 有 3 个。因此规格中的固定 `1/5` 公式必须在“只保留五 seed 均有效的 step”与“按当步有效 seed 数聚合并报告 n”之间先作选择，不能把缺失 seed 当作零。
+- 验证命令与结果：使用 Python 标准库解析仓库同级五份 JSONL，逐 seed 检查每步是否至少有一个 `raw_self > 0` completion；各 seed 分别有 25、21、15、19、18 个全零梯度 step。
+- 已知风险/待办：overflow marker 的统计单位、std band 的 off-scale 判定、主图是否加入 log-log inset、raw-threshold 与 post-cap drop ratio 必须在实现前明确；当前规格中的 lower-overflow LaTeX 分母多一个花括号，仅为文档排版错误。
+
+## 2026-08-22：细化 GRPO 分解图 percentile、band 与 DPO 样式方案
+
+- 改动范围：根据用户反馈进一步冻结 Figure 1/2 的统计和显示方案；无绘图代码改动。
+- 修改文件：仅更新 `develop.md`；无代码改动。
+- 拟定方案：明确 two-stage aggregation（每 seed/step 先在 active completions 内求 mean，再对当步 seed means 等权聚合）；Figure 1 percentile 作为可调显示参数而非数据裁剪；overflow 三角使用 DTV/Self/Cross 原色并按阈值显示一位小数比例；band 支持 `std/sem/none`；Figure 2A 仅使用 active-gradient conflicts；新增独立 log-log conflict scatter。
+- 样式约束：所有输出继续是单独的 5.9 x 5.2 inch 图，复用最初 DPO 图的 serif 字体、字号、axes position、线宽、颜色、300 DPI PNG/PDF，不在 Python 中拼三联图。
+- 验证：本轮为方案讨论，未运行绘图或修改 Python；`git diff --check` 在记录前一轮已通过。
+- 已知风险/待办：实现前仍需用户确认 percentile 的默认值、band 默认值、93 个非完整五-active-seed steps 的聚合口径，以及 raw/post-cap ratio 的主图选择。
+
+## 2026-08-22：核对 GRPO Figure 1 下尾与 quantile 默认参数语义
+
+- 改动范围：只读检查五份 JSONL 的 five-seed aggregated step-mean 下尾，并澄清 off-scale NaN 仅用于绘图副本；无绘图代码改动。
+- 修改文件：仅更新 `develop.md`；无代码改动。
+- 下尾结果：Cross step mean 的 min/q0.1/q0.5/q1/q2.5/q5 分别约为 `-43.02/-19.89/-7.12/-5.16/-1.51/-0.96`；Self 与 DTV step mean 下尾均为正，因此 Figure 1 的负下界主要由 Cross 决定。固定 `-10` 约覆盖 99.5% 的 Cross step means，仍需用 lower-overflow markers 显示更负事件。
+- 参数建议：upper/lower quantile 独立设置，默认 `upper=0.95`、`lower=0.005`，再分别向外 nice-round；显式 `--decomposition-y-limits` 可覆盖自动范围。参数未在启动命令提供时使用 parser 默认值，而非要求用户每次传入。
+- 可视化语义：off-scale 原值完整保留在 samples/per-step CSV 和 overflow 统计；只有传给 `ax.plot` 的临时数组相应位置设为 NaN，从而断线，边界三角负责显式提示该时间窗存在不可见极值。
+- 验证命令与结果：使用 Python 标准库解析仓库同级五份 JSONL 并计算 active-only per-seed step means 及 available-seed aggregated step means；未修改或运行绘图脚本。
+- 已知风险/待办：独立上下 quantile 是显示策略而非中央置信区间；论文中必须分别称为 lower/upper display quantiles，避免称为 central 95% interval。
+
+## 2026-08-22：实现 GRPO 重尾三联分析图方案
+
+- 改动范围：将已确认的 active-only 聚合、quantile 自动显示范围、overflow 显示、可选 uncertainty band 与 log-log self-protection 分析落实到 GSM8K GRPO 绘图脚本；不修改训练逻辑或 JSONL。
+- 修改文件：`scripts/plot_grpo_dtv_storyline_diagnostics.py`；更新 `develop.md`。
+- Figure 1：默认由 lower q0.5 与 upper q95 的 five-seed available-active-seed step means 计算 nice-rounded 线性范围；越界 mean 仅在绘图副本置 NaN 断线，原值继续进入 CSV/JSON；每 50 steps 输出并绘制 DTV/Self/Cross 同色上下 overflow 三角，达到 5% 才显示至多一位小数比例；band 支持 `std/sem/none`。
+- Figure 2/其他图：04 conflict 图限定 active DTV-only conflicts 并支持独立 `std/sem/none`；新增 05 conditioned `Cross<0` 的 `|Cross|` 对 Self log-log scatter 与 `S=|C|` boundary；decision region 保持线性主体视图；drop ratio 保持 20-step stacked 定义并在未显式设 y 轴时自动选择不裁柱子的上限。
+- 统计输出：per-step CSV 新增 `active_seed_count`，overflow bin CSV、drop bin CSV、completion/per-seed-step/aggregated-step quantile JSON、log-scatter samples/ratio summary 与实际绘图配置均一并导出；effective conflict/drop 分母使用 active-gradient completions。
+- 样式：继续使用 DPO 的 5.9 x 5.2 inch 单图、固定 axes position、serif 字体、字号、线宽、配色及 300 DPI PNG/PDF；不在脚本中拼接三联图。
+- 验证命令与结果：`python3 -m py_compile scripts/plot_grpo_dtv_storyline_diagnostics.py` 与 `git diff --check` 通过；尝试使用本地 bundled Python 和五份真实 JSONL 做渲染 smoke test，但该 runtime 同样缺少 Matplotlib，脚本在导入阶段停止，未生成部分产物；待服务器 DPO 环境完成渲染验证。
+- 已知风险/待办：overflow marker rows 在高比例且开启文字时可能与 legend 竞争空间；第一轮真实渲染后应只调整 marker row offset/legend placement，不改变统计口径。
+
+## 2026-08-22：讨论 GRPO 50-step robust decomposition 方案
+
+- 改动范围：根据首轮真实渲染结果讨论 Figure 1/Conflict 在聚合前处理 completion-level 极值的方案，以及 ratio/decision 坐标调整；无绘图代码改动。
+- 修改文件：仅更新 `develop.md`；无代码改动。
+- 核心判断：若 Self/Cross/DTV 分别独立按各自 quantile 删除样本，会使用不同 completion 集合并破坏 `mean(DTV)=mean(Self)+mean(Cross)`；正确 robust decomposition 必须对 tuple `(Self,Cross,DTV)` 使用同一个共同 mask，再由保留样本计算三个分量。
+- 建议方案：每 seed、每 50-step bin 汇集 active completions；使用从全训练数据预先确定且跨时间固定的 joint quantile mask，先删 completion outliers，再求每 seed/bin mean，最后对五个 seed/bin means 求 mean 与 std/SEM。优先试 central 98% joint mask，并以 central 95% 作敏感性对照；不能在每个 bin 重新估计边界，否则不同时段口径不可比。
+- 公式注意：日志中的 strict LOO score 为 `raw_cross/(G-1)`，decomposition Cross 为 `raw_cross/G`；在 G=4 时 `Cross=(3/4)LOO`，因此不能直接把 LOO score 当 Cross 后仍声称 `DTV=Self+Cross`。
+- 其他拟定调整：drop y 上限设为 binned maximum 向上取整后再额外留 0.05；decision 固定 x `[-250,450]`/100 刻度与 y `[0,850]`/200 刻度；conflict 使用其自身 global fixed joint quantile mask 和 50-step bins，不复用 decomposition 阈值。
+- 验证：本轮只讨论统计设计，未修改或运行绘图代码。
+- 已知风险/待办：实现前需确认 joint mask 是 `(Self 与 Cross 均在区间内)` 的交集规则、默认 central coverage 选 98% 还是 95%，以及 robust 版本是否替代 raw 图还是作为附录敏感性图。
+
+## 2026-08-22：澄清 Figure 1 全局区间与 50-step outside ratio 目标
+
+- 改动范围：对照当前脚本说明用户希望的 completion-level global interval 与现有 aggregated-step-mean interval 的差异；无代码改动。
+- 修改文件：仅更新 `develop.md`；无代码改动。
+- 当前实现：自动 y 轴从 691 个 available-seed aggregated step means 的 lower q0.5/upper q95 计算；50-step overflow fraction 的统计对象也仍是这些 aggregated step means。它不从全部 active completion scores 计算 central 95%/98% component intervals，也不统计每 50 steps 内 completion-level outside fraction，更不会在求 step mean 前删除 completion outliers。
+- 用户目标：先用全训练、五 seed 的 active completion-level DTV/Self/Cross 分别确定固定 global central coverage boundaries，再逐 step 画 decomposition，并按 50-step bin 报告各 component completion scores 落在固定区间外的比例。该目标与当前实现不同，后续修改前需确认 outside 点只统计/标记，还是也从 step mean 计算中排除。
+- 验证：本轮为口径澄清，未修改或运行绘图代码。
+- 已知风险/待办：若三个 component 使用各自区间并分别删除 outside samples，会破坏 decomposition identity；若只统计 outside ratio 而不删除，则不影响 identity，但 raw step mean 仍可能剧烈波动。
+
+## 2026-08-22：核对 active completion 与零 Policy-score 梯度的训练语义
+
+- 改动范围：只读核对 Policy-DTV/Policy-DTV-LOO trainer 的 score gradient、threshold mask、minimum-retention cap 与 full-update 聚合；无代码改动。
+- 修改文件：仅更新 `develop.md`；无代码改动。
+- 定义结论：当前分析中的 `active_gradient` 精确指 `loo_raw_self > 0`，即用于 valuation 的 KL-free policy score gradient 非零；它不等价于“total optimizer gradient 必然非零”。Policy trainer 用 policy-only gradients 计算 DTV/LOO score，但对保留 completion 聚合 total loss gradients（Full mask）。
+- Threshold 语义：ordinary DTV 与 LOO raw threshold 都使用 `score >= 0`，因此严格零分 completion 被判为 keep，不会被 threshold 自动过滤；Group LOO 的 25% minimum-retention cap 只在 raw threshold 保留不足 1/4 时补回 top score，零分全 keep 时不会触发。
+- 数据核对：五份日志的 13,820 个 prompt groups 中，8,370 组无零 policy-gradient completion、5,416 组四个 completions 全零、另有 5 组仅一个为零、29 组两个为零；所以零梯度通常但并非总是整组出现。
+- 已知风险/待办：`raw_self == 0` 的直接含义只限 policy valuation gradient；其成因可能是 group advantage 为零、token/loss mask 或其他路径，且 total update 中仍可能存在 KL gradient。若论文要称“无任何 gradient contribution”，需额外记录/验证 total-gradient norm，现有 JSONL 不足以支持该表述。
+
+## 2026-08-22：讨论 threshold-faithful population 与 GSM8K/AIME 机制差异
+
+- 改动范围：纠正零梯度 group 表格解读，评估按训练 `score >= 0` 口径做 robust decomposition 的统计设计，并讨论 GSM8K 与 AIME 的任务/group/reward差异；无代码改动。
+- 修改文件：仅更新 `develop.md`；无代码改动。
+- 零组结论：五 seed 共 13,820 prompt groups，其中 8,370 组没有零 policy-gradient completion，5,416 组四个 completions 全零，34 组部分为零；全零组占 `39.19%`，不是 8,370 组或约 4/7。全零 score 由 `>=0` raw threshold 全部 keep，但是否产生 total update 仍取决于 Full-update 中 KL/total gradient。
+- 当前脚本差异：脚本当前排除 `raw_self==0` 后聚合，并从 aggregated step means 计算显示 quantile；它既不忠实复现 threshold population（零分应 keep），也没有在 completion-level 用 global common mask 先去极值再求 mean/std/SEM。
+- 论文建议：训练口径主统计应包含所有 finite completions（含零分），另报告 conditional-on-nonzero-policy-gradient 结果；重尾图若用 robust trimming，应采用全局固定 common tuple mask、默认可先试 central 98%，并同时保留 raw 与 central 95% sensitivity，明确披露 retained fraction。std 优先于 SEM展示 seed variability。
+- 机制限制：仅凭 Self/Cross geometry 只能证明 DTV 与 LOO 的 disagreement/retention 机制，不能证明 DTV-only 样本对 GSM8K accuracy 有益。需要 disagreement subset 的 reward/advantage/correctness 质量分析或 matched-retention ablation，才能区分“self-term 保留有价值困难样本”和“DTV 只是过滤更少”。
+- 跨任务因素：GSM8K 为 4 completions 且 reward 更细粒度，AIME 为 8 completions 且 binary correctness；G=4 时 decomposition Cross=`3/4 LOO`，G=8 时为 `7/8 LOO`，self 权重及 mixed/all-equal reward group 频率不同，不能把 GSM8K 的 self-term结论直接外推到 AIME。
+- 验证：本轮为统计与机制讨论，未修改或运行绘图代码。
+
+## 2026-08-22：重算 threshold-faithful quantiles 并审计 TensorBoard 可恢复信息
+
+- 改动范围：只读重算包含零分 completion 的全局 central quantile ranges，并静态检查 GRPO reward/advantage/TensorBoard logging；无代码改动。
+- 修改文件：仅更新 `develop.md`；无代码改动。
+- Quantile 结果：在全部 55,280 个 finite completions（含零 policy-score）上，central 98% 区间为 Self `[0,133.564]`、Cross `[-8.023,28.496]`、DTV `[-0.460,161.678]`，三者共同 mask 实际删除 `3.19%`；此前 active-only 区间 `[0.082,263.863]`、`[-12.341,45.686]`、`[-1.306,310.612]` 与 joint 删除 `4.18%` 属于不同条件口径。
+- Cross 风险：对 Cross 使用 central 98% 会按定义删除最负 1% 与最正 1%，可能削弱论文最关心的 negative peer-conflict tail。更保守的趋势图方案是只使用 Self 与 DTV 的单侧 upper-q99 common mask，保留所有 Cross 和负 DTV tail；该 mask 在 threshold population 上实际删除约 `1.12%`。
+- TensorBoard 审计：GRPO learner 写入 `rewards/sum`、`rewards/min/max` 和各 reward function scalar，但 metrics buffer 会按 op 聚合成每 step scalar；GRPO 未写入 per-completion advantages，prompt/completion 字符串也被 monitoring logger跳过。`actor/train/skipped_samples` 是每步过滤数量 scalar，对实际 drop dynamics 有意义，但不能恢复哪些 completion 被过滤或其 reward/advantage。
+- 数据可恢复性：若 event tags 只有聚合 reward 与 skipped count，无法事后把 DTV-only completion 与 reward/advantage/correctness 对齐；需要已有 per-completion sidecar/CSV，或新增按 `step/group/generation` 对齐的 reward/advantage日志后重跑相关 DTV-LOO runs。
+- 验证命令与结果：使用 Python 标准库解析五份 JSONL 计算全部 finite completion quantiles；使用 `rg`/`sed` 核对 `rl_learner.py`、`grpo_learner.py`、`rl_cluster.py` 与 trainer metric tags。当前本地未发现用户服务器保存的 TensorBoard event files，无法列出该 run 的实际 tags。
+- 已知风险/待办：趋势图 outlier policy 尚未冻结；若要解释“保留 self 有益”，优先确认服务器是否另有 completion-level reward/advantage artifact，再决定是否重跑。
+
+## 2026-08-22 — GRPO GSM8K storyline threshold-faithful robust trends
+
+- 改动范围：更新 GRPO DTV/DTV-Loo 诊断绘图的统计总体、极值处理、冲突图、drop ratio 与 decision-region 坐标。
+- 修改文件：
+  - `scripts/plot_grpo_dtv_storyline_diagnostics.py`
+  - `develop.md`
+- 关键口径：
+  - threshold 统计保留 finite 的零分 completion；drop ratio 与 decision region 不做分位裁剪。
+  - Figure 01 先在全训练 completion 上计算可调 central coverage（默认 98%）边界，再仅按 Self/DTV 上尾共同 mask 剔除极端 tuple；之后在每个 seed/step 内求均值，最后跨 seed 求 mean/std/SEM。
+  - Cross-term 下尾不参与趋势剔除，避免删掉与 DTV-Loo 过滤机制直接相关的负 Cross-term。
+  - conflict 图对 active self-protected conflicts 使用同一类稳健上尾 mask；drop ratio 上界在数据最大值之上额外留 0.05。
+  - decision region 默认范围为 x=[-250,450]、y=[0,850]，显示内部整百/整两百刻度。
+- 验证命令与结果：
+  - `python3 -m py_compile scripts/plot_grpo_dtv_storyline_diagnostics.py`：通过。
+  - `git diff --check`：通过。
+- 已知风险/待办：本机 Python 环境缺少 Matplotlib，未在本机完整渲染；需在服务器 DPO 环境运行后检查 legend、band 和极端点标记的最终视觉效果。
+## 2026-08-22 — 服务器绘图启动路径诊断
+
+- 改动范围：无代码改动；确认本次 `FileNotFoundError` 来自 JSONL 输入路径错误，而非绘图统计逻辑。
+- 修改文件：`develop.md`。
+- 验证建议：先在服务器 `/home/jason_chia925_gmail_com/Project/tunix` 范围内按精确文件名定位五个 JSONL，再将定位结果传给 `--selection-files`。
+- 已知风险/待办：若文件尚未上传到服务器，`find` 结果会为空，需要先复制文件。
+## 2026-08-22 — Figure 01/04 纵轴与极值诊断
+
+- 改动范围：无绘图代码改动；使用本地五份 GSM8K JSONL 对 threshold 原始 step mean、robust Figure 01 step mean 和 robust conflict step mean 做复算。
+- 修改文件：`develop.md`。
+- 验证结果：确认 Figure 01 当前较小纵轴来自“包含零分 completion + Self/DTV 上尾 mask + 基于跨 seed step mean 的自动显示分位”；Figure 04 不包含零梯度 completion，其范围变化主要来自 conflict 子集的上尾 mask。
+- 已知风险/待办：当前 overflow marker 对任何非零越界比例都画三角，因此几乎每个 50-step bin 都有标记；后续应考虑只显示超过阈值的 bin，或只显示实际 trend mask 对应的 Self/DTV 上尾比例。
+## 2026-08-23：生成论文级 GSM8K GRPO Group 实验设定文档
+
+- 改动范围：以 `GRPO_AIME_setup.md` 的组织和细节水准为参考，定点核对当前 GSM8K 数据、Gemma-3-1B-IT/LoRA、rollout、reward、GRPO loss、Group Random/Reward、Group Policy-DTV/Policy-DTV-Loo、Clean/Mismatch-20、五 seed、checkpoint 与最终 evaluation 实现；新增只覆盖最终 Group-level 论文方法的详细实验设定文档，不包含历史 Batch methods 或 L2 ablation；无训练代码或启动脚本改动。
+- 修改文件：新增 `GRPO_GSM8K_setup.md`；更新 `develop.md`。
+- 验证命令与结果：使用 `sed`/`rg` 定点检查 `my_example/run_grpo_gemma.sh`、`config.py`、`main.py`、`data.py`、`model.py`、`prompts.py`、`rewards.py`、`eval.py`、`train.py`、`reward_rank_noise.py`、seed/suite launchers，以及 `tunix/rl/grpo/grpo_learner.py`、`fixed_filter_trainer.py`、`self_inf_trainer.py`、`self_inf_loo_trainer.py`、policy trainer 和 `rl_cluster.py`；确认 4 prompts × 4 completions、691 updates、LoRA rank/alpha 64/64、Policy-score/Full-mask、Group LOO 25% minimum retention、Random/Reward stochastic-rounding 和 full-test greedy evaluation 等文档事实。
+- 已知风险/待办：仓库只能确认单 worker 四 TPU devices 和 `(fsdp=4,tp=1)` mesh，不能确认 TPU 产品型号；论文冻结前应从 runtime metadata 补充硬件型号，并用服务器最终 artifacts 确认 Clean/Mismatch-20 下七个训练方法均完成五个 matched seeds `0,5,13,21,42`。Mismatch-40 若保留应作为 appendix stress test 明确报告，避免按结果选择性省略。
+## 2026-08-23 — 98% trend口径与50-step bin复核
+
+- 改动范围：无绘图代码改动；澄清 completion-level 98% 边界、实际单侧共同 mask、step-mean 显示分位三层口径，并复算14个50-step bin的实际剔除比例。
+- 修改文件：`develop.md`。
+- 验证结果：默认 q99 为 Self=133.564、DTV=161.678；实际仅删除超过任一上界的 completion tuple，整体删除1.118%。14个 bin 的联合删除比例为0.450%–3.550%，bin 分布 p95=2.4775%，仅1–50步超过该值。
+- 已知风险/待办：14个 bin 上估计 p95 较不稳定；若采用该规则，三角只会出现一次。后续需确定使用 bin-p95、固定比例阈值，还是直接不显示 overflow marker。
+## 2026-08-23 — 连续趋势线的预聚合极值方案分析
+
+- 改动范围：无绘图代码改动；比较当前单侧 Self/DTV 上尾 mask 与 DTV/Self/Cross 共同 central coverage tuple mask 对完整 step-mean 范围的影响。
+- 修改文件：`develop.md`。
+- 验证结果：共同 central-98% mask 保留96.805%，完整 step mean 范围为 Self[1.319,12.323]、Cross[-0.253,2.842]、DTV[1.408,14.633]；共同 central-99% mask 保留98.410%，范围为 Self[1.319,21.074]、Cross[-0.621,4.734]、DTV[1.408,23.136]。当前单侧 mask 则因保留 Cross 极端下尾而产生 Cross=-34.568、DTV=-29.950 的 step mean。
+- 已知风险/待办：共同双侧 mask 会删去一部分负 Cross-term，而负 Cross-term 与 DTV-Loo 机制相关；采用前需明确 Figure 01 是稳健趋势展示还是完整机制分布展示。
+## 2026-08-23 — central-99坐标、band与coverage marker分析
+
+- 改动范围：无绘图代码改动；核对 joint central-99 后 Figure 01 mean/std 完整范围，并评估 coverage marker 与 conflict 独立coverage。
+- 修改文件：`develop.md`。
+- 验证结果：Figure 01 central-99 的 mean 完整范围为 Self[1.319,21.074]、Cross[-0.621,4.734]、DTV[1.408,23.136]；mean±std 完整范围约[-7.257,41.602]，99% band范围约[-4.857,34.011]。Conflict central-99仍有 Self mean 最大140.873；central-97.5保留94.841%的 conflict completion，Self/Cross mean完整范围分别为[1.504,34.858]与[-4.795,-0.151]。
+- 已知风险/待办：score轴不能直接承载coverage百分比位置；若用绿色三角表示coverage，宜放固定顶部注释带并标百分比，或使用独立小轴。Figure 01与conflict应允许独立coverage参数。
+## 2026-08-23 — band显示范围与coverage右轴方案
+
+- 改动范围：无绘图代码改动；评估 Figure 01/Conflict 的 band 可见范围，并确定50-step retained coverage可使用独立右侧百分比轴。
+- 修改文件：`develop.md`。
+- 验证结果：Figure 01 central-99 的99% band约[-4.857,34.011]，适合先试[-6,35]。Conflict central-97.5 的完整mean范围Self[1.504,34.858]、Cross[-4.794,-0.151]；98% band约[-9.293,55.223]，99% band约[-15.216,70.678]。
+- 已知风险/待办：双轴必须明确标注单位，coverage marker只绑定右轴；避免把coverage与score曲线连成容易暗示因果的折线。
+## 2026-08-23 — Conflict central-99与GRPO异质性解释
+
+- 改动范围：无绘图代码改动；复核 conflict joint central-99 的mean/std范围，并评估其对GRPO异质性论点的支持边界。
+- 修改文件：`develop.md`。
+- 验证结果：conflict central-99联合保留97.841%；Self mean[1.504,140.873]、Cross mean[-7.885,-0.170]；Self mean±std完整[-128.552,410.297]、99%范围[-40.705,163.015]；Cross完整[-19.981,5.751]、99%范围[-16.998,4.097]。建议先试y=[-50,180]。
+- 已知风险/待办：宽std与重尾可支持“GRPO/GSM8K conflict scores高度异质”的观察，但不能单凭该图证明异质性导致DTV优于DTV-Loo；需结合过滤率、decision disagreement及跨任务结果验证。
+## 2026-08-23 — 实现joint coverage趋势、coverage右轴与可调坐标
+
+- 改动范围：按讨论更新GRPO GSM8K storyline绘图实现。
+- 修改文件：
+  - `scripts/plot_grpo_dtv_storyline_diagnostics.py`
+  - `develop.md`
+- 核心改动：
+  - Figure 01默认使用可调joint central-99% DTV/Self/Cross completion tuple mask；mask后先按seed/step求mean，再跨seed求mean/std/SEM。
+  - 移除超界mean/band转NaN的逻辑，改为Matplotlib自然裁切，保证中心线连续。
+  - Figure 01默认score轴[-6,35]及显式ticks；新增50-step retained coverage绿色下三角与独立右百分比轴，范围/ticks/alpha/bin/开关均可调。
+  - Conflict新增独立`--conflict-central-coverage`（默认0.99）、默认轴[-50,180]和显式ticks。
+  - Decision默认y轴[0,1100]，x/y均每200显示内部刻度。
+  - Drop ratio和decision region继续使用未经quantile mask的raw threshold数据。
+  - 新增`grpo_dtv_retained_coverage_by_step_bin.csv`；删除旧overflow marker绘图路径。
+- 验证命令与结果：
+  - `python3 -m py_compile scripts/plot_grpo_dtv_storyline_diagnostics.py`：通过。
+  - `git diff --check`：通过。
+- 已知风险/待办：本机缺少NumPy/Pandas/Matplotlib，无法完整渲染；需在服务器DPO环境检查双轴标签、legend和论文画布视觉后微调参数。
+## 2026-08-24 — Coverage右轴修正与Conflict截断标记
+
+- 改动范围：修正Figure 01双轴视觉，并为Conflict增加可解释的上界隐藏与50-step overflow统计。
+- 修改文件：
+  - `scripts/plot_grpo_dtv_storyline_diagnostics.py`
+  - `develop.md`
+- 核心改动：
+  - Figure 01右轴spine、ticks和title改为黑色，仅retained-coverage下三角保留绿色。
+  - 隐藏右轴top/bottom/left spines并同步box aspect，避免双轴产生额外横轴/错位边框。
+  - 新增`--coverage-marker-max`（默认0.99），只画coverage低于阈值的绿色三角。
+  - Conflict默认y轴改为[-10,40]及ticks[-10,0,10,20,30]。
+  - 新增`--conflict-hide-above-limit`：高于上界的mean点设为NaN，不连接折线。
+  - 每50步统计Self-term跨seed step mean超过上界的比例，以黄色上三角和百分比标注；bin size与最小显示比例可调。
+  - 新增`grpo_dtv_conflict_upper_overflow_by_step_bin.csv`。
+- 数据复核：central-99 conflict在ymax=40时，发生超界的bin比例依次为1–50:8%、51–100:6%、101–150:10%、151–200:2%、251–300:2%、351–400:2%、401–450:2%、451–500:2%、601–650:2%、651–691:2.4%。
+- 验证命令与结果：
+  - `python3 -m py_compile scripts/plot_grpo_dtv_storyline_diagnostics.py`：通过。
+  - `git diff --check`：通过。
+- 已知风险/待办：本机缺少Matplotlib，需在服务器检查双轴spine是否完全重合以及Conflict百分比标签是否拥挤；可用marker threshold减少黄色标记。
+## 2026-08-24 — 论文级趋势图降噪与截断呈现方案分析
+
+- 改动范围：无代码改动；评估当前Figure 01/Conflict的视觉拥挤、双轴、逐step尖峰、std band和overflow标记。
+- 修改文件：`develop.md`。
+- 结论：主图应优先采用“每seed先平滑/分箱，再跨seed聚合”的统计顺序；Figure 01建议使用10–20 step平滑与SEM/CI，coverage移至共享x轴的窄子图；Conflict建议将tail rate放入独立窄子图，主线不再逐bin标百分比。完整raw/std/central-99敏感性图放appendix。
+- 已知风险/待办：平滑窗口、band语义和主图coverage需在修改前冻结；若保留双轴或截断，caption必须明确统计顺序与超界定义。
+## 2026-08-24 — Per-step DTV score图的非平滑呈现口径澄清
+
+- 改动范围：无代码改动；根据用户目标重新限定Figure 01/Conflict为逐step score诊断，而非convergence曲线。
+- 修改文件：`develop.md`。
+- 结论：主线不应做时间平滑；应通过completion-level共同阈值在求seed/step mean前控制极值，并选择能覆盖全部处理后mean的坐标。Figure 01 central-99已可让全部mean落入[-6,35]；Conflict若要求全部mean落入[-10,40]，现有数据应优先使用central-97.5（Self mean最大约34.86），而非central-99后再用NaN截断。
+- 已知风险/待办：coverage应通过预先定义与敏感性分析说明，不能纯粹按美观选择；逐step主图可弱化或移除连续std band，把完整uncertainty放appendix或稀疏checkpoint whiskers中。
+
+## 2026-08-24 — GSM8K与DPO的self-protection机制对比复核
+
+- 改动范围：无画图代码改动；核对现有Figure 01/Conflict/Decision Region的实际实现，并用五份GSM8K JSONL复算active-gradient口径下的threshold决策与conflict分布。
+- 修改文件：`develop.md`。
+- 验证结果：55,280个completion中33,553个为active-gradient；active口径DTV与DTV-Loo分别按阈值丢弃3.11%与38.86%，35.76%为“DTV保留/LOO丢弃”conflict。这些conflict的cross-term中位数为-0.394，73.83%位于[-1,0)，85.998%位于[-2,0)；说明GSM8K的额外LOO过滤大量由近零负cross证据触发。
+- 已知风险/待办：当前Decision Region尚包含inactive zero-gradient样本；Conflict的`--conflict-hide-above-limit`会将越界mean/std改为NaN。现有记录可支持“GSM8K近零cross下LOO更激进”的机制观察，但不足以单独证明其导致最终accuracy差异；需reward/advantage或跨任务归一化证据做进一步验证。
+
+## 2026-08-24 — GSM8K论文图精简与无量纲Conflict ECDF
+
+- 改动范围：将逐step storyline主图改为active-gradient口径的论文默认版本，并新增可直接与DPO扩展比较的无量纲conflict-strength ECDF；保留原有全量诊断开关和CSV输出。
+- 修改文件：
+  - `scripts/plot_grpo_dtv_storyline_diagnostics.py`
+  - `develop.md`
+- 核心改动：
+  - 新增`--analysis-population {active,all}`，默认只使用有policy-gradient信号的completion；drop ratio、decision fraction与score decomposition现在共享这一口径，inactive样本仍保存在总样本统计中。
+  - Figure 01默认joint central-98%、不画连续band/coverage双轴，纵轴[-5,45]；Conflict默认central-97.5%、不做NaN截断、不画连续band，纵轴[-10,40]，保证逐step中心线连续。
+  - Decision Region默认展示[-100,200]×[0,500]，覆盖99.17%的active样本；类别百分比由完整active population计算，红色DTV-only conflict提高z-order，绿色背景点减小并降低透明度。
+  - Drop ratio使用active completion作为分母并维持stacked DTV + additional DTV-Loo定义。
+  - 新增`06_normalized_conflict_strength_ecdf.png/.pdf`，对未经quantile裁剪的active DTV-keeps/LOO-drops conflicts绘制`|C|/(S+|C|)` ECDF；同步输出逐样本CSV和summary JSON。
+  - 缩短log-log与ECDF坐标标签，避免固定DPO画布下的文字裁切。
+- 验证命令与结果：
+  - `python3 -m py_compile scripts/plot_grpo_dtv_storyline_diagnostics.py`：通过。
+  - `git diff --check`：通过。
+  - 使用`/tmp/grpo_plot_verify_venv`中的隔离NumPy/Pandas/Matplotlib环境，对五份本地JSONL完整生成01–06 PNG/PDF及CSV/JSON：通过；未修改项目或用户现有Python环境。
+  - active completion共33,553个；Decision Region完整active口径为both keep 61.14%、DTV keeps only 35.76%、both drop 3.11%，显示窗口覆盖99.17%。无量纲conflict样本11,998个，中位数0.113；46.03%不超过0.1，70.20%不超过0.2。
+- 已知风险/待办：当前ECDF只有GRPO–GSM8K曲线，跨任务机制结论应表述为“与弱负cross证据一致”，不能作为最终accuracy差异的单独因果证明；后续应对DPO使用相同active/conflict定义叠加曲线，并视需要补录reward/advantage。
+
+## 2026-08-24 — 恢复DTV/DTV-Loo全threshold population口径
+
+- 改动范围：纠正此前将paper-facing图默认限制为active-gradient completion的口径；所有主图恢复为DTV/DTV-Loo实际`score >= 0`阈值决策总体，仅允许completion-level joint quantile mask为趋势均值控制outlier。
+- 修改文件：
+  - `scripts/plot_grpo_dtv_storyline_diagnostics.py`
+  - `develop.md`
+- 核心改动：
+  - `--analysis-population`默认从`active`改为`all`；21,727个exact-zero completion按DTV与DTV-Loo阈值规则计入`both keep`，`active`仅保留为敏感性诊断选项。
+  - Figure 01、drop ratio、decision region及总体CSV统计均默认使用全部55,280个completion；quantile mask只用于Figure 01趋势mean/std/SEM，不改变raw drop/keep decision。
+  - Figure 01继续支持`--decomposition-band-mode std|sem|none`，默认恢复为`std`。
+  - Conflict、negative-cross log scatter和无量纲ECDF不再显式套用`active_gradient`过滤；它们直接由raw threshold disagreement或`cross_term < 0`定义。exact-zero样本因两种方法均保留，自然不会成为conflict。
+- 验证命令与结果：
+  - 使用五份本地JSONL和`--analysis-population all --decomposition-band-mode std`完整生成01–06图：通过。
+  - 总体55,280个completion；raw threshold decision为both keep 42,240（76.41%）、DTV keeps only 11,998（21.70%）、both drop 1,042（1.88%），与21,727个zero completion全部进入both-keep一致。
+  - central-98 joint trend mask保留96.805%；Decision Region显示窗口覆盖99.50%的完整threshold population。
+- 已知风险/待办：全零样本在decision scatter中重合于(0,0)，单点面积不能表达其数量，因此图例百分比必须继续按未采样完整population计算；若论文需要展示zero mass，可另加计数注释，但不能从分母删除。
+
+## 2026-08-24 — Decision坐标与coverage作用域复核
+
+- 改动范围：无绘图代码改动；只读核对Figure 01、Conflict和Decision Region的参数作用域，并分析当前坐标范围变化来源。
+- 修改文件：仅更新`develop.md`，无代码改动。
+- 复核结果：
+  - `--completion-central-coverage`只生成Figure 01的joint DTV/Self/Cross `trend_inlier` mask；Decision Region直接读取未做trend mask的完整`analysis_samples`，因此central coverage从0.99改为0.98不会改变Decision点或坐标。
+  - 当前Decision范围缩小来自显式`--decision-x-limits -100 200 --decision-y-limits 0 500`；该窗口仍覆盖55,280个threshold样本中的55,003个（99.50%）。
+  - full-population central-98对应completion bounds为DTV[-0.460,161.678]、Self[0,133.564]、Cross[-8.023,28.496]，joint保留96.805%；这些值仅用于Figure 01趋势聚合。
+  - Conflict没有band是因为启动参数为`--conflict-band-mode none`；设为`std`后现有legend逻辑会自动显示`Self-term mean ± 1 std`与`Cross-term mean ± 1 std`。
+- 已知风险/待办：Conflict central-97.5下部分Self mean±std会高于40；若固定y=[-10,40]，band会被坐标自然裁切。正式汇报时应扩大上界或在caption明确显示窗口，不应让读者误以为完整std都位于40以内。
+
+## 2026-08-24 — Decision旧新点云尺度差异复核
+
+- 改动范围：无绘图代码改动；只读对比历史版本与当前版本的Decision Region数据构造、总体口径和抽样设置。
+- 修改文件：仅更新`develop.md`，无代码改动。
+- 复核结果：
+  - 历史与当前代码均直接读取JSONL中的`loo_standard_self_term`和`loo_standard_cross_term`；恒等式始终为`self=raw_self/4`、`cross=raw_cross/4`，没有新增二次除法或约2倍缩放。
+  - 较早版本在`plot_decision_regions`入口显式删除`raw_self==0` completion，只画33,553个active completion；当前默认按用户要求使用全部55,280个threshold completion，其中21,727个inactive exact-zero点位于`(0,0)`。
+  - 完整总体的cross q0.5%/q99.5%约为[-14.73,54.69]、self q99.5%约325.93；active总体对应约[-24.19,88.77]和762.82。两者在视觉有效范围上约有1.6–2.3倍差异，与旧新截图观察一致，但并非同一completion的score被缩放。
+  - 旧命令常用`--sample-limit 50000`，当前默认15,000；对全总体均匀抽样时只有约60.7%点为active，进一步降低尾部点在scatter中的可见密度。
+- 已知风险/待办：若既要保留完整threshold population又要与旧active-only点云比较，应保持全部点参与decision比例，并在scatter显示层采用分层抽样或单独标注`(0,0)`质量；不能通过删除inactive completion恢复旧视觉尺度。
+
+## 2026-08-24 — Decision散点统计单位澄清
+
+- 改动范围：无绘图代码改动；澄清Decision Region中单点含义，以及exact-zero completion对点云的真实影响。
+- 修改文件：仅更新`develop.md`，无代码改动。
+- 复核结果：
+  - Decision Region不计算step mean；每个散点对应一个`seed × train_step × prompt group × generated completion`，每个seed/step的4个prompt各生成4个answer，因此贡献16个completion-level点。
+  - 单点坐标为该completion的`(cross_term, self_term)`；DTV判定由`self+cross>=0`给出，DTV-Loo判定与`cross>=0`同号。
+  - inactive exact-zero completion只是在`(0,0)`重复叠加，不会缩放其他active completion的坐标，也不会“压低Decision mean”，因为该图不存在mean聚合。
+  - 在新旧命令均为`sample-limit=50000`时，抽样上限不是约2倍视觉差异的主要原因；当前较窄的显式Decision窗口会在抽样前删除窗口外点，all-population零点质量则改变原点附近的视觉密度。
+- 已知风险/待办：若同一JSON输入、同一坐标窗口和同一population仍显示约2倍数值差异，需要直接对比两次输出的scatter CSV/代码版本，优先排查旧图是否使用raw term或不同输入文件；不能归因于central coverage。
+
+## 2026-08-24 — Decision点云视觉密度差异定位
+
+- 改动范围：无绘图代码改动；对比历史与当前Decision Region的marker渲染参数，解释共同坐标区间内高密度带看似收缩的问题。
+- 修改文件：仅更新`develop.md`，无代码改动。
+- 复核结果：
+  - 旧版所有类别统一使用`size=9, alpha=0.85`；当前绿色both-keep改为`size=4, alpha=0.24`，红色/灰色改为`size=5, alpha=0.48`。
+  - 以`size×alpha`近似单点视觉权重，绿色从7.65降到0.96（约降8倍），红/灰从7.65降到2.4（约降3.2倍）；低密度尾部仍存在，但显著变淡，只有靠近原点的高密度区域会叠加饱和，因此视觉上从约±100收缩为约±50。
+  - `completion-central-coverage`仍不参与Decision散点；在新旧均为`sample-limit=50000`时，当前观察主要是marker样式差异，而非score缩放或抽样上限。
+- 已知风险/待办：若要与DPO进行论文级直接比较，两个任务必须冻结相同的population、坐标范围、marker size、alpha、sampling和z-order；否则“点云更集中”的视觉结论会混入渲染参数影响。
+
+## 2026-08-24 — GRPO Decision散点样式对齐DPO
+
+- 改动范围：仅对齐Decision Region散点的视觉表达；数据总体、阈值分类、抽样、坐标范围、颜色、boundary和legend内容均保持不变。
+- 修改文件：
+  - `scripts/plot_grpo_dtv_storyline_diagnostics.py`
+  - `develop.md`
+- 核心改动：
+  - 以`DTV_DPO/plot_dtv_storyline_diagnostics.py::plot_decision_region_scatter`为基准，将GRPO全部decision类别统一设置为`size=9`、`alpha=0.85`、`edgecolors=none`和`rasterized=True`。
+  - 删除GRPO此前按类别设置的不同size、alpha和z-order，避免通过颜色深浅或覆盖顺序额外编码密度，并保证与DPO点云视觉可直接比较。
+- 验证命令与结果：
+  - `python3 -m py_compile scripts/plot_grpo_dtv_storyline_diagnostics.py`：通过。
+  - `git diff --check`：通过。
+  - 使用隔离环境和五份本地JSONL，以`sample-limit=50000`完整生成01–06图：通过；Decision完整总体55,280点、显示窗口内55,003点、实际绘制50,000点。
+  - 人工检查`03_decision_region_scatter.png`：绿色、红色和灰色类别均恢复为与DPO一致的不透明实色点，外围低密度点不再因类别alpha差异而弱化。
+- 已知风险/待办：DPO与GRPO若使用不同population、坐标窗口或sample limit，仍不能仅凭点云视觉密度做定量比较；本次只冻结散点渲染属性。
+
+## 2026-08-24 — Conflict与Decision legend冻结
+
+- 改动范围：只调整两张论文图的legend文字，不改变数据、band计算、decision比例统计或散点样式。
+- 修改文件：
+  - `scripts/plot_grpo_dtv_storyline_diagnostics.py`
+  - `develop.md`
+- 核心改动：
+  - Conflict legend随`--conflict-band-mode`自动显示`Self/Cross-term mean ± std`、`mean ± sem`或`mean`；去掉冗余的系数`1`并统一小写统计量名称。
+  - Decision Region legend只保留类别名称，删除括号百分比；完整population的decision fractions继续写入CSV/JSON统计，不改变计算口径。
+- 验证命令与结果：
+  - `python3 -m py_compile scripts/plot_grpo_dtv_storyline_diagnostics.py`：通过。
+  - `git diff --check`：通过。
+  - 使用五份本地JSONL、`sample-limit=50000`和`--conflict-band-mode std`完整生成01–06图：通过。
+  - 人工检查：Conflict显示`Self-term mean ± std`与`Cross-term mean ± std`且band存在；Decision legend只显示类别与boundary名称，不再显示百分比。
+- 已知风险/待办：正式汇报必须保证legend选择与实际`--conflict-band-mode`一致；脚本现已由参数自动保证该一致性。
+
+## 2026-08-25 — Band颜色控制位置说明
+
+- 改动范围：无绘图代码改动；定位Decomposition与Conflict共用band的颜色和透明度控制位置。
+- 修改文件：仅更新`develop.md`，无画图代码改动。
+- 复核结果：
+  - band深浅主要由`_draw_mean_std()`内`fill_between(..., alpha=0.35)`控制；降低alpha会变浅，提高alpha会变深。
+  - band色相由文件顶部`COLOR_SELF_FILL=#BDD7F7`、`COLOR_DTV_FILL=#FAD7A0`和`COLOR_LOO_FILL=#F5B5B5`控制。
+  - Conflict在`plot_conflict_means()`中分别把`COLOR_SELF_FILL`和`COLOR_LOO_FILL`传给共用绘图函数；修改全局常量或共用alpha会同时影响Decomposition。
+- 验证命令与结果：只读代码定位，无需运行绘图。
+- 已知风险/待办：如只想调整Conflict而保持Decomposition冻结，应给`_draw_mean_std()`增加独立`band_alpha`参数并仅在Conflict调用处覆盖，不能直接修改共用alpha。
+
+## 2026-08-25 — Decomposition/Conflict联合截尾口径与论文标识讨论
+
+- 改动范围：无绘图代码改动；只读核对五份本地selection JSONL、当前联合分位mask及论文图中的保留率披露方式。
+- 修改文件：仅更新`develop.md`，无画图代码改动。
+- 复核结果：
+  - Decomposition先在全部55,280个completion tuple上，分别计算DTV、self-term和cross-term的中央分位区间，再取三者交集；任一分量越界即整条tuple从趋势均值和band统计中删除。之后才按`seed × step`求completion mean并跨5 seeds求mean与std/SEM。
+  - `completion-central-coverage=0.98`时，三个分量区间分别为DTV `[-0.4602,161.6779]`、Self `[0,133.5640]`、Cross `[-8.0233,28.4960]`；联合保留53,514/55,280=`96.805%`，删除1,766=`3.195%`。
+  - `completion-central-coverage=0.99`时，联合保留54,401/55,280=`98.410%`，删除879=`1.590%`。
+  - Conflict先从原始总体选择11,998个`DTV keeps / DTV-Loo drops` completion，再在该子集内分别计算三个分量的中央分位区间并取联合交集；默认`conflict-central-coverage=0.975`联合保留11,379/11,998=`94.841%`，删除619=`5.159%`；若显式使用0.99，则联合保留11,739/11,998=`97.841%`，删除259=`2.159%`。
+  - 论文主图推荐在axes右上角使用中性文本`R = xx.x%`，其中`R`表示联合实际保留率；不建议使用三角、箭头、星号等带方向性或显著性含义的符号。caption需明确：若DTV/Self/Cross任一分量超出其component-wise中央分位区间，整条completion tuple被排除，且该处理只作用于趋势图，不改变实际threshold decision统计。
+- 验证命令与结果：使用Python标准库直接读取五份JSONL并复算Pandas线性分位定义、联合mask计数；结果与此前脚本输出的98%/99%联合保留率一致。
+- 已知风险/待办：正式论文必须根据最终启动参数动态显示实际联合保留率，不能把名义coverage参数直接当作保留率；若未来实现标识，需提供显式开关并避免与legend重叠。
+
+## 2026-08-25 — Decomposition/Conflict band与联合保留率标识
+
+- 改动范围：统一增强两张均值图的uncertainty band，并在绘图区右下角披露各自联合mask的实际保留率。
+- 修改文件：
+  - `scripts/plot_grpo_dtv_storyline_diagnostics.py`
+  - `develop.md`
+- 核心改动：
+  - 共用`_draw_mean_std()`的band alpha由`0.35`调整为`0.40`，因此Decomposition与Conflict同步加深。
+  - 新增右下角深灰色`R = xx.x%`标识，继承现有serif字体并使用`LEGEND_FS`字号；Decomposition由`len(trend_samples)/len(analysis_samples)`自动计算，Conflict由冲突子集联合mask自动计算，均显示实际联合保留率而非名义central coverage。
+  - 新增`--show-retention-notes`/`--no-show-retention-notes`总开关，默认显示并同时控制两张图。
+- 验证命令与结果：`python3 -m py_compile scripts/plot_grpo_dtv_storyline_diagnostics.py`与`git diff --check`通过；AST静态检查确认标识位于axes `(0.98,0.03)`、右/下对齐、颜色为`COLOR_DARK_GRAY`、字号为`LEGEND_FS`、保留一位小数，并确认两张图分别接收Decomposition/Conflict实际联合保留率。尝试用本机bundled Python完整渲染时缺少Matplotlib，未安装依赖或改动用户环境。
+- 已知风险/待办：右下角标识可能与极少数曲线局部重合；服务器现有DPO作图环境生成正式PDF后，仍需按论文实际缩放尺寸确认可读性。
+
+## 2026-08-25 — Conflict三角与R标识手动调整位置说明
+
+- 改动范围：无绘图代码改动；只读定位Conflict overflow三角控制参数，以及两张图共用`R = xx.x%`标识的位置和字号。
+- 修改文件：仅更新`develop.md`，无画图代码改动。
+- 复核结果：
+  - 黄色Conflict三角由`--conflict-overflow-marker-threshold`控制；当前默认0.0，设置为1.0后不存在`above_upper_fraction > 1.0`的bin，因此可在不修改代码的情况下完全关闭。
+  - `R`标识由`_annotate_retained_fraction()`统一控制；axes相对位置为`(0.98,0.03)`，右/下对齐，字号为`LEGEND_FS`，深灰色为`COLOR_DARK_GRAY`。
+- 验证命令与结果：使用`nl -ba`核对参数定义、marker筛选条件和annotation函数；无需运行绘图。
+- 已知风险/待办：当前Conflict marker没有独立Boolean开关，使用threshold=1.0属于参数层关闭方式；若未来希望命令语义更直观，可新增`--no-show-conflict-overflow-markers`，但本轮按用户要求不修改代码。
+
+## 2026-08-26 — DPO与GRPO/GSM8K跨任务coefficient及过滤图方案分析
+
+- 改动范围：无绘图代码改动；只读解析`../dpo_results`五份DPO decomposition samples/summary与五份GSM8K GRPO selection JSONL，评估可跨任务比较的无量纲coefficient和过滤行为图组。
+- 修改文件：仅更新`develop.md`，无画图代码改动。
+- 数据口径：
+  - DPO使用五份completion/sample级CSV，共144,640个finite training units、每seed 28,928；GRPO/GSM8K使用五份selection JSONL，共55,280个completion、每seed 11,056。
+  - 两边均按raw理论阈值定义`DTV keep: self+cross>=0`、`DTV-Loo keep: cross>=0`；跨任务不比较原始score绝对尺度，只比较decision比例与无量纲self/cross几何。
+- 核心结果：
+  - DPO pooled DTV/LOO drop ratio为6.57%/42.10%，额外LOO过滤差为35.54pp；GSM8K为1.88%/23.59%，差为21.70pp。
+  - Self-protection rescue coefficient `P(DTV keep, LOO drop | LOO drop)`：DPO为84.40%，GSM8K为92.01%；五seed均值±sample std分别为84.40±1.38%与92.00±1.02%。
+  - 对`DTV keep, LOO drop`冲突unit定义normalized negative-cross strength `kappa=|cross|/(self+|cross|)`；DPO pooled median为0.2173、五seed median均值±std为0.2171±0.0060，GSM8K pooled median为0.1131、五seed为0.1131±0.0041。DPO只有22.7%的冲突`kappa<=0.1`，GSM8K为46.0%；DPO约46.1%不超过0.2，GSM8K约70.2%。
+  - 两项seed-level指标在两个任务的五seed间完全分离；若预先指定其中一个作为primary coefficient，10个seed标签的精确双侧置换检验最小p值为2/C(10,5)=0.00794，但该检验只支持分布差异，不证明performance reversal的因果来源。
+- 图表建议：主文使用一个三panel机制图而不是三张重复图：(a)按0–100% normalized training progress的DTV/LOO drop-rate dynamics，两个任务使用同一y轴；(b)每任务decision composition或seed-level rescue coefficient，显示五seed点与mean±std；(c)seed-level median kappa点图，必要时附pooled ECDF。当前GRPO-only drop ratio保留到appendix。
+- 已知风险/待办：DPO CSV未保存mismatch条件元数据，正式跨任务图前必须从原run路径确认与GRPO `mismatch0p2`条件匹配；DPO与GRPO同时改变算法、任务、training unit和过滤scope，因此coefficient只能支持“task-dependent self-protection”机制一致性。要建立因果关系，仍需matched-retention threshold/ablation或记录被DTV救回样本的reward/advantage utility。
+
+## 2026-08-26 — 跨任务self/cross系数与过滤行为图方案讨论
+
+- 改动范围：无绘图代码改动；基于当前GRPO/DPO score公式和五份GSM8K selection JSONL，讨论可跨任务比较的无量纲系数及过滤比例论文图设计。
+- 修改文件：仅更新`develop.md`，无画图代码改动。
+- 复核结果：
+  - DTV判定为`self+cross>=0`，DTV-Loo判定与`cross>=0`同号；二者差异的核心区域是`cross<0`且`self+cross>=0`。
+  - 推荐在该冲突集合上使用无量纲negative-cross strength `rho=|cross|/(self+|cross|)`，而不是Pearson相关或无界`self/|cross|`。`rho`越小表示DTV-Loo因更弱的负cross证据而额外删除样本；它不受DPO/GRPO原始梯度尺度影响。
+  - GSM8K五seed的`rho`中位数分别约0.106–0.117，四分位区间大致0.042–0.238；后续必须对DPO用完全相同的unit/conflict定义计算并叠加ECDF，才能检验“DPO负cross更强、GSM8K负cross更接近0”的机制假设。
+  - 全threshold population下，五seed DTV过滤率为1.59%–2.18%，DTV-Loo为23.17%–24.05%，DTV-keeps/LOO-drops额外过滤为21.10%–22.28%，both-drop等于DTV过滤且没有LOO-only反向冲突。
+  - 推荐过滤行为图用非堆叠的DTV/LOO时间曲线及其差值区域，并补充跨seed paired-dot或decision composition；若采用三panel，则分别展示DTV drop、DTV-Loo drop和DTV-only disagreement。
+- 验证命令与结果：使用Python标准库逐份解析五个JSONL，按raw zero threshold复算每seed decision比例与冲突`rho`四分位数；数值与既有总体validation report一致。
+- 已知风险/待办：系数分布和过滤行为只能支持机制一致性，不能单独证明最终accuracy差异的因果关系；强因果结论仍需rate-matched threshold/filter ablation。AIME的group size与binary reward不同，后续必须单独验证，不能直接从GSM8K外推。
+## 2026-08-24：回答 Appendix 中 GRPO/GSM8K 待确认问题
+
+- 改动范围：仅处理上级目录 `appendix_open_questions.md` 中三项 GRPO/GSM8K 问题；从正式 seeded/group launchers 及其直接配置路径最小化核对 Group Policy-DTV-Loo 的 25% minimum retention、Mismatch-20% 的稳定 hash 近似选择和四 TPU devices mesh 证据；未处理 PPO、AIME 或 DPO 问题，无训练代码或脚本改动。
+- 修改文件：`../appendix_open_questions.md`、`develop.md`。
+- 验证命令与结果：定点读取 `run_seeded_full.sh`、Group DTV/DTV-Loo launcher、`rl_cluster.py`、`self_inf_loo_trainer.py`、`reward_rank_noise.py`、suite seed 接线和 `sharding.py`；确认正式 Group DTV-Loo 默认 `min_keep_fraction=0.25` 且普通 DTV 无该 cap，Mismatch-20% 使用 prompt-level SHA256 threshold 因而是约 20%，tied-reward selected groups 与 effective groups 分开统计；硬件只能确认 single worker、four TPU devices 与 `(fsdp,tp)=(4,1)`。
+- 已知风险/待办：当前本地没有全部五 seed selection logs，不能统计 LOO safeguard 的实际触发次数；缺少 cloud/TPU resource metadata，不能确认 TPU 产品型号。
+
+## 2026-08-26 — 全量DTV/DTV-Loo分数优先的跨实验分析口径
+
+- 改动范围：无画图代码改动；重新按“全量score/过滤结构 → conflict机制”的顺序解析五份DPO sample CSV与五份GRPO/GSM8K selection JSONL。
+- 修改文件：仅更新`develop.md`，无画图或训练代码改动。
+- 全量结果：
+  - DPO/GRPO的exact-zero score mass分别为0.65%/39.30%；DTV与DTV-Loo全量sample score的Spearman相关分别为0.591/0.358，排除exact-zero的敏感性检查为0.593/0.391，差异不是由zero ties单独造成。
+  - 95% robust absolute-score ratio `Q95(|DTV|)/Q95(|DTV-Loo|)`分别为2.00/3.83，且两个实验的5-seed区间不重叠：DPO约1.91–2.11，GRPO约3.45–4.22。
+  - DPO的DTV/DTV-Loo drop为6.57%/42.10%，decision disagreement为35.54%；GRPO为1.88%/23.59%与21.70%。因此过滤数量本身不能单独解释performance reversal。
+  - 同样的central-99%三分量联合mask后，DPO联合保畘98.36%，robust mean为Self/Cross/DTV/LOO=14.75/1.36/16.11/1.36；GRPO保畘98.41%，对应5.50/0.66/6.16/0.88。绝对值受算法和group normalization影响，只作描述，不作主要跨任务coefficient。
+- 系数建议：全量主证据用score-rank concordance `rho_score=Spearman(DTV,DTV-Loo)`、robust scale ratio和threshold disagreement；可定义由实际DTV/LOO score构造的signed normalized cross share，其全分布同时编码both-keep、DTV-only与both-drop区域。Conflict `kappa`仅作第二层机制分析。
+- 验证命令与结果：使用bundled Python的Pandas/NumPy直接读取144,640个DPO finite units与55,280个GRPO completions，复算分位数、Spearman rank correlation、zero mass、decision composition及central-98/99联合mask；与先前drop/conflict计数一致。
+- 已知风险/待办：GRPO原始算术mean被少量超大outlier严重支配（overall Self mean 6943、median 0.884），不能将raw mean当作跨算法机制证据；主文应报告全量无量纲/秩统计，并将central-99 robust mean的联合实际保留率明确披露。
+
+## 2026-08-26 — 简化全量过滤一致性coefficient及zero-mass敏感性检查
+
+- 改动范围：无代码改动；按“GSM8K的DTV与DTV-Loo全量过滤是否更趋同”的教授假设，比较最简单的binary-mask agreement/disagreement及常见重叠系数。
+- 修改文件：仅更新`develop.md`，无画图或训练代码改动。
+- 主要结果：
+  - 全量decision agreement `P(mask_DTV=mask_LOO)`：DPO=64.46%，GRPO/GSM8K=78.30%；等价disagreement为35.54%/21.70%，表面上支持GSM8K的全量决策更趋同。
+  - 但GRPO/GSM8K的exact-zero `(self,cross)=(0,0)` mass为39.30%，DPO仅0.65%。仅作敏感性检查、在非零信号unit上重算agreement后，DPO=64.23%，GRPO=64.24%，几乎完全相同。
+  - 全量score Spearman也不支持“GSM8K score更相关”：DPO=0.591，GRPO=0.358；排除exact-zero后为0.593/0.391。
+  - keep-set Jaccard为DPO=0.620、GRPO=0.779，但drop-set Jaccard反向为0.156/0.080；Cohen kappa为0.176/0.117，phi/MCC为0.311/0.249。因此选择keep-set overlap来支持假设会产生class-choice/cherry-picking风险。
+- coefficient建议：若只描述包含zero units的总体过滤行为，用最直接的`A_all=P(mask_DTV=mask_LOO)`或`D_all=1-A_all`，不需要新创复杂系数；若用于解释更新/性能，必须同时报告`A_signal=P(agreement | self+|cross|>0)`或明确披露zero mass。
+- 验证命令与结果：用bundled Python基于已复算的全量2×2 decision counts计算agreement、Jaccard、Dice、Cohen kappa和phi；再直接读取五份DPO sample CSV与五份GRPO JSONL对exact-zero/nonzero子集复算decision ratio。
+- 已知风险/待办：全量agreement的跨实验差异几乎全由GSM8K的高zero-score mass产生；zero units虽被两个规则保留，但不提供梯度更新，因此不能单独用它们解释performance reversal。性能差异最终仍只能由disagreement units的强度或utility区分。
+
+## 2026-08-26 — Group-GRPO与Pairwise-DPO的全量Self/Cross相对贡献coeficient
+
+- 改动范围：无代码改动；按教授假设重新将问题定义为“group-wise GRPO/GSM8K与pairwise DPO/UltraFeedback的Self/Cross相对几何是否不同”，不先筛选conflict units。
+- 修改文件：仅更新`develop.md`，无画图或训练代码改动。
+- 建议主系数：对所有`Self+|Cross|>0`的信号unit定义per-unit cross contribution `r_i=|Cross_i|/(Self_i+|Cross_i|)`，实验级coefficient取五seed的sample median/各seed median。该系数有界于[0,1]，0表示Self完全主导，0.5表示两者同量级，1表示Cross完全主导。Exact-zero unit上比例无定义，应单独报告zero mass而非人为设为0。
+- 全量结果：
+  - 所有nonzero units的pooled median `r`：DPO=0.285，GRPO/GSM8K=0.167。DPO五seed median为0.274–0.299，GRPO为0.159–0.176，区间完全分离。
+  - 只按Cross符号做最小条件化、在所有`Cross<0`的unit上（不要求DTV/LOO冲突），median `r^-`：DPO=0.260，GRPO=0.128；五seed范围分别为0.246–0.274与0.121–0.133。
+  - 先前conflict-only median为DPO=0.217、GRPO=0.113，与全量及negative-cross子集的方向一致，因此conflict结果可放在全量结果之后作机制细化。
+- 解释口径：DPO/UltraFeedback中Cross相对Self约强一倍，负Cross更可能表示实质性pairwise conflict，因此DTV-Loo去除Self保护可能有益；GRPO/GSM8K中Self更主导、Cross相对更弱，仅根据较弱负Cross删除unit更容易过滤，与DTV优势一致。
+- 验证命令与结果：用bundled Python直接读发DPO sample CSV与GRPO JSONL，在不做quantile trimming的前提下计算全量nonzero、negative-cross及各seed的`r`分位数；有界比例不受GRPO极端raw magnitude支配。
+- 已知风险/待办：该系数支持“Self/Cross相对几何与performance reversal一致”，不能单独证明因果；最有力的out-of-sample验证是对GRPO/AIME计算同一`r`，若AIME在DTV-Loo占优时`r`也更接近DPO，才会显著增强该机制假设。
+
+## 2026-08-26 — Relative-cross coefficient的训练动态及主文/Appendix叙事方案
+
+- 改动范围：无画图代码改动；将每个seed的training progress归一化为0–100%并分5个等宽bin，检验`eta=median(|Cross|/(Self+|Cross|))`在全量nonzero及conflict population中的early-to-late变化。
+- 修改文件：仅更新`develop.md`，无画图或训练代码改动。
+- 定量结果：
+  - GRPO/GSM8K全量nonzero `eta_all`的5-bin seed-mean medians为0.202/0.175/0.160/0.154/0.153，early-to-late变匒-0.048；五个seed的delta全部为负。
+  - DPO/UltraFeedback对应为0.248/0.264/0.289/0.327/0.307，early-to-late变化+0.059；五个seed的delta全部为正。趋势为总体上升，但最后一bin较第四bin略回落，不应写成严格单调。
+  - GRPO/GSM8K conflict `eta_conf`为0.129/0.115/0.111/0.112/0.105，early-to-late -0.025；DPO为0.201/0.208/0.218/0.233/0.232，early-to-late +0.031。两个实验五seed的delta符号均一致。
+  - 肉眼所见raw vertical score gap与相对贡献不等价：绝对gap同时受整体score scale、Cross符号抵消、quantile trimming及y轴影响。主文应以无量纲`eta`为准，不应将“GSM8K gap缩小/DPO gap扩大”作为未校验的主结论。
+- 图内标识建议：为避免与已有retention `R=xx%`混淆，系数使用`eta_all`和`eta_conf`。Decomposition可报`eta_all=0.167`，Conflict可报`eta_conf=0.113`；early→late数值更适合放caption，或使用一行紧凑annotation，不应塞入legend。Coefficient使用untrimmed finite nonzero/conflict population，趋势曲线的`R`仍表示quantile mask实际保留率，caption需区分两个population。
+- 主文叙事建议：GRPO三panel可独立讲清“全量Cross相对贡献低且随训练下降 → conflict中负Cross更弱且继续下降 → DTV-Loo更可能基于弱负Cross过滤，DTV保留Self信号更合适”。主文只需一句cross-reference指向Appendix的matched DPO图，指出DPO在同一coefficient上展现反向变化且DTV-Loo占优。
+- 验证命令与结果：用bundled Python/Pandas读取全部DPO/GRPO sample级记录，按seed内normalized progress分5-bin，先在`seed×bin`内求per-unit ratio median，再跨5 seeds求mean/std；无任何时间平滑或quantile trimming。
+- 已知风险/待办：主文不能将relative-cross association表述为因果证明；需在Appendix中使用完全相同的coefficient、population及progress-bin定义复现DPO对照，并在后续AIME上做out-of-sample检验。
+
+## 2026-08-29 — GSM8K原始/robust全量及Conflict correlation分析
+
+- 改动范围：无画图代码改动；对五份GRPO/GSM8K selection JSONL分别计算completion-level、`seed×step`均值、跨5-seed的step曲线以及当前quantile-mask绘图曲线的Pearson/Spearman correlation。
+- 修改文件：仅更新`develop.md`，无画图或训练代码改动。
+- 原始全量结果：55,280个completions上Self–Cross Pearson/Spearman为0.0036/0.2009，DTV–LOO为0.0069/0.3584；排除exact-zero仅作敏感性检查后为0.0036/0.1232与0.0069/0.3915。Raw Pearson受极端outlier严重支配，五seed的DTV–LOO Pearson从-0.182到0.824，不能用pooled raw Pearson表述稳定关系。
+- 原始趋势结果：先在每个`seed×step`内对16 completions求mean、再跨5 seeds求step curve后，Self–Cross Pearson/Spearman为0.0023/0.4024，DTV–LOO为0.0073/0.5087。真正的DTV/LOO per-step drop-ratio curve Pearson/Spearman仅0.2582/0.2646，不支持“过滤判断趋势高度一致”。
+- 当前绘图口径：Decomposition使用central-98%三分量联合mask（实际保畘96.805%）后，跨5-seed step curve的Self–Cross Pearson/Spearman为0.4649/0.4236，DTV–LOO为0.6488/0.6083。这只支持moderate positive score-trend concordance，不能称为过滤decision高度相关。
+- Conflict结果：原始11,998个`DTV keep/LOO drop` completions上Self–Cross Pearson/Spearman为-0.5830/-0.5748，DTV–LOO为-0.5830/-0.4193；当前central-97.5%联合mask（实际保畘94.841%）的跨5-seed step curve为Self–Cross -0.5866/-0.6206，DTV–LOO -0.4697/-0.5070。负相关部分由条件区域`Cross<0, Self+Cross>=0`的几何选择产生，不能解释为两种decision相关；在该子集中DTV决策恒为keep、LOO恒为drop，decision correlation无定义。
+- 分bin风险：central-98%曲线再作50-step bin后，DTV–LOO Pearson可升至0.960，但14个bin的共同时间趋势会机械抬高correlation，不宜将其作为主文的独立机制证据。
+- 叙事结论：在不引入DPO的GSM8K主文部分，可写为“DTV与LOO的robust aggregate score trend中度同向，但threshold decisions并不高度一致；LOO的额外删除主要发生在弱负Cross的self-protected units上”。不能仅由score correlation推出DTV-Loo冗余或DTV性能更好。
+- 验证命令与结果：使用bundled Python/Pandas直接读取全部JSONL，使用Pandas Pearson及average-rank Spearman复算；联合mask口径与当前画图脚本一致，数据点数和retention与现有validation report一致。
+- 已知风险/待办：如果后续在图中增加correlation标识，必须在图注中写明population、联合mask、聚合层级与correlation类型；不应同时展示raw Pearson、Spearman与binned Pearson让读者自行选择。
+
+## 2026-08-29 — Self-protection Remark与DPO/GRPO性能反转的统一叙事
+
+- 改动范围：无代码改动；根据DPO中DTV低过滤率促成DTV-Loo、GRPO/GSM8K中DTV优于DTV-Loo、GRPO/AIME中DTV-Loo优于DTV的完整实验顺序，重构self-protection的理论和经验解释。
+- 修改文件：仅更新`develop.md`，无论文正文、画图或训练代码改动。
+- 理论结论：由`Self>=0`，DTV与DTV-Loo的结构性分歧区域是`-Self <= Cross < 0`；self-protection是数学性质，不本身表示错误。原Remark中“strongly negatively aligned”过强，因为Cross的绝对负值不等于相对Self的强负证据。
+- 统一机制：DTV-Loo应被定义为针对“可靠负Cross被Self掩盖”的targeted correction，而非DTV的普遍升级。当负Cross强且可靠时，self-protection可能救回应过滤unit，LOO有利；当负Cross弱/噪声化而Self有用时，LOO会过滤，DTV有利。
+- 实验叙事：DPO/UltraFeedback首先暴露DTV过滤不足5%及self-protection failure mode，由此导出DTV-Loo；GRPO随后给出边界条件，GSM8K中Cross相对Self弱且conflict更接近0，DTV-Loo额外删除可能是over-filtering，而AIME中LOO优势提示任务/reward结构决定负Cross是否可靠。
+- Remark修订原则：只陈述分歧区域及context dependence，不在理论Remark内预判self有害。将DPO/GSM8K/AIME的具体机制解释放在实验分析段落。
+- 已知风险/待办：当前GSM8K的relative-cross统计与DTV优势一致，但AIME尚未使用同一`eta=|Cross|/(Self+|Cross|)`口径验证。在AIME结果出来前，只能写“consistent with”而不能声称该系数完全解释三组性能结果。
+
+## 2026-08-29 — GSM8K独立叙事中的correlation边界
+
+- 改动范围：无代码、画图或论文正文改动；核对能否在尚未展开DPO对照的GSM8K段落中，以DTV/DTV-Loo correlation解释DTV优势。
+- 修改文件：仅更新`develop.md`。
+- 结论：现有数据不支持“过滤判断高度相关所以DTV-Loo冗余”的强表述。原始逐step drop-ratio曲线Pearson/Spearman约为0.258/0.265；central-98% robust聚合后的DTV/LOO score趋势Pearson/Spearman约为0.649/0.608，只能称中度同向。全量decision agreement 78.30%又被39.30%的exact-zero units明显抬高，在nonzero信号unit上仅64.24%。
+- 建议叙事：Self-protection是DTV与DTV-Loo产生分歧的数学机制，而不是预设为有害。GSM8K中负Cross相对Self较弱（`eta_all=0.167`、`eta_conf=0.113`），因此LOO的额外删除更可能由弱负Cross触发，DTV保留Self信号与其性能优势一致；DPO与AIME只在后续对照中用于验证何时负Cross更强或更可靠。
+- 已知风险/待办：AIME尚未按完全相同的`eta`、decision-disagreement和zero-mass口径复算；在此之前不能声称relative-cross机制已经因果解释所有性能反转。
+
+## 2026-08-29 — Relative cross contribution的DPO对照与论文放置建议
+
+- 改动范围：无代码、画图或论文正文改动；整理相同`eta=median(|Cross|/(Self+|Cross|))`定义下的DPO/UltraFeedback与GRPO/GSM8K对照，并确定论文中定义位置。
+- 修改文件：仅更新`develop.md`。
+- 对照结果：在untrimmed finite nonzero sample-level population上，DPO/UltraFeedback的`eta_all=0.285`，GRPO/GSM8K为0.167，DPO约为GSM8K的1.71倍；五seed median范围分别为0.274–0.299与0.159–0.176且不重叠。在DTV-keep/LOO-drop conflict population上，`eta_conf`分别为0.217与0.113，DPO约为1.92倍。
+- 论文建议：该量是事后机制诊断而非DTV/DTV-Loo算法组成，不放核心Methods；在首次使用它的Empirical Analysis/Diagnostic Metrics小段正式定义，主文报告核心数值，Appendix说明population、zero-denominator排除、seed汇总和敏感性检查。若未来把它用于自动选择DTV或DTV-Loo，才升级到Methods。
+- 已知风险/待办：这些跨设置差异与性能反转一致但不构成因果证明；AIME仍需同口径复算，才能形成DPO/GSM8K/AIME三点的out-of-sample证据链。
+
+## 2026-08-29 — Remark、DTV-lambda与GSM8K定性/定量分析方案
+
+- 改动范围：无代码、画图或论文正文改动；评估如何在不改变Self-Protection Remark及DTV-lambda核心内容的前提下，加入GSM8K中DTV优于DTV-Loo的机制分析。
+- 修改文件：仅更新`develop.md`。
+- Remark建议：保留`Self>=0`、分歧边界与context dependence；将“strongly negatively aligned”弱化为“negatively aligned”，并明确self-protection是结构性质而非预设有害，其效用取决于负Cross的相对强度与可靠性。
+- DTV-lambda建议：补充`d_lambda=c+lambda s`及`lambda`控制self-protection强度/keep-region大小的解释；保留`lambda=1/0`对应DTV/DTV-Loo及不额外调参的原结论。
+- GSM8K证据方案：主文优先报告DTV/LOO drop 1.88%/23.59%、decision disagreement 21.70%、`eta_all=0.167`、`eta_conf=0.113`及其随训练下降；DPO对照为`eta_all=0.285`、`eta_conf=0.217`并随训练上升。Correlation只可作辅助：GSM8K robust score Spearman约0.608是中度同向，原始drop-ratio Spearman约0.265，不足以声称过滤判断高度一致。
+- 图建议：若保留现有三panel，在decomposition/conflict分别标`eta_all`/`eta_conf`，并另增batch-wise DTV/LOO drop-rate panel；更聚焦的主文三panel可改为batch filter rate、relative-cross trajectory和decision region，现有decomposition/conflict移Appendix。
+- 已知风险/待办：教授批注中的“why DTV-Loo is better in this setting”与前句GSM8K上DTV占优矛盾，应确认或按上下文更正为“why DTV is better”；不能使用50-step bin后约0.96的相关性作为主证据，因为14个bin的共同时间趋势会机械抬高correlation。
+
+## 2026-08-29 — GSM8K六panel证据链与第三张新增图选择
+
+- 改动范围：无代码或画图改动；在保留decomposition、conflict和decision-region三panel的前提下，确定额外三panel的非重复信息职责及主文/Appendix分工。
+- 修改文件：仅更新`develop.md`。
+- 新增panel建议：第一张为batch/bin-level DTV与DTV-Loo drop-rate dynamics，并以两曲线间区域表示DTV-keep/LOO-drop的额外删除；第二张为`eta_all`与`eta_conf`的训练动态；第三张为跨设置的coefficient summary/forest plot，以相同口径并列GSM8K、DPO及后续AIME的五seed `eta_all`/`eta_conf`和误差，从而直接检验机制指标是否与DTV/DTV-Loo胜负一致。
+- 选择理由：DTV-vs-LOO score scatter或correlation图与现有Self/Cross decision region仅是线性换坐标，且现有correlation不支持“GSM8K高度一致”；agreement heatmap又受GSM8K 39.3% exact-zero mass影响。跨设置summary是现有三panel缺失的比较性证据，不重复几何机制。
+- 版面建议：主文分为两个三联图——机制图（decomposition/conflict/region）与行为/比较图（filter dynamics/eta dynamics/cross-setting summary）；DPO完整对应三panel放Appendix，但主文summary保留DPO系数点以闭合性能反转故事。
+- 理想增强：若未来重训能记录sample-level reward/advantage，decision-conditioned utility distribution是唯一能直接检验DTV-only units是否有用的结果图，可替换cross-setting summary或作为额外panel；当前分数几何只能支持“consistent with”，不能证明保留样本产生性能收益。
+
+## 2026-08-29 — GSM8K-only新增panel修订：eta动态与DTV-lambda敏感性
+
+- 改动范围：无代码或画图改动；根据该论文位置只能讨论GRPO/GSM8K的约束，取消跨DPO/AIME summary panel，细化新增第二、第三图的计算定义。
+- 修改文件：仅更新`develop.md`。
+- Eta动态定义：对每个finite nonzero completion计算`r=|Cross|/(Self+|Cross|)`；在每个`seed×time-bin`内分别对全部nonzero units及`Cross<0, Self+Cross>=0` conflicts取median，再跨5 seeds求mean及std/SEM，形成`eta_all(t)`和`eta_conf(t)`两条折线。该有界ratio无需quantile trimming，exact-zero只因分母为0而不进入ratio，仍保留在drop统计中。
+- 第三图建议：GSM8K-only的`DTV-lambda retention path`。定义`d_lambda=c+lambda s`及`A(lambda)=P(c<0, c+lambda s>=0)`，横轴`lambda in [0,1]`、纵轴相对DTV-Loo的additional retained ratio；`A(0)=0`，`A(1)=21.70%`。等价地对conflict unit定义临界`lambda_i^*=|c_i|/s_i`并画ECDF；由`eta_conf=0.113`得到中位`lambda^*≈0.127`，说明约一半self-protected conflicts在恢复约13%的Self权重时已改变决策。
+- 解释边界：lambda-retention图证明弱负Cross对Self权重高度敏感，并与DTV端点性能优势一致，但不能仅由分数几何证明被保留unit具有更高下游utility。最强验证仍是lambda性能ablation或decision-conditioned sample-level reward/advantage/evaluation influence。
+
+## 2026-08-29 — DTV-lambda离线敏感性与重训边界
+
+- 改动范围：无代码或画图改动；明确现有selection JSONL能支持的DTV-lambda分析与必须重训的结论边界。
+- 修改文件：仅更新`develop.md`。
+- 结论：现有每completion的`Self=s`和`Cross=c`足以离线复算任意`lambda in [0,1]`的`d_lambda=c+lambda s`、keep/drop、additional retention及critical `lambda*=|c|/s`，无需新增训练数据。
+- 限制：该曲线是固定已观测trajectory上的counterfactual decision sensitivity；若JSONL来自DTV-Loo run，不能代表中间lambda实际训练后会访问的样本/模型trajectory。要绘制最终accuracy/reward/loss随lambda变化或声称某个中间lambda最优，必须对每个lambda独立多seed重训。
+
+## 2026-08-29 — Lambda曲线92%条件分母澄清
+
+- 改动范围：无代码或画图改动；澄清92%不是DTV drop ratio，而是以DTV-Loo dropped units为分母的conditional rescue fraction。
+- 修改文件：仅更新`develop.md`。
+- 数值关系：全体unit中DTV drop约1.88%，DTV-Loo drop约23.59%，DTV-keep/LOO-drop约21.70%；因此`21.70/23.59≈92.0%`表示LOO删除unit中约92%被DTV保留，剩余约8%为both-drop。
+- 可视化建议：为避免分母混淆，lambda敏感性主图优先画全体样本口径`D(lambda)=P(c+lambda s<0)`，端点为`D(0)=23.59%`和`D(1)=1.88%`；或画unconditional additional retention `A(lambda)`，端点为0和21.70%。92%只放caption作为条件解释。
+
+## 2026-08-29 — 新增Relative-Cross dynamics与DTV-lambda path绘图
+
+- 改动范围：仅向GRPO/GSM8K诊断脚本追加两张独立论文图及对应CSV/JSON诊断；未修改已有01–06图的函数、默认参数、计算、文件名或视觉设置。
+- 修改文件：`scripts/plot_grpo_dtv_storyline_diagnostics.py`、`develop.md`。
+- 新增图：`07_relative_cross_contribution_dynamics.{png,pdf}`按`seed×step-bin`分别计算全部nonzero unit与DTV-keep/LOO-drop conflict的sample-level`|Cross|/(Self+|Cross|)` median，再跨5 seeds画mean及可选std/SEM/none band；`08_dtv_lambda_retention_path.{png,pdf}`在固定已观测trajectory上离线复算`D(lambda)=P(Cross+lambda Self<0)`，端点对应DTV-Loo与DTV。
+- 新增参数：`--relative-cross-bin-size`、`--relative-cross-band-mode`、`--relative-cross-y-limits/ticks`、`--lambda-grid-size`、`--lambda-band-mode`、`--lambda-y-limits/ticks`。默认字号、serif字体、figure/axes size、线宽、颜色、band alpha和savefig路径均复用现有常量/函数。
+- 验证命令与结果：`python3 -m py_compile scripts/plot_grpo_dtv_storyline_diagnostics.py`通过；`git diff --check`通过；用标准库直接读取本地五份JSONL复核55,280 completions，得到LOO/DTV drop=23.589%/1.885%、additional retention=21.704%、`eta_all=0.16688`、`eta_conf=0.11314`，与既有统计一致。当前本机Python缺少Matplotlib/Pandas/NumPy，未能在本机完整渲染；需在用户原DPO虚拟环境执行端到端命令。
+- 已知风险/待办：lambda图是offline decision sensitivity而非中间lambda重训性能；Relative-Cross ratio仅因`0/0`无定义排除exact-zero units，drop/lambda过滤统计仍保留这些units。
