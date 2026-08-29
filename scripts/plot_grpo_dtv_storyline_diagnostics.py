@@ -376,6 +376,38 @@ def parse_args() -> argparse.Namespace:
         help="Explicit relative Cross-contribution ECDF x ticks.",
     )
     parser.add_argument(
+        "--weak-negative-bin-size",
+        type=int,
+        default=20,
+        help=(
+            "Training-step bin width for weak-negative Cross dynamics "
+            "(default: 20)."
+        ),
+    )
+    parser.add_argument(
+        "--weak-negative-y-limits",
+        nargs=2,
+        type=float,
+        default=None,
+        metavar=("YMIN", "YMAX"),
+        help=(
+            "Explicit weak-negative Cross y-axis limits; default covers the "
+            "displayed IQR or p10-p90 whiskers without clipping."
+        ),
+    )
+    parser.add_argument(
+        "--weak-negative-y-ticks",
+        nargs="+",
+        type=float,
+        default=None,
+        help="Optional explicit weak-negative Cross y ticks.",
+    )
+    parser.add_argument(
+        "--show-weak-negative-whiskers",
+        action="store_true",
+        help="Show p10-p90 vertical whiskers for every 20-step bin.",
+    )
+    parser.add_argument(
         "--smooth-window",
         type=int,
         default=1,
@@ -399,6 +431,8 @@ def parse_args() -> argparse.Namespace:
         parser.error("--drop-bin-size must be positive")
     if args.relative_cross_bin_size <= 0:
         parser.error("--relative-cross-bin-size must be positive")
+    if args.weak_negative_bin_size <= 0:
+        parser.error("--weak-negative-bin-size must be positive")
     if args.lambda_grid_size < 2:
         parser.error("--lambda-grid-size must be at least 2")
     if args.coverage_bin_size <= 0:
@@ -434,6 +468,7 @@ def parse_args() -> argparse.Namespace:
         "relative_cross_y_limits",
         "lambda_y_limits",
         "relative_cross_ecdf_x_limits",
+        "weak_negative_y_limits",
     ):
         limits = getattr(args, option)
         if limits is None:
@@ -1234,7 +1269,9 @@ def plot_relative_cross_contribution_dynamics(
     ax.set_yticks(y_ticks)
     style_axes(ax)
     ax.legend(
-        loc="upper right",
+        loc="upper center",
+        bbox_to_anchor=(0.5, 1.0),
+        ncol=2,
         frameon=False,
         fontsize=LEGEND_FS,
         handlelength=1.0,
@@ -1542,6 +1579,142 @@ def plot_relative_cross_contribution_ecdf(
         index=False,
     )
     path = output_dir / "grpo_dtv_relative_cross_contribution_ecdf_summary.json"
+    path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+    print(f"[SAVE] {path}")
+    return report
+
+
+def build_weak_negative_cross_dynamics(
+    samples: pd.DataFrame,
+    bin_size: int,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Summarize the magnitude of negative Cross terms on disagreement units."""
+    work = samples[samples["kept_dtv"] & ~samples["kept_loo"]][
+        ["seed", "step", "cross_term"]
+    ].copy()
+    if work.empty:
+        raise ValueError("no DTV-keep / DTV-Loo-drop conflicts available")
+    work["negative_cross_magnitude"] = work["cross_term"].abs()
+    work["step_bin"] = (work["step"].astype(int) - 1) // bin_size
+
+    grouped = work.groupby(["seed", "step_bin"], sort=True)
+    per_seed = grouped.agg(
+        step=("step", "mean"),
+        conflict_count=("negative_cross_magnitude", "size"),
+        p10=("negative_cross_magnitude", lambda values: values.quantile(0.10)),
+        p25=("negative_cross_magnitude", lambda values: values.quantile(0.25)),
+        median=("negative_cross_magnitude", "median"),
+        p75=("negative_cross_magnitude", lambda values: values.quantile(0.75)),
+        p90=("negative_cross_magnitude", lambda values: values.quantile(0.90)),
+    ).reset_index()
+    summary = (
+        per_seed.groupby("step_bin", as_index=False, sort=True)
+        .agg(
+            step=("step", "mean"),
+            p10=("p10", "mean"),
+            p25=("p25", "mean"),
+            median=("median", "mean"),
+            p75=("p75", "mean"),
+            p90=("p90", "mean"),
+            seed_count=("median", "count"),
+            conflict_count=("conflict_count", "sum"),
+        )
+    )
+    return per_seed, summary
+
+
+def plot_weak_negative_cross_dynamics(
+    samples: pd.DataFrame,
+    output_dir: Path,
+    bin_size: int,
+    y_limits: tuple[float, float] | None,
+    y_ticks: tuple[float, ...] | None,
+    show_whiskers: bool,
+) -> dict[str, Any]:
+    """Plot seed-balanced conflict median/IQR and optional p10-p90 whiskers."""
+    per_seed, summary = build_weak_negative_cross_dynamics(samples, bin_size)
+    x = summary["step"].to_numpy(dtype=np.float64)
+    p10 = summary["p10"].to_numpy(dtype=np.float64)
+    p25 = summary["p25"].to_numpy(dtype=np.float64)
+    median = summary["median"].to_numpy(dtype=np.float64)
+    p75 = summary["p75"].to_numpy(dtype=np.float64)
+    p90 = summary["p90"].to_numpy(dtype=np.float64)
+
+    fig, ax = plt.subplots(figsize=MAIN_FIGSIZE)
+    if show_whiskers:
+        ax.vlines(
+            x,
+            p10,
+            p90,
+            color=COLOR_LOO,
+            alpha=0.35,
+            linewidth=0.7,
+            label="p10-p90",
+            zorder=2,
+        )
+    ax.fill_between(
+        x,
+        p25,
+        p75,
+        color=COLOR_LOO_FILL,
+        alpha=0.40,
+        linewidth=0.0,
+        label="IQR",
+        zorder=3,
+    )
+    ax.plot(
+        x,
+        median,
+        color=COLOR_LOO,
+        linewidth=LINE_W,
+        label="Median",
+        zorder=5,
+    )
+    if y_limits is None:
+        visible_upper = p90 if show_whiskers else p75
+        upper = float(np.max(visible_upper))
+        y_limits = (0.0, upper * 1.08 if upper > 0.0 else 1.0)
+    ax.set_ylim(*y_limits)
+    if y_ticks is not None:
+        ax.set_yticks(y_ticks)
+    else:
+        ax.yaxis.set_major_locator(MaxNLocator(nbins=5))
+    ax.set_xlabel("Training step", fontsize=LABEL_FS)
+    ax.set_ylabel("Negative cross-term magnitude", labelpad=8, fontsize=LABEL_FS)
+    style_axes(ax)
+    ax.legend(
+        loc="upper right",
+        frameon=False,
+        fontsize=LEGEND_FS,
+        handlelength=1.0,
+        handletextpad=0.35,
+        labelspacing=0.35,
+        borderpad=0.0,
+    )
+    savefig(fig, output_dir / "10_weak_negative_cross_dynamics.png")
+    per_seed.to_csv(
+        output_dir / "grpo_dtv_weak_negative_cross_per_seed_bin.csv",
+        index=False,
+    )
+    summary.to_csv(
+        output_dir / "grpo_dtv_weak_negative_cross_dynamics.csv",
+        index=False,
+    )
+    report = {
+        "weak_negative_bin_size": int(bin_size),
+        "weak_negative_show_p10_p90_whiskers": bool(show_whiskers),
+        "weak_negative_conflict_samples": int(
+            (samples["kept_dtv"] & ~samples["kept_loo"]).sum()
+        ),
+        "weak_negative_first_bin_median": float(median[0]),
+        "weak_negative_last_bin_median": float(median[-1]),
+        "weak_negative_first_bin_p25": float(p25[0]),
+        "weak_negative_first_bin_p75": float(p75[0]),
+        "weak_negative_last_bin_p25": float(p25[-1]),
+        "weak_negative_last_bin_p75": float(p75[-1]),
+        "weak_negative_y_limits": [float(y_limits[0]), float(y_limits[1])],
+    }
+    path = output_dir / "grpo_dtv_weak_negative_cross_summary.json"
     path.write_text(json.dumps(report, indent=2), encoding="utf-8")
     print(f"[SAVE] {path}")
     return report
@@ -2395,6 +2568,22 @@ def main() -> None:
         tuple(args.relative_cross_ecdf_x_limits),
         tuple(args.relative_cross_ecdf_x_ticks),
     )
+    weak_negative_report = plot_weak_negative_cross_dynamics(
+        analysis_samples,
+        output_dir,
+        args.weak_negative_bin_size,
+        (
+            tuple(args.weak_negative_y_limits)
+            if args.weak_negative_y_limits is not None
+            else None
+        ),
+        (
+            tuple(args.weak_negative_y_ticks)
+            if args.weak_negative_y_ticks is not None
+            else None
+        ),
+        args.show_weak_negative_whiskers,
+    )
     plot_config = {
         "analysis_population": args.analysis_population,
         "analysis_population_samples": len(analysis_samples),
@@ -2444,6 +2633,19 @@ def main() -> None:
         ),
         "relative_cross_ecdf_x_ticks": list(args.relative_cross_ecdf_x_ticks),
         "relative_cross_ecdf_report": relative_cross_ecdf_report,
+        "weak_negative_bin_size": args.weak_negative_bin_size,
+        "weak_negative_y_limits": (
+            list(args.weak_negative_y_limits)
+            if args.weak_negative_y_limits is not None
+            else None
+        ),
+        "weak_negative_y_ticks": (
+            list(args.weak_negative_y_ticks)
+            if args.weak_negative_y_ticks is not None
+            else None
+        ),
+        "show_weak_negative_whiskers": args.show_weak_negative_whiskers,
+        "weak_negative_report": weak_negative_report,
         "smooth_window": args.smooth_window,
     }
     write_validation_report(

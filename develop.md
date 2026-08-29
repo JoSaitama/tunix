@@ -11240,3 +11240,32 @@ This file tracks engineering changes made in this repository.
 - 新增参数：`--relative-cross-ecdf-x-limits`与`--relative-cross-ecdf-x-ticks`；默认显示完整`[0,1]`区间。ECDF及07图都不做completion quantile trimming，不改变DTV/DTV-Loo过滤decision。
 - 验证命令与结果：`python3 -m py_compile scripts/plot_grpo_dtv_storyline_diagnostics.py`通过；`git diff --check`通过。另用标准库直接读取本地五份JSONL复核55,280 completions，其中21,727个exact-zero denominator不进入ratio；ECDF的All/Conflicts样本数为33,553/11,998，中位数为0.16688/0.11314；Conflicts中不超过0.1/0.2/0.25的比例为46.03%/70.20%/78.12%。本机系统Python及Codex bundled Python均缺少Matplotlib，未能本地完整渲染；需在用户原DPO虚拟环境执行端到端命令。
 - 已知风险/待办：ECDF描述的是score geometry及弱负Cross的分布，不直接证明被DTV保留的unit带来更高下游utility；论文应使用`consistent with`，并由已观测DTV性能结果闭合叙事。
+
+## 2026-08-29 — GSM8K三张新增图的证据链复核
+
+- 改动范围：本轮仅讨论，不修改画图代码；重新界定Relative-Cross、弱负Cross动态与过滤比例三张图各自回答的问题，以及它们能否支持GSM8K中优先DTV的结论。
+- 修改文件：仅更新`develop.md`，无画图或训练代码改动。
+- 建议证据链：第一图用relative Cross contribution动态说明Cross相对Self持续变弱；第二图在`DTV keep/LOO drop`或全部`Cross<0`population上画负Cross原始分数/绝对值的median及IQR随训练变化，直接说明负证据靠近0；第三图用DTV drop与additional LOO drop的bin级stacked ratio说明LOO对弱负Cross实施了大量额外删除。
+- 逻辑边界：三图加上已报告的DTV优于DTV-Loo最终性能，可以支持“LOO在该regime可能over-filter，保留Self-supported units与DTV优势一致”；过滤比例本身不能证明额外删除导致performance下降，也不能把DTV称为已被证明最优的update direction。若要作因果表述，需要DTV/LOO训练性能曲线、decision-conditioned utility或lambda重训ablation。
+- 表述建议：强调`LOO drops iff Cross<0`而`DTV drops iff Self+Cross<0`；当`Cross`只是接近0的弱负数且`Self`明显更大时，LOO的hard-zero decision主要由弱负证据的符号触发，而DTV要求负证据足以抵消Self，因此在GSM8K中更保守地保留有Self支持的unit。
+- 已知风险/待办：第二图需统一population、outlier规则和跨seed聚合口径；DPO过滤比例若在该正文位置尚未展开，不应用作GSM8K主图的必要前提，可在后续DPO/Appendix matched analysis中验证该机制是否反转。
+
+## 2026-08-29 — GSM8K弱负Cross向零集中数据核验
+
+- 改动范围：本轮只分析五份原始selection JSONL，不修改画图或训练代码；分别检查DTV-keep/LOO-drop conflicts与全部`Cross<0`units的原始Cross分布随训练变化。
+- 修改文件：仅更新`develop.md`，无画图代码改动。
+- Conflict结果：早期step 1–100的`|Cross|` median/IQR为0.941/[0.301,2.639]，后期step 592–691降为0.340/[0.120,0.884]；`|Cross|<=0.5`比例从35.6%升至60.9%，`<=1.0`从52.0%升至77.6%。五个seed的early→late median均下降，后期/早期比为0.233–0.439；20-step bin内median与step的各seed Spearman为-0.424至-0.719。
+- 全部负Cross对照：早期`|Cross|` median/IQR为1.095/[0.346,3.316]，后期为0.376/[0.128,1.009]；五seed均下降且20-step Spearman为-0.438至-0.789，说明该现象不是只由conflict条件区域机械产生。
+- Relative结果：Conflict的relative Cross contribution median由早期0.131降至后期0.107，方向一致但变化幅度小于raw negative magnitude。
+- 结论边界：数据支持“典型负Cross分布向0集中”，但不支持“raw mean单调趋近0”；raw conflict mean早期/中期/后期为3.443/0.901/1.572，后期仍受少量极值影响。因此若新增专门图，应优先使用20-step `median(|Cross|)`及IQR，或early/middle/late distribution，而不是raw mean±std。
+- 已知风险/待办：固定阈值`|Cross|<=0.5/1.0`仅作GSM8K内部描述，跨任务比较需使用relative contribution或匹配尺度；主文仍只能将弱负Cross、额外过滤与DTV性能优势表述为机制一致性而非因果证明。
+
+## 2026-08-29 — 新增20-step弱负Cross动态与Relative legend调整
+
+- 改动范围：新增一张DTV-keep/LOO-drop conflict的弱负Cross动态论文图；仅调整07 Relative-Cross图legend布局，其他已有图的计算与视觉设置保持不变。
+- 修改文件：`scripts/plot_grpo_dtv_storyline_diagnostics.py`、`develop.md`。
+- 新增图：`10_weak_negative_cross_dynamics.{png,pdf}`。默认每20 training steps分bin；每个`seed×bin`先计算`|Cross|`的p10/p25/median/p75/p90，再跨seed等权平均对应quantile；红色median线与IQR band始终显示，p10–p90竖直whiskers由参数选择。
+- 新增参数：`--weak-negative-bin-size`（默认20）、`--weak-negative-y-limits`、`--weak-negative-y-ticks`和`--show-weak-negative-whiskers`。未显式给y limits时，根据当前显示的IQR或p10–p90自动给出不截断范围。
+- 07图调整：legend改为顶部居中、一行两列；曲线、bin计算、band和输出文件不变。
+- 验证命令与结果：`python3 -m py_compile scripts/plot_grpo_dtv_storyline_diagnostics.py`与`git diff --check`均通过。使用标准库按新增图的`seed×20-step bin`等权quantile口径复核35个bins：首bin p10/p25/median/p75/p90为0.174/0.477/1.318/3.624/9.028，末bin为0.046/0.116/0.370/1.083/2.449，确认median及整个分布区间均明显向0收缩。当前本机Python缺少Matplotlib/Pandas，实际渲染仍需用户DPO环境。
+- 已知风险/待办：该图使用seed-balanced quantile aggregation，caption需注明band是completion分布的IQR而不是跨seed std/SEM；raw magnitude只适合GSM8K内部解释，跨任务仍应使用无量纲relative contribution。
