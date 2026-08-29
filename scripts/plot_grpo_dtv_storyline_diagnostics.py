@@ -43,6 +43,7 @@ COLOR_LOO = "#D62728"
 COLOR_LOO_FILL = "#F5B5B5"
 COLOR_DTV_DROP = "#017340"
 COLOR_DARK_GRAY = "#4D4D4D"
+COLOR_DARK_GRAY_FILL = "#C7C7C7"
 COLOR_GREEN = "#2CA02C"
 COLOR_YELLOW = "#E5AE00"
 
@@ -302,10 +303,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--relative-cross-bin-size",
         type=int,
-        default=50,
+        default=20,
         help=(
             "Training-step bin width for relative Cross-contribution dynamics "
-            "(default: 50)."
+            "(default: 20)."
         ),
     )
     parser.add_argument(
@@ -358,6 +359,21 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=(0.0, 0.1, 0.2, 0.3),
         help="Explicit DTV-lambda drop-ratio y ticks.",
+    )
+    parser.add_argument(
+        "--relative-cross-ecdf-x-limits",
+        nargs=2,
+        type=float,
+        default=(0.0, 1.0),
+        metavar=("XMIN", "XMAX"),
+        help="Explicit relative Cross-contribution ECDF x-axis limits.",
+    )
+    parser.add_argument(
+        "--relative-cross-ecdf-x-ticks",
+        nargs="+",
+        type=float,
+        default=(0.0, 0.2, 0.4, 0.6, 0.8, 1.0),
+        help="Explicit relative Cross-contribution ECDF x ticks.",
     )
     parser.add_argument(
         "--smooth-window",
@@ -417,6 +433,7 @@ def parse_args() -> argparse.Namespace:
         "coverage_y_limits",
         "relative_cross_y_limits",
         "lambda_y_limits",
+        "relative_cross_ecdf_x_limits",
     ):
         limits = getattr(args, option)
         if limits is None:
@@ -1184,21 +1201,15 @@ def plot_relative_cross_contribution_dynamics(
 ) -> dict[str, Any]:
     work, per_seed, summary = build_relative_cross_dynamics(samples, bin_size)
     x = summary["step"].to_numpy(dtype=np.float64)
-    suffix = {
-        "std": " median ± 1 std",
-        "sem": " median ± 1 sem",
-        "none": " median",
-    }[band_mode]
-
     fig, ax = plt.subplots(figsize=MAIN_FIGSIZE)
     _draw_mean_std(
         ax,
         x,
         summary["eta_all_mean"].to_numpy(dtype=np.float64),
         summary["eta_all_std"].to_numpy(dtype=np.float64),
-        COLOR_DTV,
-        COLOR_DTV_FILL,
-        "All nonzero:" + suffix,
+        COLOR_DARK_GRAY,
+        COLOR_DARK_GRAY_FILL,
+        "All",
         5,
         y_limits,
         band_mode,
@@ -1211,14 +1222,14 @@ def plot_relative_cross_contribution_dynamics(
         summary["eta_conflict_std"].to_numpy(dtype=np.float64),
         COLOR_LOO,
         COLOR_LOO_FILL,
-        "Conflicts:" + suffix,
+        "Conflicts",
         6,
         y_limits,
         band_mode,
         summary["eta_conflict_seed_count"].to_numpy(dtype=np.float64),
     )
     ax.set_xlabel("Training step", fontsize=LABEL_FS)
-    ax.set_ylabel("Relative cross contribution", labelpad=8, fontsize=LABEL_FS)
+    ax.set_ylabel("Cross-term contribution", labelpad=8, fontsize=LABEL_FS)
     ax.set_ylim(*y_limits)
     ax.set_yticks(y_ticks)
     style_axes(ax)
@@ -1427,6 +1438,110 @@ def plot_lambda_retention_path(
         "critical_lambda_p75": float(np.quantile(critical_lambda, 0.75)),
     }
     path = output_dir / "grpo_dtv_lambda_retention_summary.json"
+    path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+    print(f"[SAVE] {path}")
+    return report
+
+
+def plot_relative_cross_contribution_ecdf(
+    samples: pd.DataFrame,
+    output_dir: Path,
+    x_limits: tuple[float, float],
+    x_ticks: tuple[float, ...],
+) -> dict[str, Any]:
+    """Compare the full and self-protected relative-Cross distributions."""
+    work = samples[
+        [
+            "seed",
+            "step",
+            "group_index",
+            "generation_index",
+            "self_term",
+            "cross_term",
+            "dtv_score",
+            "kept_dtv",
+            "kept_loo",
+        ]
+    ].copy()
+    denominator = work["self_term"] + work["cross_term"].abs()
+    valid = np.isfinite(denominator) & (denominator > 0.0)
+    work = work[valid].copy()
+    if work.empty:
+        raise ValueError("no nonzero samples for relative Cross ECDF")
+    work["relative_cross_contribution"] = (
+        work["cross_term"].abs()
+        / (work["self_term"] + work["cross_term"].abs())
+    )
+    work["self_protected_conflict"] = work["kept_dtv"] & ~work["kept_loo"]
+
+    populations = (
+        ("All", work, COLOR_DARK_GRAY),
+        ("Conflicts", work[work["self_protected_conflict"]], COLOR_LOO),
+    )
+    fig, ax = plt.subplots(figsize=MAIN_FIGSIZE)
+    exported = []
+    report: dict[str, Any] = {
+        "relative_cross_ecdf_zero_denominator_samples": int(
+            len(samples) - len(work)
+        )
+    }
+    for label, population, color in populations:
+        if population.empty:
+            raise ValueError(f"no samples for relative Cross ECDF population {label}")
+        ordered = population.sort_values(
+            "relative_cross_contribution", kind="mergesort"
+        ).copy()
+        ordered["ecdf"] = (
+            np.arange(1, len(ordered) + 1, dtype=np.float64) / len(ordered)
+        )
+        ordered["population"] = label
+        ax.plot(
+            ordered["relative_cross_contribution"].to_numpy(dtype=np.float64),
+            ordered["ecdf"].to_numpy(dtype=np.float64),
+            color=color,
+            linewidth=LINE_W,
+            label=label,
+            zorder=5 if label == "Conflicts" else 4,
+        )
+        values = ordered["relative_cross_contribution"].to_numpy(
+            dtype=np.float64
+        )
+        key = label.lower()
+        report[f"relative_cross_ecdf_{key}_samples"] = int(len(values))
+        report[f"relative_cross_ecdf_{key}_median"] = float(np.median(values))
+        report[f"relative_cross_ecdf_{key}_le_0p1_fraction"] = float(
+            np.mean(values <= 0.1)
+        )
+        report[f"relative_cross_ecdf_{key}_le_0p2_fraction"] = float(
+            np.mean(values <= 0.2)
+        )
+        report[f"relative_cross_ecdf_{key}_le_0p25_fraction"] = float(
+            np.mean(values <= 0.25)
+        )
+        exported.append(ordered)
+
+    ax.set_xlim(*x_limits)
+    ax.set_xticks(x_ticks)
+    ax.set_ylim(0.0, 1.02)
+    ax.set_yticks(np.arange(0.0, 1.01, 0.2))
+    ax.set_xlabel("Cross-term contribution", fontsize=LABEL_FS)
+    ax.set_ylabel("Cumulative fraction", labelpad=8, fontsize=LABEL_FS)
+    style_axes(ax)
+    ax.legend(
+        loc="lower right",
+        frameon=False,
+        fontsize=LEGEND_FS,
+        handlelength=1.2,
+        handletextpad=0.35,
+        labelspacing=0.35,
+        borderpad=0.0,
+    )
+    savefig(fig, output_dir / "09_relative_cross_contribution_ecdf.png")
+    pd.concat(exported, ignore_index=True).to_csv(
+        output_dir / "grpo_dtv_relative_cross_contribution_ecdf.csv",
+        index=False,
+    )
+    path = output_dir / "grpo_dtv_relative_cross_contribution_ecdf_summary.json"
     path.write_text(json.dumps(report, indent=2), encoding="utf-8")
     print(f"[SAVE] {path}")
     return report
@@ -2274,6 +2389,12 @@ def main() -> None:
         tuple(args.lambda_y_limits),
         tuple(args.lambda_y_ticks),
     )
+    relative_cross_ecdf_report = plot_relative_cross_contribution_ecdf(
+        analysis_samples,
+        output_dir,
+        tuple(args.relative_cross_ecdf_x_limits),
+        tuple(args.relative_cross_ecdf_x_ticks),
+    )
     plot_config = {
         "analysis_population": args.analysis_population,
         "analysis_population_samples": len(analysis_samples),
@@ -2318,6 +2439,11 @@ def main() -> None:
         "lambda_y_limits": list(args.lambda_y_limits),
         "lambda_y_ticks": list(args.lambda_y_ticks),
         "lambda_retention_report": lambda_retention_report,
+        "relative_cross_ecdf_x_limits": list(
+            args.relative_cross_ecdf_x_limits
+        ),
+        "relative_cross_ecdf_x_ticks": list(args.relative_cross_ecdf_x_ticks),
+        "relative_cross_ecdf_report": relative_cross_ecdf_report,
         "smooth_window": args.smooth_window,
     }
     write_validation_report(

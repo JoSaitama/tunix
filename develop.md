@@ -11223,3 +11223,20 @@ This file tracks engineering changes made in this repository.
 - 新增参数：`--relative-cross-bin-size`、`--relative-cross-band-mode`、`--relative-cross-y-limits/ticks`、`--lambda-grid-size`、`--lambda-band-mode`、`--lambda-y-limits/ticks`。默认字号、serif字体、figure/axes size、线宽、颜色、band alpha和savefig路径均复用现有常量/函数。
 - 验证命令与结果：`python3 -m py_compile scripts/plot_grpo_dtv_storyline_diagnostics.py`通过；`git diff --check`通过；用标准库直接读取本地五份JSONL复核55,280 completions，得到LOO/DTV drop=23.589%/1.885%、additional retention=21.704%、`eta_all=0.16688`、`eta_conf=0.11314`，与既有统计一致。当前本机Python缺少Matplotlib/Pandas/NumPy，未能在本机完整渲染；需在用户原DPO虚拟环境执行端到端命令。
 - 已知风险/待办：lambda图是offline decision sensitivity而非中间lambda重训性能；Relative-Cross ratio仅因`0/0`无定义排除exact-zero units，drop/lambda过滤统计仍保留这些units。
+
+## 2026-08-29 — Relative-Cross视觉修订与lambda主文适用性复核
+
+- 改动范围：本轮仅讨论，不修改画图代码；复核Relative-Cross图的bin聚合、标签/颜色及lambda图能否支持“DTV update更优”的结论。
+- 修改文件：仅更新`develop.md`。
+- Relative-Cross结论：当前实现确实使用50-step bins；每个`seed×bin`先对sample-level ratio取median，再跨seed求mean/std或SEM。建议y轴写`Relative cross-term contribution`或`Cross-term contribution eta`，legend简化为`All`/`Conflicts`，公式`eta=median(|C|/(S+|C|))`用深灰色放左下角；配色优先灰色All+红色Conflicts，若强调群体也可用绿+红。
+- Lambda结论：当前drop-vs-lambda曲线只证明filter sensitivity，不能证明被保留unit具有更高utility或DTV update direction更优，主文不应让它承担该结论。若无新训练数据，优先用现有normalized conflict-strength ECDF展示弱负Cross分布（median 0.113；46.0%不超过0.1、70.2%不超过0.2），并结合已观测DTV端点性能写`consistent with`；若需直接证明utility，必须增加decision-conditioned sample reward/advantage/eval influence或lambda性能ablation。
+
+## 2026-08-29 — Relative-Cross dynamics定稿与ECDF新增
+
+- 改动范围：保持已有01–06图和08 DTV-lambda图的计算及视觉设置不变；调整07 Relative-Cross dynamics的论文标签与默认bin，并新增09 Relative-Cross contribution ECDF。
+- 修改文件：`scripts/plot_grpo_dtv_storyline_diagnostics.py`、`develop.md`。
+- 07图调整：默认`--relative-cross-bin-size`由50改为20；纵轴简化为`Cross-term contribution`；legend简化为`All`和`Conflicts`；全部样本曲线使用深灰色，conflict曲线使用红色；图内不放公式，公式留给caption；std/SEM/none band仍由既有参数控制。
+- 09图定义：在同一untrimmed finite population上逐completion计算`|Cross|/(Self+|Cross|)`；仅因分母为0而排除exact-zero unit，分别画全部nonzero units与DTV-keep/LOO-drop conflicts的ECDF。输出`09_relative_cross_contribution_ecdf.{png,pdf}`、逐点CSV和summary JSON。
+- 新增参数：`--relative-cross-ecdf-x-limits`与`--relative-cross-ecdf-x-ticks`；默认显示完整`[0,1]`区间。ECDF及07图都不做completion quantile trimming，不改变DTV/DTV-Loo过滤decision。
+- 验证命令与结果：`python3 -m py_compile scripts/plot_grpo_dtv_storyline_diagnostics.py`通过；`git diff --check`通过。另用标准库直接读取本地五份JSONL复核55,280 completions，其中21,727个exact-zero denominator不进入ratio；ECDF的All/Conflicts样本数为33,553/11,998，中位数为0.16688/0.11314；Conflicts中不超过0.1/0.2/0.25的比例为46.03%/70.20%/78.12%。本机系统Python及Codex bundled Python均缺少Matplotlib，未能本地完整渲染；需在用户原DPO虚拟环境执行端到端命令。
+- 已知风险/待办：ECDF描述的是score geometry及弱负Cross的分布，不直接证明被DTV保留的unit带来更高下游utility；论文应使用`consistent with`，并由已观测DTV性能结果闭合叙事。
