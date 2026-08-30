@@ -371,7 +371,7 @@ def parse_args() -> argparse.Namespace:
         "--show-legends",
         action=argparse.BooleanOptionalAction,
         default=True,
-        help="Show or hide legends on all plots (default: show).",
+        help="Show or hide the Decision Region legend only (default: show).",
     )
     parser.add_argument(
         "--show-decision-region-labels",
@@ -474,7 +474,7 @@ def style_axes(ax: plt.Axes) -> None:
 
 
 def add_legend(ax: plt.Axes, *args: Any, **kwargs: Any) -> Any:
-    """Add a legend when the command-line legend switch is enabled."""
+    """Add the Decision Region legend when its switch is enabled."""
     if not SHOW_LEGENDS:
         return None
     return ax.legend(*args, **kwargs)
@@ -1079,8 +1079,7 @@ def plot_score_decomposition(
         ax_right.set_position(COVERAGE_AXES_POSITION)
         handles.append(coverage_handle)
         labels.append("Retained coverage")
-    add_legend(
-        ax,
+    ax.legend(
         handles,
         labels,
         loc="upper center",
@@ -1146,8 +1145,7 @@ def plot_drop_ratio_story(
         y_limits = (0.0, math.ceil(observed / unit) * unit + unit)
     ax.set_ylim(*y_limits)
     style_axes(ax)
-    add_legend(
-        ax,
+    ax.legend(
         loc="upper center",
         bbox_to_anchor=(0.5, 1.0),
         ncol=1,
@@ -1269,8 +1267,7 @@ def plot_relative_cross_contribution_dynamics(
     ax.set_ylim(*y_limits)
     ax.set_yticks(y_ticks)
     style_axes(ax)
-    add_legend(
-        ax,
+    ax.legend(
         loc="upper center",
         bbox_to_anchor=(0.5, 1.0),
         ncol=2,
@@ -1409,8 +1406,7 @@ def plot_weak_negative_cross_dynamics(
     handles, labels = ax.get_legend_handles_labels()
     legend_items = {label: handle for handle, label in zip(handles, labels)}
     legend_order = ["Median", "IQR", "p10-p90"]
-    add_legend(
-        ax,
+    ax.legend(
         [legend_items[label] for label in legend_order],
         legend_order,
         loc="upper center",
@@ -1500,6 +1496,12 @@ def plot_decision_regions(
         "Drop by both",
         "DTV drops / LOO keeps",
     )
+    label_map = {
+        "Keep by both": "Both keep",
+        "DTV keeps / LOO drops": "DTV keeps only",
+        "Drop by both": "Both drop",
+        "DTV drops / LOO keeps": "DTV-Loo keeps only",
+    }
     point_color = {
         "Keep by both": COLOR_DARK_GREEN,
         "DTV keeps / LOO drops": COLOR_LOO,
@@ -1544,6 +1546,7 @@ def plot_decision_regions(
             color=COLOR_LOO,
             linewidth=1.0,
             linestyle="--",
+            label="DTV-Loo boundary",
             zorder=8,
         )
     boundary_x = np.linspace(x_min, x_max, 512)
@@ -1555,6 +1558,7 @@ def plot_decision_regions(
         color=COLOR_DTV,
         linewidth=1.0,
         linestyle="--",
+        label="DTV boundary",
         zorder=8,
     )
     for label in order:
@@ -1566,6 +1570,7 @@ def plot_decision_regions(
             subset["self_term"],
             s=7.2,
             color=point_color[label],
+            label=label_map[label],
             edgecolors="none",
             rasterized=True,
             zorder=5,
@@ -1625,6 +1630,27 @@ def plot_decision_regions(
             fontsize=LEGEND_FS * font_scale,
             zorder=20,
         )
+    legend = add_legend(
+        ax,
+        loc="upper right",
+        bbox_to_anchor=(1.01, 1.01),
+        ncol=1,
+        frameon=False,
+        fontsize=LEGEND_FS * font_scale,
+        markerscale=1.5,
+        scatterpoints=1,
+        handlelength=1.0,
+        handletextpad=0.35,
+        labelspacing=0.35,
+        borderpad=0.0,
+    )
+    for handle in getattr(
+        legend,
+        "legend_handles",
+        getattr(legend, "legendHandles", []),
+    ):
+        if hasattr(handle, "set_sizes"):
+            handle.set_sizes([30])
     savefig(fig, output_dir / output_filename)
     print(
         "[SCATTER] "
@@ -1806,8 +1832,7 @@ def plot_conflict_means(
                 color=COLOR_YELLOW,
                 zorder=21,
             )
-    add_legend(
-        ax,
+    ax.legend(
         legend_handles,
         legend_labels,
         loc="upper center",

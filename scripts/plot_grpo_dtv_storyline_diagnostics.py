@@ -412,7 +412,7 @@ def parse_args() -> argparse.Namespace:
         "--show-legends",
         action=argparse.BooleanOptionalAction,
         default=True,
-        help="Show or hide legends on all plots (default: show).",
+        help="Show or hide the Decision Region legend only (default: show).",
     )
     parser.add_argument(
         "--show-decision-region-labels",
@@ -519,7 +519,7 @@ def style_axes(ax: plt.Axes) -> None:
 
 
 def add_legend(ax: plt.Axes, *args: Any, **kwargs: Any) -> Any:
-    """Add a legend when the command-line legend switch is enabled."""
+    """Add the Decision Region legend when its switch is enabled."""
     if not SHOW_LEGENDS:
         return None
     return ax.legend(*args, **kwargs)
@@ -1124,8 +1124,7 @@ def plot_score_decomposition(
         ax_right.set_position(COVERAGE_AXES_POSITION)
         handles.append(coverage_handle)
         labels.append("Retained coverage")
-    add_legend(
-        ax,
+    ax.legend(
         handles,
         labels,
         loc="upper center",
@@ -1191,8 +1190,7 @@ def plot_drop_ratio_story(
         y_limits = (0.0, math.ceil(observed / unit) * unit + unit)
     ax.set_ylim(*y_limits)
     style_axes(ax)
-    add_legend(
-        ax,
+    ax.legend(
         loc="upper center",
         bbox_to_anchor=(0.5, 1.0),
         ncol=1,
@@ -1314,8 +1312,7 @@ def plot_relative_cross_contribution_dynamics(
     ax.set_ylim(*y_limits)
     ax.set_yticks(y_ticks)
     style_axes(ax)
-    add_legend(
-        ax,
+    ax.legend(
         loc="upper center",
         bbox_to_anchor=(0.5, 1.0),
         ncol=2,
@@ -1481,8 +1478,7 @@ def plot_lambda_retention_path(
     ax.set_xlabel(r"Self-term weight $\lambda$", fontsize=LABEL_FS)
     ax.set_ylabel("Drop ratio", labelpad=8, fontsize=LABEL_FS)
     style_axes(ax)
-    add_legend(
-        ax,
+    ax.legend(
         loc="upper right",
         frameon=False,
         fontsize=LEGEND_FS,
@@ -1612,8 +1608,7 @@ def plot_relative_cross_contribution_ecdf(
     ax.set_xlabel("Cross-term contribution", fontsize=LABEL_FS)
     ax.set_ylabel("Cumulative fraction", labelpad=8, fontsize=LABEL_FS)
     style_axes(ax)
-    add_legend(
-        ax,
+    ax.legend(
         loc="lower right",
         frameon=False,
         fontsize=LEGEND_FS,
@@ -1735,8 +1730,7 @@ def plot_weak_negative_cross_dynamics(
         for label in ("Median", "IQR", "p10-p90")
         if label in legend_items
     ]
-    add_legend(
-        ax,
+    ax.legend(
         [legend_items[label] for label in legend_order],
         legend_order,
         loc="upper center",
@@ -2126,8 +2120,7 @@ def plot_conflict_means(
                 zorder=21,
             )
     handles, labels = ax.get_legend_handles_labels()
-    add_legend(
-        ax,
+    ax.legend(
         handles,
         labels,
         loc="upper center",
@@ -2206,8 +2199,7 @@ def plot_log_log_self_protection(
     ax.set_xlabel(r"$|C|$", fontsize=LABEL_FS)
     ax.set_ylabel(r"$S$", labelpad=8, fontsize=LABEL_FS)
     style_axes(ax)
-    add_legend(
-        ax,
+    ax.legend(
         loc="upper left",
         frameon=False,
         fontsize=LEGEND_FS,
@@ -2285,8 +2277,7 @@ def plot_normalized_conflict_strength_ecdf(
     ax.set_xlabel(r"$|C|/(S+|C|)$", fontsize=LABEL_FS)
     ax.set_ylabel("Cumulative fraction", labelpad=8, fontsize=LABEL_FS)
     style_axes(ax)
-    add_legend(
-        ax,
+    ax.legend(
         loc="lower right",
         frameon=False,
         fontsize=LEGEND_FS,
