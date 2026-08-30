@@ -449,7 +449,7 @@ def style_axes(ax: plt.Axes) -> None:
         width=0.8,
         labelsize=TICK_FS,
     )
-    ax.xaxis.labelpad = 6
+    ax.xaxis.labelpad = 5
     ax.grid(True, alpha=0.20, linewidth=0.7)
     ax.set_box_aspect(0.90 * FIGURE_HEIGHT_SCALE)
     ax.set_position(PAPER_AXES_POSITION)
