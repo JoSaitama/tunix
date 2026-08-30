@@ -54,7 +54,7 @@ FIGURE_HEIGHT_SCALE = 0.7
 MAIN_FIGSIZE = (5.9, 5.2 * FIGURE_HEIGHT_SCALE)
 PAPER_AXES_POSITION = [0.18, 0.20, 0.78, 0.76]
 COVERAGE_AXES_POSITION = [0.18, 0.20, 0.66, 0.76]
-LABEL_FS = 23
+LABEL_FS = 22
 TICK_FS = 22
 TITLE_FS = 22
 LEGEND_FS = 19
@@ -1335,7 +1335,7 @@ def plot_weak_negative_cross_dynamics(
     else:
         ax.yaxis.set_major_locator(MaxNLocator(nbins=5))
     ax.set_xlabel("Training step", fontsize=LABEL_FS)
-    ax.set_ylabel("Neg. cross-term magnitude", labelpad=8, fontsize=LABEL_FS)
+    ax.set_ylabel("Neg. cross-term mag.", labelpad=8, fontsize=LABEL_FS)
     style_axes(ax)
     savefig(fig, output_dir / "10_weak_negative_cross_dynamics.png")
     per_seed.to_csv(

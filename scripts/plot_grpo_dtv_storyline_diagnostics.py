@@ -41,10 +41,12 @@ COLOR_DTV = "#F28E2B"
 COLOR_DTV_FILL = "#FAD7A0"
 COLOR_LOO = "#D62728"
 COLOR_LOO_FILL = "#F5B5B5"
-COLOR_DTV_DROP = "#017340"
+COLOR_LOO_BAND_SOLID = "#FBE1E1"
+COLOR_DARK_GREEN = "#017340"
 COLOR_DARK_GRAY = "#4D4D4D"
 COLOR_DARK_GRAY_FILL = "#C7C7C7"
 COLOR_GREEN = "#2CA02C"
+COLOR_BOTH_KEEP_FILL = "#D9F0D3"
 COLOR_YELLOW = "#E5AE00"
 
 LINE_W = 1.0
@@ -392,7 +394,7 @@ def parse_args() -> argparse.Namespace:
         metavar=("YMIN", "YMAX"),
         help=(
             "Explicit weak-negative Cross y-axis limits; default covers the "
-            "displayed IQR or p10-p90 whiskers without clipping."
+            "displayed p10-p90 band without clipping."
         ),
     )
     parser.add_argument(
@@ -401,11 +403,6 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=None,
         help="Optional explicit weak-negative Cross y ticks.",
-    )
-    parser.add_argument(
-        "--show-weak-negative-whiskers",
-        action="store_true",
-        help="Show p10-p90 vertical whiskers for every 20-step bin.",
     )
     parser.add_argument(
         "--smooth-window",
@@ -1121,7 +1118,7 @@ def plot_drop_ratio_story(
         x,
         dtv_drop,
         width=bar_width,
-        color=COLOR_DTV_DROP,
+        color=COLOR_DARK_GRAY,
         alpha=0.95,
         edgecolor="white",
         linewidth=0.20,
@@ -1629,9 +1626,8 @@ def plot_weak_negative_cross_dynamics(
     bin_size: int,
     y_limits: tuple[float, float] | None,
     y_ticks: tuple[float, ...] | None,
-    show_whiskers: bool,
 ) -> dict[str, Any]:
-    """Plot seed-balanced conflict median/IQR and optional p10-p90 whiskers."""
+    """Plot seed-balanced conflict median with nested quantile bands."""
     per_seed, summary = build_weak_negative_cross_dynamics(samples, bin_size)
     x = summary["step"].to_numpy(dtype=np.float64)
     p10 = summary["p10"].to_numpy(dtype=np.float64)
@@ -1641,23 +1637,22 @@ def plot_weak_negative_cross_dynamics(
     p90 = summary["p90"].to_numpy(dtype=np.float64)
 
     fig, ax = plt.subplots(figsize=MAIN_FIGSIZE)
-    if show_whiskers:
-        ax.vlines(
-            x,
-            p10,
-            p90,
-            color=COLOR_LOO,
-            alpha=0.35,
-            linewidth=0.7,
-            label="p10-p90",
-            zorder=2,
-        )
+    ax.fill_between(
+        x,
+        p10,
+        p90,
+        color=COLOR_LOO_FILL,
+        alpha=0.16,
+        linewidth=0.0,
+        label="p10-p90",
+        zorder=2,
+    )
     ax.fill_between(
         x,
         p25,
         p75,
         color=COLOR_LOO_FILL,
-        alpha=0.40,
+        alpha=0.42,
         linewidth=0.0,
         label="IQR",
         zorder=3,
@@ -1671,8 +1666,7 @@ def plot_weak_negative_cross_dynamics(
         zorder=5,
     )
     if y_limits is None:
-        visible_upper = p90 if show_whiskers else p75
-        upper = float(np.max(visible_upper))
+        upper = float(np.max(p90))
         y_limits = (0.0, upper * 1.08 if upper > 0.0 else 1.0)
     ax.set_ylim(*y_limits)
     if y_ticks is not None:
@@ -1713,7 +1707,10 @@ def plot_weak_negative_cross_dynamics(
     )
     report = {
         "weak_negative_bin_size": int(bin_size),
-        "weak_negative_show_p10_p90_whiskers": bool(show_whiskers),
+        "weak_negative_outer_band": "p10-p90",
+        "weak_negative_outer_band_alpha": 0.16,
+        "weak_negative_inner_band": "p25-p75",
+        "weak_negative_inner_band_alpha": 0.42,
         "weak_negative_conflict_samples": int(
             (samples["kept_dtv"] & ~samples["kept_loo"]).sum()
         ),
@@ -1777,13 +1774,44 @@ def plot_decision_regions(
         "DTV drops / LOO keeps": "DTV-Loo keeps only",
     }
     color_map = {
-        "Keep by both": COLOR_GREEN,
+        "Keep by both": COLOR_DARK_GREEN,
         "DTV keeps / LOO drops": COLOR_LOO,
         "Drop by both": COLOR_DARK_GRAY,
-        "DTV drops / LOO keeps": "#9467BD",
+        "DTV drops / LOO keeps": COLOR_SELF,
     }
 
     fig, ax = plt.subplots(figsize=MAIN_FIGSIZE)
+    if x_max > 0.0:
+        ax.axvspan(
+            max(0.0, x_min),
+            x_max,
+            color=COLOR_BOTH_KEEP_FILL,
+            linewidth=0.0,
+            zorder=0,
+        )
+    if x_min < 0.0:
+        negative_x = np.linspace(x_min, min(0.0, x_max), 512)
+        decision_boundary = -negative_x
+        both_drop_upper = np.minimum(decision_boundary, y_max)
+        ax.fill_between(
+            negative_x,
+            y_min,
+            both_drop_upper,
+            where=both_drop_upper > y_min,
+            color=COLOR_DARK_GRAY_FILL,
+            linewidth=0.0,
+            zorder=0,
+        )
+        dtv_only_lower = np.maximum(decision_boundary, y_min)
+        ax.fill_between(
+            negative_x,
+            dtv_only_lower,
+            y_max,
+            where=dtv_only_lower < y_max,
+            color=COLOR_LOO_BAND_SOLID,
+            linewidth=0.0,
+            zorder=0,
+        )
     for label in order:
         subset = visible[visible["decision"] == label]
         if subset.empty:
@@ -2593,7 +2621,6 @@ def main() -> None:
             if args.weak_negative_y_ticks is not None
             else None
         ),
-        args.show_weak_negative_whiskers,
     )
     plot_config = {
         "analysis_population": args.analysis_population,
@@ -2655,7 +2682,6 @@ def main() -> None:
             if args.weak_negative_y_ticks is not None
             else None
         ),
-        "show_weak_negative_whiskers": args.show_weak_negative_whiskers,
         "weak_negative_report": weak_negative_report,
         "smooth_window": args.smooth_window,
     }
