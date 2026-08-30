@@ -47,8 +47,8 @@ COLOR_DARK_GRAY_FILL = "#C7C7C7"
 COLOR_GREEN = "#2CA02C"
 COLOR_YELLOW = "#E5AE00"
 
-LINE_W = 1.0
-FIGURE_HEIGHT_SCALE = 0.6
+LINE_W = 1.5
+FIGURE_HEIGHT_SCALE = 0.7
 MAIN_FIGSIZE = (5.9, 5.2 * FIGURE_HEIGHT_SCALE)
 PAPER_AXES_POSITION = [0.18, 0.20, 0.78, 0.76]
 COVERAGE_AXES_POSITION = [0.18, 0.20, 0.66, 0.76]
@@ -290,8 +290,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--drop-bin-size",
         type=int,
-        default=20,
-        help="Number of training steps averaged into each drop-ratio bar.",
+        default=10,
+        help=(
+            "Training-step bin width used only by the drop-ratio bars "
+            "(default: 10)."
+        ),
     )
     parser.add_argument(
         "--drop-y-limits",
@@ -300,15 +303,6 @@ def parse_args() -> argparse.Namespace:
         default=None,
         metavar=("YMIN", "YMAX"),
         help="Explicit drop-ratio limits; default chooses a non-clipping upper bound.",
-    )
-    parser.add_argument(
-        "--relative-cross-bin-size",
-        type=int,
-        default=20,
-        help=(
-            "Training-step bin width for relative Cross-contribution dynamics "
-            "(default: 20)."
-        ),
     )
     parser.add_argument(
         "--relative-cross-band-mode",
@@ -335,15 +329,6 @@ def parse_args() -> argparse.Namespace:
         help="Explicit relative Cross-contribution y ticks.",
     )
     parser.add_argument(
-        "--weak-negative-bin-size",
-        type=int,
-        default=20,
-        help=(
-            "Training-step bin width for weak-negative Cross dynamics "
-            "(default: 20)."
-        ),
-    )
-    parser.add_argument(
         "--weak-negative-y-limits",
         nargs=2,
         type=float,
@@ -364,7 +349,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--show-weak-negative-whiskers",
         action="store_true",
-        help="Show p10-p90 vertical whiskers for every 20-step bin.",
+        help="Show p10-p90 vertical whiskers for every shared line-plot bin.",
     )
     parser.add_argument(
         "--smooth-window",
@@ -378,10 +363,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--bin",
         type=int,
-        default=20,
+        default=10,
         help=(
-            "Shared final display-bin width for the Decomposition and Conflict "
-            "curves, applied after retention and trend aggregation (default: 20)."
+            "Shared training-step bin width for all line plots: Decomposition, "
+            "Conflict, Relative Cross, and Weak Negative (default: 10)."
         ),
     )
     parser.add_argument(
@@ -397,10 +382,6 @@ def parse_args() -> argparse.Namespace:
         parser.error("--scatter-quantile must be in (0.5, 1.0)")
     if args.drop_bin_size <= 0:
         parser.error("--drop-bin-size must be positive")
-    if args.relative_cross_bin_size <= 0:
-        parser.error("--relative-cross-bin-size must be positive")
-    if args.weak_negative_bin_size <= 0:
-        parser.error("--weak-negative-bin-size must be positive")
     if args.coverage_bin_size <= 0:
         parser.error("--coverage-bin-size must be positive")
     if not 0.0 <= args.coverage_alpha <= 1.0:
@@ -1234,7 +1215,7 @@ def plot_relative_cross_contribution_dynamics(
         summary["eta_conflict_seed_count"].to_numpy(dtype=np.float64),
     )
     ax.set_xlabel("Training step", fontsize=LABEL_FS)
-    ax.set_ylabel("Cross-term contribution", labelpad=8, fontsize=LABEL_FS)
+    ax.set_ylabel("Cross-term Contrib.", labelpad=8, fontsize=LABEL_FS)
     ax.set_ylim(*y_limits)
     ax.set_yticks(y_ticks)
     style_axes(ax)
@@ -1363,7 +1344,7 @@ def plot_weak_negative_cross_dynamics(
     else:
         ax.yaxis.set_major_locator(MaxNLocator(nbins=5))
     ax.set_xlabel("Training step", fontsize=LABEL_FS)
-    ax.set_ylabel("Negative cross-term magnitude", labelpad=8, fontsize=LABEL_FS)
+    ax.set_ylabel("Neg. cross-term magnitude", labelpad=8, fontsize=LABEL_FS)
     style_axes(ax)
     savefig(fig, output_dir / "10_weak_negative_cross_dynamics.png")
     per_seed.to_csv(
@@ -1439,7 +1420,6 @@ def plot_decision_regions(
             max(0.0, x_min),
             x_max,
             color=COLOR_LOO_FILL,
-            alpha=0.50,
             linewidth=0.0,
             zorder=0,
         )
@@ -1453,7 +1433,6 @@ def plot_decision_regions(
             both_drop_upper,
             where=both_drop_upper > y_min,
             color=COLOR_DARK_GRAY_FILL,
-            alpha=0.50,
             linewidth=0.0,
             zorder=0,
         )
@@ -1464,10 +1443,28 @@ def plot_decision_regions(
             y_max,
             where=dtv_only_lower < y_max,
             color=COLOR_DTV_FILL,
-            alpha=0.50,
             linewidth=0.0,
             zorder=0,
         )
+    if x_min <= 0.0 <= x_max:
+        ax.axvline(
+            0.0,
+            color=COLOR_LOO,
+            linewidth=1.0,
+            linestyle="--",
+            zorder=3,
+        )
+    boundary_x = np.linspace(x_min, x_max, 512)
+    boundary_y = -boundary_x
+    boundary_visible = (boundary_y >= y_min) & (boundary_y <= y_max)
+    ax.plot(
+        boundary_x[boundary_visible],
+        boundary_y[boundary_visible],
+        color=COLOR_DTV,
+        linewidth=1.0,
+        linestyle="--",
+        zorder=3,
+    )
     for label in order:
         subset = visible[visible["decision"] == label]
         if subset.empty:
@@ -1476,8 +1473,7 @@ def plot_decision_regions(
             subset["cross_term"],
             subset["self_term"],
             s=7.2,
-            alpha=0.85,
-            color=COLOR_GREEN,
+            color=COLOR_SELF,
             edgecolors="none",
             rasterized=True,
             zorder=5,
@@ -1618,7 +1614,7 @@ def plot_conflict_means(
     )
     ax.axhline(0.0, color="black", linewidth=1.0, alpha=0.65)
     ax.set_xlabel("Training step", fontsize=LABEL_FS)
-    ax.set_ylabel("Conflicted case score", labelpad=8, fontsize=LABEL_FS)
+    ax.set_ylabel("Con. case score", labelpad=8, fontsize=LABEL_FS)
     ax.set_ylim(*y_limits)
     ax.set_yticks(y_ticks)
     style_axes(ax)
@@ -2003,7 +1999,7 @@ def main() -> None:
     relative_cross_report = plot_relative_cross_contribution_dynamics(
         analysis_samples,
         output_dir,
-        args.relative_cross_bin_size,
+        args.bin,
         args.relative_cross_band_mode,
         tuple(args.relative_cross_y_limits),
         tuple(args.relative_cross_y_ticks),
@@ -2011,7 +2007,7 @@ def main() -> None:
     weak_negative_report = plot_weak_negative_cross_dynamics(
         analysis_samples,
         output_dir,
-        args.weak_negative_bin_size,
+        args.bin,
         (
             tuple(args.weak_negative_y_limits)
             if args.weak_negative_y_limits is not None
@@ -2058,12 +2054,10 @@ def main() -> None:
         "drop_bin_size": args.drop_bin_size,
         "drop_ymin": actual_drop_y_limits[0],
         "drop_ymax": actual_drop_y_limits[1],
-        "relative_cross_bin_size": args.relative_cross_bin_size,
         "relative_cross_band_mode": args.relative_cross_band_mode,
         "relative_cross_y_limits": list(args.relative_cross_y_limits),
         "relative_cross_y_ticks": list(args.relative_cross_y_ticks),
         "relative_cross_report": relative_cross_report,
-        "weak_negative_bin_size": args.weak_negative_bin_size,
         "weak_negative_y_limits": (
             list(args.weak_negative_y_limits)
             if args.weak_negative_y_limits is not None

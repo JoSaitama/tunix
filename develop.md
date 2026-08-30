@@ -11304,3 +11304,14 @@ This file tracks engineering changes made in this repository.
 - Decision region调整：删除DTV与DTV-Loo两条虚线boundary；所有散点统一为绿色，marker面积由9缩小为7.2（0.8倍）；Both keep、DTV keep/LOO drop和Both drop背景分别使用50%透明浅粉、浅橙和浅灰。
 - 验证命令与结果：`python3 -m py_compile scripts/plot_grpo_dtv_storyline.py`通过；`git diff --check`通过；AST检查确认新脚本无任何legend调用或05/06/08/09输出路径、decision region无虚线且marker/color/fill常量正确；对13个基础数据处理函数与原脚本逐一AST对比均完全一致；纯DataFrame测试确认`--bin`对应的最终分箱按step中心和各显示列均值聚合；figure size解析为`(5.9, 3.12)`。
 - 已知风险/待办：当前系统Python和Codex bundled Python均缺少Matplotlib，无法完成实际PNG/PDF端到端渲染及视觉验收；需在原训练/绘图环境运行新脚本，后续再根据沟通补legend并微调统一`--bin`默认值或背景透明度。
+
+## 2026-08-30 — Storyline画布、统一bin与Decision Region视觉修订
+
+- 改动范围：仅调整精简版`plot_grpo_dtv_storyline.py`的显示参数、统一bin入口、Decision Region视觉编码和三个纵轴标题；原始`plot_grpo_dtv_storyline_diagnostics.py`及基础样本处理、retention、quantile mask和跨seed聚合逻辑均未修改。
+- 修改文件：`scripts/plot_grpo_dtv_storyline.py`、`develop.md`。
+- 画布与线宽：figure宽度仍为5.9英寸，高度缩放由初版的0.6倍提高到0.7倍，即3.64英寸；axes box aspect同步调整。所有主折线共用`LINE_W=1.5`，Decision Region边界单独固定为1.0。
+- Bin参数：`--bin`默认值改为10并统一控制Decomposition、Conflict、Relative Cross和Weak Negative四类折线图；`--drop-bin-size`默认值改为10并只控制Drop Ratio柱状图。移除独立的`--relative-cross-bin-size`和`--weak-negative-bin-size`参数，输出summary仍记录各图实际收到的统一bin值。
+- Decision Region：恢复`Cross=0`红色虚线DTV-Loo边界和`Self+Cross=0`橙色虚线DTV边界，线宽均为1.0；浅粉、浅橙和浅灰region底色取消alpha透明度；所有散点改为不透明深蓝色`COLOR_SELF`，marker面积保持7.2。
+- 标题调整：Conflict纵轴改为`Con. case score`；Relative Cross纵轴改为`Cross-term Contrib.`；Weak Negative纵轴采用`Neg. cross-term magnitude`，其中只缩写Negative以兼顾长度和可读性。
+- 验证命令与结果：`python3 -m py_compile scripts/plot_grpo_dtv_storyline.py`与`git diff --check`通过；mock-import参数测试确认`--bin=10`和`--drop-bin-size=10`默认值及两个旧独立bin参数已移除；AST检查确认四个折线调用统一接收`args.bin`、柱状图接收`args.drop_bin_size`、两条边界颜色/虚线/1.0线宽正确、region fill无alpha；与本轮修改前HEAD对比确认13个基础数据处理函数完全一致；figure size为约`(5.9, 3.64)`且主折线宽度为1.5。
+- 已知风险/待办：当前可用Python环境仍缺少Matplotlib，未执行实际PNG/PDF渲染；需要在原绘图环境重点检查不透明region底色是否压低深蓝散点可读性，以及`Con.`是否在论文语境中足够明确，必要时可改为更清晰的`Conflict case score`。
