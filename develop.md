@@ -11278,3 +11278,20 @@ This file tracks engineering changes made in this repository.
 - 样式复核：figure size复用`MAIN_FIGSIZE=(5.9,5.2)`；轴标题/刻度/legend分别复用`LABEL_FS=24`、`TICK_FS=22`、`LEGEND_FS=19`；median主线复用`LINE_W=1.0`；IQR band透明度0.40与现有decomposition/conflict band一致；spine 0.9、grid 0.7及axes position均由`style_axes`统一。p10–p90 whisker线宽0.7、alpha 0.35，作为次级分布提示有意弱于主线。
 - 验证命令与结果：`python3 -m py_compile scripts/plot_grpo_dtv_storyline_diagnostics.py`与`git diff --check`均通过；复核确认08 DTV-lambda legend仍为原来的右上角，只有10弱负Cross图使用新的顶部三列布局。
 - 已知风险/待办：三列legend只有启用whiskers时包含三项；否则显示Median与IQR两项，避免图例声明未绘制的统计量。
+
+## 2026-08-29 — 弱负Cross纵轴标题简化建议
+
+- 改动范围：本轮仅讨论，不修改画图代码。
+- 修改文件：仅更新`develop.md`，无画图代码改动。
+- 建议：由于该图population已限定为`DTV keep/LOO drop`且必有`Cross<0`，纵轴优先简写为数学记号`|c|`；若希望图脱离caption也能独立理解，可用`Negative Cross magnitude`。不建议仅写`Cross magnitude`，否则无法看出只统计负Cross。
+- Caption要求：若采用`|c|`，caption需明确`c<0`且population为DTV-only conflicts，并说明线/band/whisker分别是median、IQR与p10–p90。
+- 验证命令与结果：无代码改动，无需执行测试。
+- 已知风险/待办：记号必须与正文Cross-term符号一致；若正文使用`c_j^{(t)}`，可将纵轴写成`|c_j^{(t)}|`。
+
+## 2026-08-29 — Cross贡献与弱负Cross指标简定义
+
+- 改动范围：本轮仅总结论文指标定义，不修改代码。
+- 修改文件：仅更新`develop.md`，无画图或训练代码改动。
+- 定义：Cross-term contribution为`|c|/(s+|c|)`，衡量Cross相对Self与Cross总幅度的占比；negative Cross-term magnitude为`|c|=-c`（仅在`c<0`population上），衡量负Cross证据的绝对强度。
+- 解释：前者越接近0表示Self主导，后者越接近0表示负Cross虽为负但证据很弱。
+- 验证命令与结果：无代码改动，无需测试。
