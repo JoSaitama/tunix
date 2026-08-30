@@ -291,8 +291,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--drop-bin-size",
         type=int,
-        default=20,
-        help="Number of training steps averaged into each drop-ratio bar.",
+        default=10,
+        help=(
+            "Training-step bin width used only by the drop-ratio bars "
+            "(default: 10)."
+        ),
     )
     parser.add_argument(
         "--drop-y-limits",
@@ -301,15 +304,6 @@ def parse_args() -> argparse.Namespace:
         default=None,
         metavar=("YMIN", "YMAX"),
         help="Explicit drop-ratio limits; default chooses a non-clipping upper bound.",
-    )
-    parser.add_argument(
-        "--relative-cross-bin-size",
-        type=int,
-        default=20,
-        help=(
-            "Training-step bin width for relative Cross-contribution dynamics "
-            "(default: 20)."
-        ),
     )
     parser.add_argument(
         "--relative-cross-band-mode",
@@ -378,15 +372,6 @@ def parse_args() -> argparse.Namespace:
         help="Explicit relative Cross-contribution ECDF x ticks.",
     )
     parser.add_argument(
-        "--weak-negative-bin-size",
-        type=int,
-        default=20,
-        help=(
-            "Training-step bin width for weak-negative Cross dynamics "
-            "(default: 20)."
-        ),
-    )
-    parser.add_argument(
         "--weak-negative-y-limits",
         nargs=2,
         type=float,
@@ -414,6 +399,15 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--bin",
+        type=int,
+        default=10,
+        help=(
+            "Shared training-step bin width for all line plots: Decomposition, "
+            "Conflict, Relative Cross, and Weak Negative (default: 10)."
+        ),
+    )
+    parser.add_argument(
         "--sampling-seed",
         type=int,
         default=0,
@@ -426,10 +420,6 @@ def parse_args() -> argparse.Namespace:
         parser.error("--scatter-quantile must be in (0.5, 1.0)")
     if args.drop_bin_size <= 0:
         parser.error("--drop-bin-size must be positive")
-    if args.relative_cross_bin_size <= 0:
-        parser.error("--relative-cross-bin-size must be positive")
-    if args.weak_negative_bin_size <= 0:
-        parser.error("--weak-negative-bin-size must be positive")
     if args.lambda_grid_size < 2:
         parser.error("--lambda-grid-size must be at least 2")
     if args.coverage_bin_size <= 0:
@@ -454,6 +444,8 @@ def parse_args() -> argparse.Namespace:
         parser.error("decomposition lower quantile must be below upper quantile")
     if args.smooth_window <= 0:
         parser.error("--smooth-window must be positive")
+    if args.bin <= 0:
+        parser.error("--bin must be positive")
     for option in (
         "score_y_limits",
         "decomposition_y_limits",
@@ -964,6 +956,24 @@ def smooth_for_display(
     return smoothed
 
 
+def bin_for_display(
+    frame: pd.DataFrame,
+    columns: tuple[str, ...],
+    bin_size: int,
+) -> pd.DataFrame:
+    """Average final plotted summaries in shared, equally sized step bins."""
+    if bin_size == 1:
+        return frame
+    work = frame[["step", *columns]].copy()
+    work["display_bin"] = (work["step"].astype(int) - 1) // bin_size
+    aggregations = {"step": "mean", **{column: "mean" for column in columns}}
+    return (
+        work.groupby("display_bin", as_index=False, sort=True)
+        .agg(aggregations)
+        .drop(columns="display_bin")
+    )
+
+
 def plot_score_decomposition(
     summary: pd.DataFrame,
     output_dir: Path,
@@ -979,11 +989,25 @@ def plot_score_decomposition(
     coverage_marker_max: float,
     retained_fraction: float,
     show_retention_notes: bool,
+    bin_size: int,
 ) -> None:
     summary = smooth_for_display(
         summary,
         ("dtv_mean", "dtv_std", "cross_mean", "cross_std", "self_mean", "self_std"),
         smooth_window,
+    )
+    summary = bin_for_display(
+        summary,
+        (
+            "dtv_mean",
+            "dtv_std",
+            "cross_mean",
+            "cross_std",
+            "self_mean",
+            "self_std",
+            "contributing_seed_count",
+        ),
+        bin_size,
     )
     x = summary["step"].to_numpy(dtype=np.float64)
     fig, ax = plt.subplots(figsize=MAIN_FIGSIZE)
@@ -1924,12 +1948,8 @@ def plot_conflict_means(
     overflow_marker_threshold: float,
     retained_fraction: float,
     show_retention_notes: bool,
+    bin_size: int,
 ) -> pd.DataFrame:
-    conflicts = smooth_for_display(
-        conflicts,
-        ("self_mean", "self_std", "cross_mean", "cross_std"),
-        smooth_window,
-    )
     upper_limit = y_limits[1]
     overflow_work = conflicts[["step", "self_mean"]].copy()
     overflow_work["step_bin"] = (
@@ -1949,7 +1969,23 @@ def plot_conflict_means(
             above_upper_fraction=("above_upper_limit", "mean"),
         )
     )
-    plotted = conflicts.copy()
+    plotted = smooth_for_display(
+        conflicts,
+        ("self_mean", "self_std", "cross_mean", "cross_std"),
+        smooth_window,
+    )
+    plotted = bin_for_display(
+        plotted,
+        (
+            "self_mean",
+            "self_std",
+            "cross_mean",
+            "cross_std",
+            "seeds_with_conflicts",
+            "conflict_count",
+        ),
+        bin_size,
+    )
     if hide_above_limit:
         for prefix in ("self", "cross"):
             hidden = plotted[f"{prefix}_mean"] > upper_limit
@@ -2547,6 +2583,7 @@ def main() -> None:
         args.coverage_marker_max,
         len(trend_samples) / len(analysis_samples),
         args.show_retention_notes,
+        args.bin,
     )
     _, actual_drop_y_limits = plot_drop_ratio_story(
         threshold_summary,
@@ -2574,6 +2611,7 @@ def main() -> None:
         args.conflict_overflow_marker_threshold,
         conflict_retained_fraction,
         args.show_retention_notes,
+        args.bin,
     )
     log_scatter_report = plot_log_log_self_protection(
         samples,
@@ -2588,7 +2626,7 @@ def main() -> None:
     relative_cross_report = plot_relative_cross_contribution_dynamics(
         analysis_samples,
         output_dir,
-        args.relative_cross_bin_size,
+        args.bin,
         args.relative_cross_band_mode,
         tuple(args.relative_cross_y_limits),
         tuple(args.relative_cross_y_ticks),
@@ -2610,7 +2648,7 @@ def main() -> None:
     weak_negative_report = plot_weak_negative_cross_dynamics(
         analysis_samples,
         output_dir,
-        args.weak_negative_bin_size,
+        args.bin,
         (
             tuple(args.weak_negative_y_limits)
             if args.weak_negative_y_limits is not None
@@ -2656,7 +2694,6 @@ def main() -> None:
         "drop_bin_size": args.drop_bin_size,
         "drop_ymin": actual_drop_y_limits[0],
         "drop_ymax": actual_drop_y_limits[1],
-        "relative_cross_bin_size": args.relative_cross_bin_size,
         "relative_cross_band_mode": args.relative_cross_band_mode,
         "relative_cross_y_limits": list(args.relative_cross_y_limits),
         "relative_cross_y_ticks": list(args.relative_cross_y_ticks),
@@ -2671,7 +2708,6 @@ def main() -> None:
         ),
         "relative_cross_ecdf_x_ticks": list(args.relative_cross_ecdf_x_ticks),
         "relative_cross_ecdf_report": relative_cross_ecdf_report,
-        "weak_negative_bin_size": args.weak_negative_bin_size,
         "weak_negative_y_limits": (
             list(args.weak_negative_y_limits)
             if args.weak_negative_y_limits is not None
@@ -2684,6 +2720,7 @@ def main() -> None:
         ),
         "weak_negative_report": weak_negative_report,
         "smooth_window": args.smooth_window,
+        "bin": args.bin,
     }
     write_validation_report(
         samples,
