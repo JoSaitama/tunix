@@ -11315,3 +11315,49 @@ This file tracks engineering changes made in this repository.
 - 标题调整：Conflict纵轴改为`Con. case score`；Relative Cross纵轴改为`Cross-term Contrib.`；Weak Negative纵轴采用`Neg. cross-term magnitude`，其中只缩写Negative以兼顾长度和可读性。
 - 验证命令与结果：`python3 -m py_compile scripts/plot_grpo_dtv_storyline.py`与`git diff --check`通过；mock-import参数测试确认`--bin=10`和`--drop-bin-size=10`默认值及两个旧独立bin参数已移除；AST检查确认四个折线调用统一接收`args.bin`、柱状图接收`args.drop_bin_size`、两条边界颜色/虚线/1.0线宽正确、region fill无alpha；与本轮修改前HEAD对比确认13个基础数据处理函数完全一致；figure size为约`(5.9, 3.64)`且主折线宽度为1.5。
 - 已知风险/待办：当前可用Python环境仍缺少Matplotlib，未执行实际PNG/PDF渲染；需要在原绘图环境重点检查不透明region底色是否压低深蓝散点可读性，以及`Con.`是否在论文语境中足够明确，必要时可改为更清晰的`Conflict case score`。
+
+## 2026-08-30 — Decision边界层级与横轴标题间距调整
+
+- 改动范围：仅调整精简版storyline图的绘制层级和统一横轴标题间距，不修改任何数据处理、bin、颜色、线宽或输出文件。
+- 修改文件：`scripts/plot_grpo_dtv_storyline.py`、`develop.md`。
+- 视觉调整：Decision Region中`Cross=0`红色DTV-Loo虚线和`Self+Cross=0`橙色DTV虚线的`zorder`由3提高到8，高于散点的5，确保边界覆盖显示在点上方；所有图通过共用`style_axes()`将横轴标题`labelpad`由10降为8，即向横轴靠近2 points。
+- 验证命令与结果：`python3 -m py_compile scripts/plot_grpo_dtv_storyline.py`与`git diff --check`通过；AST检查确认两条Decision边界`zorder=8`、散点`zorder=5`且统一横轴`labelpad=8`。
+- 已知风险/待办：当前环境仍缺少Matplotlib，未实际渲染验证边界覆盖和标题视觉距离；如虚线仍受高密度点影响，可后续增加虚线不透明度或略微加粗，但本轮保持用户指定线宽1.0。
+
+## 2026-08-30 — Decision粉色区域匹配Weak Negative band
+
+- 改动范围：仅修改精简版storyline的Decision Region粉色区域视觉颜色，并讨论Weak Negative p10-p90的替代展示；未修改分位数计算或Weak Negative绘图代码。
+- 修改文件：`scripts/plot_grpo_dtv_storyline.py`、`develop.md`。
+- 颜色调整：Weak Negative的IQR band使用`COLOR_LOO_FILL=#F5B5B5`和`alpha=0.40`，其在白底上的等效可见实色约为`#FBE1E1`；新增`COLOR_LOO_BAND_SOLID=#FBE1E1`并用于Decision Region的Both-keep粉色区域，从而在不重新引入region透明度的前提下匹配band观感。
+- 验证命令与结果：`python3 -m py_compile scripts/plot_grpo_dtv_storyline.py`与`git diff --check`通过；AST检查确认Decision粉色区域使用新实色，Weak Negative IQR仍保持原`COLOR_LOO_FILL`和`alpha=0.40`。
+- 已知风险/待办：等效色按白色axes背景计算；若未来更改axes背景色，两处视觉颜色会再次产生偏差。p10-p90细竖线的替代方案本轮只讨论，待确认后再实施。
+
+## 2026-08-30 — Weak Negative双band与密度表达方案讨论
+
+- 改动范围：本轮仅讨论Weak Negative Cross dynamics的分布表达，不修改绘图或数据代码；`scripts/plot_grpo_dtv_storyline.py`保持不变。
+- 修改文件：仅更新`develop.md`，无代码改动。
+- 推荐方案：删除逐bin的p10-p90竖直whisker，改为浅色p10-p90外层band、较深p25-p75 IQR内层band和1.5宽median线。建议外层alpha约0.15–0.18，内层alpha约0.50–0.55，使中心50%区域明显更深，同时保留尾部分布范围。
+- 密度方案判断：真正按KDE/直方密度连续着色能直接展示0附近的高密度，但在time-bin×magnitude二维图中需要决定每bin还是全局归一化、seed权重和带宽，容易引入额外视觉/统计选择；若仍保留折线动态图，分位数fan比密度热图更稳健、caption更清楚。双band的深浅只能表达嵌套概率覆盖，不应称为精确density。
+- 强调近零建议：主图使用双band时保持y轴从0开始，让深色IQR和median贴近0的收缩成为视觉重点；若需要更直接证明“绝大多数接近0”，可另用单侧p75/p90上界带或分布/ECDF图，但不要把任意固定近零阈值当作自然定义。
+- 验证命令与结果：无代码改动，无需执行测试。
+- 已知风险/待办：p10-p90会受右侧长尾影响并可能拉高视觉范围；正式实施前需在实际图上比较内层alpha 0.50与0.55，并确认caption明确band是completion分布分位数而非跨seed置信区间。
+
+## 2026-08-30 — Weak Negative嵌套双band实现
+
+- 改动范围：按确认方案修改Weak Negative Cross dynamics的分布可视化，不改变`seed×bin`分位数计算、统一`--bin`入口或其他图。
+- 修改文件：`scripts/plot_grpo_dtv_storyline.py`、`develop.md`。
+- 绘图调整：删除每个bin的p10-p90竖直whisker及`--show-weak-negative-whiskers`开关；始终绘制`p10-p90`浅外层band（`COLOR_LOO_FILL`、alpha 0.16）、`p25-p75`较深IQR内层band（同色、alpha 0.42）和线宽1.5的红色median。两层重叠区域的有效视觉alpha约0.51，使中心50%更突出。
+- 自动范围与报告：未指定`--weak-negative-y-limits`时统一按p90上界加8%留白，确保外层band不裁切；summary JSON改为记录外/内band名称和alpha，不再记录whisker布尔开关。
+- 验证命令与结果：`python3 -m py_compile scripts/plot_grpo_dtv_storyline.py`与`git diff --check`通过；AST检查确认无`vlines`/whisker参数引用，两个`fill_between`分别使用p10-p90 alpha 0.16和p25-p75 alpha 0.42，median继续使用`LINE_W=1.5`，自动上界使用p90。
+- 已知风险/待办：当前环境缺少Matplotlib，未实际渲染比较双band层次；p90仍可能受长尾抬高y轴，若主图中近零区域被压缩，可后续显式设置`--weak-negative-y-limits`或讨论断轴/对数尺度，但不应静默裁剪外层band。
+
+## 2026-08-30 — Decision三区域配色与Drop Ratio灰色修订
+
+- 改动范围：调整精简版storyline的Decision Region三区域视觉编码和Drop Ratio柱状图颜色，并讨论是否需要为非conflict区域增加图；不修改区域分类、drop ratio计算或基础数据处理。
+- 修改文件：`scripts/plot_grpo_dtv_storyline.py`、`develop.md`。
+- Decision配色：Both keep使用浅绿色底`#D9F0D3`和深绿色点`COLOR_DARK_GREEN=#017340`；DTV keep/DTV-Loo drop conflict使用与Weak Negative band白底观感一致的浅粉底`#FBE1E1`和深红点`#D62728`；Both drop保持浅灰底`#C7C7C7`并使用深灰点`#4D4D4D`。理论上在`Self>=0`下不会出现的DTV drop/LOO keep异常点保留深蓝fallback，避免静默丢点。
+- Drop Ratio配色：DTV drop柱由深绿色改为深灰色`#4D4D4D`；Additional DTV-Loo drop继续使用原深红色配合alpha 0.62的粉色观感；分箱、堆叠高度和CSV不变。
+- 对照图讨论：不建议把三个region的relative Cross contribution直接作对比证据，因为conflict条件必然给出`|C|/(S+|C|)<=0.5`，both-drop条件必然给出该比值`>0.5`，这种分离主要是决策边界的代数结果。Drop Ratio图已经给出both-drop与conflict随时间的比例，both-keep是剩余比例；Decision scatter也已展示三者几何分布。
+- 推荐补充：若只用现有score日志，可在Appendix比较conflict与both-drop的raw negative `|Cross|`时间分布，作为“弱负Cross vs 足以抵消Self的负Cross”描述性对照，但需注明部分差异来自条件选择。若要证明保留conflict units导致DTV性能更好，优先增加region-conditioned reward/advantage/evaluation influence；当前日志没有这类utility字段，因此现有证据只能写成与DTV优势一致而非因果证明。
+- 验证命令与结果：`python3 -m py_compile scripts/plot_grpo_dtv_storyline.py`与`git diff --check`通过；AST检查确认三个常见region的点色和底色映射正确，Decision边界仍在点上方，Drop Ratio仅替换DTV柱颜色且Additional柱颜色/alpha保持不变。
+- 已知风险/待办：当前环境缺少Matplotlib，未实际渲染检查深绿/深红/深灰点在不透明浅底上的对比度；若未来数据出现DTV drop/LOO keep点，应单独核查`Self>=0`不变量而不是把它并入三个理论区域。
