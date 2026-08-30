@@ -1599,7 +1599,7 @@ def plot_decision_regions(
             transform=ax.transAxes,
             ha="right",
             va="top",
-            color=COLOR_DARK_GREEN,
+            color="black",
             fontsize=LEGEND_FS * font_scale,
             zorder=20,
         )
@@ -1610,7 +1610,7 @@ def plot_decision_regions(
             transform=ax.transAxes,
             ha="left",
             va="top",
-            color=COLOR_LOO,
+            color="black",
             fontsize=LEGEND_FS * font_scale,
             zorder=20,
         )
@@ -1621,7 +1621,7 @@ def plot_decision_regions(
             transform=ax.transAxes,
             ha="left",
             va="bottom",
-            color=COLOR_DARK_GRAY,
+            color="black",
             fontsize=LEGEND_FS * font_scale,
             zorder=20,
         )
