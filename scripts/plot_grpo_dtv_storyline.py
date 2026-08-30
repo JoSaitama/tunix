@@ -54,7 +54,7 @@ FIGURE_HEIGHT_SCALE = 0.7
 MAIN_FIGSIZE = (5.9, 5.2 * FIGURE_HEIGHT_SCALE)
 PAPER_AXES_POSITION = [0.18, 0.20, 0.78, 0.76]
 COVERAGE_AXES_POSITION = [0.18, 0.20, 0.66, 0.76]
-LABEL_FS = 24
+LABEL_FS = 23
 TICK_FS = 22
 TITLE_FS = 22
 LEGEND_FS = 19
@@ -449,7 +449,7 @@ def style_axes(ax: plt.Axes) -> None:
         width=0.8,
         labelsize=TICK_FS,
     )
-    ax.xaxis.labelpad = 8
+    ax.xaxis.labelpad = 6
     ax.grid(True, alpha=0.20, linewidth=0.7)
     ax.set_box_aspect(0.90 * FIGURE_HEIGHT_SCALE)
     ax.set_position(PAPER_AXES_POSITION)

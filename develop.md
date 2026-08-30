@@ -11361,3 +11361,11 @@ This file tracks engineering changes made in this repository.
 - 推荐补充：若只用现有score日志，可在Appendix比较conflict与both-drop的raw negative `|Cross|`时间分布，作为“弱负Cross vs 足以抵消Self的负Cross”描述性对照，但需注明部分差异来自条件选择。若要证明保留conflict units导致DTV性能更好，优先增加region-conditioned reward/advantage/evaluation influence；当前日志没有这类utility字段，因此现有证据只能写成与DTV优势一致而非因果证明。
 - 验证命令与结果：`python3 -m py_compile scripts/plot_grpo_dtv_storyline.py`与`git diff --check`通过；AST检查确认三个常见region的点色和底色映射正确，Decision边界仍在点上方，Drop Ratio仅替换DTV柱颜色且Additional柱颜色/alpha保持不变。
 - 已知风险/待办：当前环境缺少Matplotlib，未实际渲染检查深绿/深红/深灰点在不透明浅底上的对比度；若未来数据出现DTV drop/LOO keep点，应单独核查`Self>=0`不变量而不是把它并入三个理论区域。
+
+## 2026-08-30 — 横轴标题再次靠近2 points
+
+- 改动范围：仅调整精简版storyline所有图共用的横轴标题间距，不修改数据、颜色、bin、figure size或其他布局。
+- 修改文件：`scripts/plot_grpo_dtv_storyline.py`、`develop.md`。
+- 视觉调整：共用`style_axes()`中的`ax.xaxis.labelpad`由8改为6，使所有图的横轴title再向横轴靠近2 points；相对于最初的10累计靠近4 points。
+- 验证命令与结果：`python3 -m py_compile scripts/plot_grpo_dtv_storyline.py`与`git diff --check`通过；AST检查确认统一`labelpad=6`。
+- 已知风险/待办：当前环境缺少Matplotlib，未实际渲染检查标题与刻度标签的最小间距；若出现拥挤，应在实图中回调到7而不是逐图设置不同值。
