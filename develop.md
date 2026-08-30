@@ -11295,3 +11295,12 @@ This file tracks engineering changes made in this repository.
 - 定义：Cross-term contribution为`|c|/(s+|c|)`，衡量Cross相对Self与Cross总幅度的占比；negative Cross-term magnitude为`|c|=-c`（仅在`c<0`population上），衡量负Cross证据的绝对强度。
 - 解释：前者越接近0表示Self主导，后者越接近0表示负Cross虽为负但证据很弱。
 - 验证命令与结果：无代码改动，无需测试。
+
+## 2026-08-30 — 新建精简版GRPO DTV storyline绘图脚本
+
+- 改动范围：从`plot_grpo_dtv_storyline_diagnostics.py`完整复制生成独立的`plot_grpo_dtv_storyline.py`，原诊断脚本未修改；保留01/02/03/04/07/10六张图，移除05 log-log、06 normalized conflict strength、08 DTV-lambda retention path和09 relative-cross ECDF的专用绘图函数、参数、主流程调用及报告字段。
+- 修改文件：`scripts/plot_grpo_dtv_storyline.py`、`develop.md`。
+- 绘图调整：所有保留图暂时移除legend；统一figure宽度为5.9英寸，高度由5.2缩放为3.12英寸（0.6倍），并同步缩放axes box aspect以避免横轴被压窄。新增共享`--bin`参数（默认20），仅在Decomposition与Conflict完成原有population筛选、retention、quantile mask、逐step/跨seed聚合及可选display smoothing之后，对最终显示曲线做等宽step-bin平均；原始逐step CSV和retention/overflow诊断保持原口径。
+- Decision region调整：删除DTV与DTV-Loo两条虚线boundary；所有散点统一为绿色，marker面积由9缩小为7.2（0.8倍）；Both keep、DTV keep/LOO drop和Both drop背景分别使用50%透明浅粉、浅橙和浅灰。
+- 验证命令与结果：`python3 -m py_compile scripts/plot_grpo_dtv_storyline.py`通过；`git diff --check`通过；AST检查确认新脚本无任何legend调用或05/06/08/09输出路径、decision region无虚线且marker/color/fill常量正确；对13个基础数据处理函数与原脚本逐一AST对比均完全一致；纯DataFrame测试确认`--bin`对应的最终分箱按step中心和各显示列均值聚合；figure size解析为`(5.9, 3.12)`。
+- 已知风险/待办：当前系统Python和Codex bundled Python均缺少Matplotlib，无法完成实际PNG/PDF端到端渲染及视觉验收；需在原训练/绘图环境运行新脚本，后续再根据沟通补legend并微调统一`--bin`默认值或背景透明度。
