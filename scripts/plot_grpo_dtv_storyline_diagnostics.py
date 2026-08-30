@@ -57,6 +57,7 @@ LABEL_FS = 24
 TICK_FS = 22
 TITLE_FS = 22
 LEGEND_FS = 19
+SHOW_LEGENDS = True
 
 ARRAY_FIELDS = (
     "loo_raw_self",
@@ -408,6 +409,21 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--show-legends",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Show or hide legends on all plots (default: show).",
+    )
+    parser.add_argument(
+        "--show-decision-region-labels",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "Show or hide region labels inside the Decision Region plot "
+            "(default: hide)."
+        ),
+    )
+    parser.add_argument(
         "--sampling-seed",
         type=int,
         default=0,
@@ -500,6 +516,13 @@ def style_axes(ax: plt.Axes) -> None:
     ax.set_position(PAPER_AXES_POSITION)
     for spine in ax.spines.values():
         spine.set_linewidth(0.9)
+
+
+def add_legend(ax: plt.Axes, *args: Any, **kwargs: Any) -> Any:
+    """Add a legend when the command-line legend switch is enabled."""
+    if not SHOW_LEGENDS:
+        return None
+    return ax.legend(*args, **kwargs)
 
 
 def savefig(fig: plt.Figure, output: Path) -> None:
@@ -1101,7 +1124,8 @@ def plot_score_decomposition(
         ax_right.set_position(COVERAGE_AXES_POSITION)
         handles.append(coverage_handle)
         labels.append("Retained coverage")
-    ax.legend(
+    add_legend(
+        ax,
         handles,
         labels,
         loc="upper center",
@@ -1167,7 +1191,8 @@ def plot_drop_ratio_story(
         y_limits = (0.0, math.ceil(observed / unit) * unit + unit)
     ax.set_ylim(*y_limits)
     style_axes(ax)
-    ax.legend(
+    add_legend(
+        ax,
         loc="upper center",
         bbox_to_anchor=(0.5, 1.0),
         ncol=1,
@@ -1289,7 +1314,8 @@ def plot_relative_cross_contribution_dynamics(
     ax.set_ylim(*y_limits)
     ax.set_yticks(y_ticks)
     style_axes(ax)
-    ax.legend(
+    add_legend(
+        ax,
         loc="upper center",
         bbox_to_anchor=(0.5, 1.0),
         ncol=2,
@@ -1455,7 +1481,8 @@ def plot_lambda_retention_path(
     ax.set_xlabel(r"Self-term weight $\lambda$", fontsize=LABEL_FS)
     ax.set_ylabel("Drop ratio", labelpad=8, fontsize=LABEL_FS)
     style_axes(ax)
-    ax.legend(
+    add_legend(
+        ax,
         loc="upper right",
         frameon=False,
         fontsize=LEGEND_FS,
@@ -1585,7 +1612,8 @@ def plot_relative_cross_contribution_ecdf(
     ax.set_xlabel("Cross-term contribution", fontsize=LABEL_FS)
     ax.set_ylabel("Cumulative fraction", labelpad=8, fontsize=LABEL_FS)
     style_axes(ax)
-    ax.legend(
+    add_legend(
+        ax,
         loc="lower right",
         frameon=False,
         fontsize=LEGEND_FS,
@@ -1707,7 +1735,8 @@ def plot_weak_negative_cross_dynamics(
         for label in ("Median", "IQR", "p10-p90")
         if label in legend_items
     ]
-    ax.legend(
+    add_legend(
+        ax,
         [legend_items[label] for label in legend_order],
         legend_order,
         loc="upper center",
@@ -1770,6 +1799,7 @@ def plot_decision_regions(
     x_limits: tuple[float, float],
     y_limits: tuple[float, float],
     sampling_seed: int,
+    show_region_labels: bool,
 ) -> dict[str, float | int]:
     samples = samples.copy()
     x_min, x_max = x_limits
@@ -1882,7 +1912,42 @@ def plot_decision_regions(
     ax.set_xlabel("Cross-term score", fontsize=LABEL_FS)
     ax.set_ylabel("Self-term score", labelpad=8, fontsize=LABEL_FS)
     style_axes(ax)
-    legend = ax.legend(
+    if show_region_labels:
+        ax.text(
+            0.98,
+            0.97,
+            "Both keep",
+            transform=ax.transAxes,
+            ha="right",
+            va="top",
+            color=COLOR_DARK_GREEN,
+            fontsize=LEGEND_FS,
+            zorder=20,
+        )
+        ax.text(
+            0.02,
+            0.97,
+            "DTV keep only",
+            transform=ax.transAxes,
+            ha="left",
+            va="top",
+            color=COLOR_LOO,
+            fontsize=LEGEND_FS,
+            zorder=20,
+        )
+        ax.text(
+            0.02,
+            0.03,
+            "Both drop",
+            transform=ax.transAxes,
+            ha="left",
+            va="bottom",
+            color=COLOR_DARK_GRAY,
+            fontsize=LEGEND_FS,
+            zorder=20,
+        )
+    legend = add_legend(
+        ax,
         loc="upper right",
         bbox_to_anchor=(1.01, 1.01),
         ncol=1,
@@ -2061,7 +2126,8 @@ def plot_conflict_means(
                 zorder=21,
             )
     handles, labels = ax.get_legend_handles_labels()
-    ax.legend(
+    add_legend(
+        ax,
         handles,
         labels,
         loc="upper center",
@@ -2140,7 +2206,8 @@ def plot_log_log_self_protection(
     ax.set_xlabel(r"$|C|$", fontsize=LABEL_FS)
     ax.set_ylabel(r"$S$", labelpad=8, fontsize=LABEL_FS)
     style_axes(ax)
-    ax.legend(
+    add_legend(
+        ax,
         loc="upper left",
         frameon=False,
         fontsize=LEGEND_FS,
@@ -2218,7 +2285,8 @@ def plot_normalized_conflict_strength_ecdf(
     ax.set_xlabel(r"$|C|/(S+|C|)$", fontsize=LABEL_FS)
     ax.set_ylabel("Cumulative fraction", labelpad=8, fontsize=LABEL_FS)
     style_axes(ax)
-    ax.legend(
+    add_legend(
+        ax,
         loc="lower right",
         frameon=False,
         fontsize=LEGEND_FS,
@@ -2442,7 +2510,9 @@ def write_distribution_statistics(
 
 
 def main() -> None:
+    global SHOW_LEGENDS
     args = parse_args()
+    SHOW_LEGENDS = args.show_legends
     configure_style()
 
     selection_files = [Path(value).expanduser().resolve() for value in args.selection_files]
@@ -2598,6 +2668,7 @@ def main() -> None:
         decision_x_limits,
         decision_y_limits,
         args.sampling_seed,
+        args.show_decision_region_labels,
     )
     plot_conflict_means(
         conflict_summary,
@@ -2663,6 +2734,8 @@ def main() -> None:
     plot_config = {
         "analysis_population": args.analysis_population,
         "analysis_population_samples": len(analysis_samples),
+        "show_legends": args.show_legends,
+        "show_decision_region_labels": args.show_decision_region_labels,
         "decomposition_ymin": decomposition_y_limits[0],
         "decomposition_ymax": decomposition_y_limits[1],
         "decomposition_lower_quantile": args.decomposition_lower_quantile,

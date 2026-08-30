@@ -58,6 +58,7 @@ LABEL_FS = 22
 TICK_FS = 22
 TITLE_FS = 22
 LEGEND_FS = 19
+SHOW_LEGENDS = True
 
 ARRAY_FIELDS = (
     "loo_raw_self",
@@ -367,6 +368,21 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--show-legends",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Show or hide legends on all plots (default: show).",
+    )
+    parser.add_argument(
+        "--show-decision-region-labels",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "Show or hide region labels inside the Decision Region plot "
+            "(default: hide)."
+        ),
+    )
+    parser.add_argument(
         "--sampling-seed",
         type=int,
         default=0,
@@ -455,6 +471,13 @@ def style_axes(ax: plt.Axes) -> None:
     ax.set_position(PAPER_AXES_POSITION)
     for spine in ax.spines.values():
         spine.set_linewidth(0.9)
+
+
+def add_legend(ax: plt.Axes, *args: Any, **kwargs: Any) -> Any:
+    """Add a legend when the command-line legend switch is enabled."""
+    if not SHOW_LEGENDS:
+        return None
+    return ax.legend(*args, **kwargs)
 
 
 def savefig(fig: plt.Figure, output: Path) -> None:
@@ -1013,13 +1036,14 @@ def plot_score_decomposition(
     style_axes(ax)
     if show_retention_notes:
         _annotate_retained_fraction(ax, retained_fraction)
+    handles, labels = ax.get_legend_handles_labels()
     if show_coverage_markers:
         ax.set_position(COVERAGE_AXES_POSITION)
         ax_right = ax.twinx()
         visible_coverage = coverage[
             coverage["retained_coverage"] < coverage_marker_max
         ]
-        ax_right.scatter(
+        coverage_handle = ax_right.scatter(
             visible_coverage["step_center"],
             visible_coverage["retained_coverage"],
             marker="v",
@@ -1053,6 +1077,23 @@ def plot_score_decomposition(
         ax_right.spines["right"].set_linewidth(0.9)
         ax_right.set_box_aspect(0.90 * FIGURE_HEIGHT_SCALE)
         ax_right.set_position(COVERAGE_AXES_POSITION)
+        handles.append(coverage_handle)
+        labels.append("Retained coverage")
+    add_legend(
+        ax,
+        handles,
+        labels,
+        loc="upper center",
+        bbox_to_anchor=(0.5, 1.0),
+        ncol=max(1, len(labels)),
+        frameon=False,
+        fontsize=LEGEND_FS,
+        handlelength=1.0,
+        handletextpad=0.35,
+        columnspacing=0.3,
+        labelspacing=0.35,
+        borderpad=0.0,
+    )
     savefig(fig, output_dir / "01_score_decomposition_over_steps.png")
 
 
@@ -1105,6 +1146,18 @@ def plot_drop_ratio_story(
         y_limits = (0.0, math.ceil(observed / unit) * unit + unit)
     ax.set_ylim(*y_limits)
     style_axes(ax)
+    add_legend(
+        ax,
+        loc="upper center",
+        bbox_to_anchor=(0.5, 1.0),
+        ncol=1,
+        frameon=False,
+        fontsize=LEGEND_FS,
+        handlelength=1.0,
+        handletextpad=0.35,
+        labelspacing=0.35,
+        borderpad=0.0,
+    )
     savefig(fig, output_dir / "02_drop_ratio_story.png")
     binned.to_csv(output_dir / "grpo_dtv_drop_ratio_binned.csv", index=False)
     return binned, y_limits
@@ -1216,6 +1269,19 @@ def plot_relative_cross_contribution_dynamics(
     ax.set_ylim(*y_limits)
     ax.set_yticks(y_ticks)
     style_axes(ax)
+    add_legend(
+        ax,
+        loc="upper center",
+        bbox_to_anchor=(0.5, 1.0),
+        ncol=2,
+        frameon=False,
+        fontsize=LEGEND_FS,
+        handlelength=1.0,
+        handletextpad=0.35,
+        columnspacing=0.6,
+        labelspacing=0.35,
+        borderpad=0.0,
+    )
     savefig(fig, output_dir / "07_relative_cross_contribution_dynamics.png")
     per_seed.to_csv(
         output_dir / "grpo_dtv_relative_cross_contribution_per_seed_bin.csv",
@@ -1308,6 +1374,7 @@ def plot_weak_negative_cross_dynamics(
         color=COLOR_LOO_FILL,
         alpha=0.16,
         linewidth=0.0,
+        label="p10-p90",
         zorder=2,
     )
     ax.fill_between(
@@ -1317,6 +1384,7 @@ def plot_weak_negative_cross_dynamics(
         color=COLOR_LOO_FILL,
         alpha=0.42,
         linewidth=0.0,
+        label="IQR",
         zorder=3,
     )
     ax.plot(
@@ -1324,6 +1392,7 @@ def plot_weak_negative_cross_dynamics(
         median,
         color=COLOR_LOO,
         linewidth=LINE_W,
+        label="Median",
         zorder=5,
     )
     if y_limits is None:
@@ -1337,6 +1406,24 @@ def plot_weak_negative_cross_dynamics(
     ax.set_xlabel("Training step", fontsize=LABEL_FS)
     ax.set_ylabel("Neg. cross-term mag.", labelpad=8, fontsize=LABEL_FS)
     style_axes(ax)
+    handles, labels = ax.get_legend_handles_labels()
+    legend_items = {label: handle for handle, label in zip(handles, labels)}
+    legend_order = ["Median", "IQR", "p10-p90"]
+    add_legend(
+        ax,
+        [legend_items[label] for label in legend_order],
+        legend_order,
+        loc="upper center",
+        bbox_to_anchor=(0.5, 1.0),
+        ncol=3,
+        frameon=False,
+        fontsize=LEGEND_FS,
+        handlelength=1.0,
+        handletextpad=0.35,
+        columnspacing=0.6,
+        labelspacing=0.35,
+        borderpad=0.0,
+    )
     savefig(fig, output_dir / "10_weak_negative_cross_dynamics.png")
     per_seed.to_csv(
         output_dir / "grpo_dtv_weak_negative_cross_per_seed_bin.csv",
@@ -1387,6 +1474,11 @@ def plot_decision_regions(
     x_limits: tuple[float, float],
     y_limits: tuple[float, float],
     sampling_seed: int,
+    show_region_labels: bool,
+    *,
+    figure_size: tuple[float, float] = MAIN_FIGSIZE,
+    font_scale: float = 1.0,
+    output_filename: str = "03_decision_region_scatter.png",
 ) -> dict[str, float | int]:
     samples = samples.copy()
     x_min, x_max = x_limits
@@ -1414,7 +1506,7 @@ def plot_decision_regions(
         "Drop by both": COLOR_DARK_GRAY,
         "DTV drops / LOO keeps": COLOR_SELF,
     }
-    fig, ax = plt.subplots(figsize=MAIN_FIGSIZE)
+    fig, ax = plt.subplots(figsize=figure_size)
     if x_max > 0.0:
         ax.axvspan(
             max(0.0, x_min),
@@ -1488,10 +1580,52 @@ def plot_decision_regions(
     y_tick_start = math.ceil(y_min / y_tick_step) * y_tick_step
     ax.set_xticks(np.arange(x_tick_start, x_max, x_tick_step))
     ax.set_yticks(np.arange(y_tick_start, y_max, y_tick_step))
-    ax.set_xlabel("Cross-term score", fontsize=LABEL_FS)
-    ax.set_ylabel("Self-term score", labelpad=8, fontsize=LABEL_FS)
+    ax.set_xlabel("Cross-term score", fontsize=LABEL_FS * font_scale)
+    ax.set_ylabel(
+        "Self-term score",
+        labelpad=8,
+        fontsize=LABEL_FS * font_scale,
+    )
     style_axes(ax)
-    savefig(fig, output_dir / "03_decision_region_scatter.png")
+    ax.tick_params(
+        axis="both",
+        labelsize=TICK_FS * font_scale,
+    )
+    if show_region_labels:
+        ax.text(
+            0.98,
+            0.97,
+            "Both keep",
+            transform=ax.transAxes,
+            ha="right",
+            va="top",
+            color=COLOR_DARK_GREEN,
+            fontsize=LEGEND_FS * font_scale,
+            zorder=20,
+        )
+        ax.text(
+            0.02,
+            0.97,
+            "DTV keep only",
+            transform=ax.transAxes,
+            ha="left",
+            va="top",
+            color=COLOR_LOO,
+            fontsize=LEGEND_FS * font_scale,
+            zorder=20,
+        )
+        ax.text(
+            0.02,
+            0.03,
+            "Both drop",
+            transform=ax.transAxes,
+            ha="left",
+            va="bottom",
+            color=COLOR_DARK_GRAY,
+            fontsize=LEGEND_FS * font_scale,
+            zorder=20,
+        )
+    savefig(fig, output_dir / output_filename)
     print(
         "[SCATTER] "
         f"full={len(samples)} within_display_window={len(samples) - omitted} "
@@ -1522,6 +1656,30 @@ def plot_decision_regions(
             decision_fractions.get("DTV drops / LOO keeps", 0.0)
         ),
     }
+
+
+def plot_decision_regions_large(
+    samples: pd.DataFrame,
+    output_dir: Path,
+    sample_limit: int,
+    x_limits: tuple[float, float],
+    y_limits: tuple[float, float],
+    sampling_seed: int,
+    show_region_labels: bool,
+) -> dict[str, float | int]:
+    """Render a larger Decision Region figure with reduced typography."""
+    return plot_decision_regions(
+        samples,
+        output_dir,
+        sample_limit,
+        x_limits,
+        y_limits,
+        sampling_seed,
+        show_region_labels,
+        figure_size=(MAIN_FIGSIZE[0] * 1.5, MAIN_FIGSIZE[1] * 1.5),
+        font_scale=0.7,
+        output_filename="decision_region_scatter_large.png",
+    )
 
 
 def plot_conflict_means(
@@ -1620,6 +1778,7 @@ def plot_conflict_means(
     style_axes(ax)
     if show_retention_notes:
         _annotate_retained_fraction(ax, retained_fraction)
+    legend_handles, legend_labels = ax.get_legend_handles_labels()
     marker_rows = overflow[
         overflow["above_upper_fraction"] > overflow_marker_threshold
     ]
@@ -1647,6 +1806,20 @@ def plot_conflict_means(
                 color=COLOR_YELLOW,
                 zorder=21,
             )
+    add_legend(
+        ax,
+        legend_handles,
+        legend_labels,
+        loc="upper center",
+        bbox_to_anchor=(0.5, 1.0),
+        ncol=1,
+        frameon=False,
+        fontsize=LEGEND_FS,
+        handlelength=1.0,
+        handletextpad=0.35,
+        labelspacing=0.35,
+        borderpad=0.0,
+    )
     savefig(fig, output_dir / "04_self_protected_conflict_means.png")
     overflow.to_csv(
         output_dir / "grpo_dtv_conflict_upper_overflow_by_step_bin.csv",
@@ -1825,7 +1998,9 @@ def write_distribution_statistics(
 
 
 def main() -> None:
+    global SHOW_LEGENDS
     args = parse_args()
+    SHOW_LEGENDS = args.show_legends
     configure_style()
 
     selection_files = [Path(value).expanduser().resolve() for value in args.selection_files]
@@ -1981,6 +2156,16 @@ def main() -> None:
         decision_x_limits,
         decision_y_limits,
         args.sampling_seed,
+        args.show_decision_region_labels,
+    )
+    plot_decision_regions_large(
+        analysis_samples,
+        output_dir,
+        args.sample_limit,
+        decision_x_limits,
+        decision_y_limits,
+        args.sampling_seed,
+        args.show_decision_region_labels,
     )
     plot_conflict_means(
         conflict_summary,
@@ -2022,6 +2207,8 @@ def main() -> None:
     plot_config = {
         "analysis_population": args.analysis_population,
         "analysis_population_samples": len(analysis_samples),
+        "show_legends": args.show_legends,
+        "show_decision_region_labels": args.show_decision_region_labels,
         "decomposition_ymin": decomposition_y_limits[0],
         "decomposition_ymax": decomposition_y_limits[1],
         "decomposition_lower_quantile": args.decomposition_lower_quantile,
