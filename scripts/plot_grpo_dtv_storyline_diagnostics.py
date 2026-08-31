@@ -1921,7 +1921,7 @@ def plot_decision_regions(
         ax.text(
             0.02,
             0.97,
-            "DTV keep only",
+            "DTV keeps only",
             transform=ax.transAxes,
             ha="left",
             va="top",
