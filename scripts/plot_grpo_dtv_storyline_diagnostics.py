@@ -1916,7 +1916,13 @@ def plot_decision_regions(
     y_tick_step = 100.0 if (y_max - y_min) <= 600.0 else 200.0
     x_tick_start = math.ceil(x_min / x_tick_step) * x_tick_step
     y_tick_start = math.ceil(y_min / y_tick_step) * y_tick_step
-    ax.set_xticks(np.arange(x_tick_start, x_max, x_tick_step))
+    ax.set_xticks(
+        np.arange(
+            x_tick_start,
+            x_max + 0.5 * x_tick_step,
+            x_tick_step,
+        )
+    )
     ax.set_yticks(np.arange(y_tick_start, y_max, y_tick_step))
     ax.set_xlabel("Cross-term score", fontsize=LABEL_FS)
     ax.set_ylabel("Self-term score", labelpad=8, fontsize=LABEL_FS)
