@@ -1320,7 +1320,7 @@ def plot_relative_cross_contribution_dynamics(
         fontsize=LEGEND_FS,
         handlelength=1.0,
         handletextpad=0.35,
-        columnspacing=1.6,
+        columnspacing=1.5,
         labelspacing=0.35,
         borderpad=0.0,
     )
@@ -1751,7 +1751,7 @@ def plot_weak_negative_cross_dynamics(
         fontsize=LEGEND_FS,
         handlelength=1.0,
         handletextpad=0.35,
-        columnspacing=1.0,
+        columnspacing=1.3,
         labelspacing=0.35,
         borderpad=0.0,
     )
