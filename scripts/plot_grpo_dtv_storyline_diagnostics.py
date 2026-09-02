@@ -1134,7 +1134,7 @@ def plot_score_decomposition(
         fontsize=LEGEND_FS,
         handlelength=1.0,
         handletextpad=0.35,
-        columnspacing=0.2,
+        columnspacing=0.3,
         labelspacing=0.35,
         borderpad=0.0,
     )
