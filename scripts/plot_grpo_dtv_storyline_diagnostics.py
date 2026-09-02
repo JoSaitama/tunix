@@ -277,9 +277,9 @@ def parse_args() -> argparse.Namespace:
         "--decision-x-limits",
         nargs=2,
         type=float,
-        default=(-100.0, 200.0),
+        default=(-200.0, 250.0),
         metavar=("XMIN", "XMAX"),
-        help="Decision-region x-axis display limits (default: -100 200).",
+        help="Decision-region x-axis display limits (default: -200 250).",
     )
     parser.add_argument(
         "--decision-y-limits",
@@ -1912,7 +1912,7 @@ def plot_decision_regions(
     )
     ax.set_xlim(x_min, x_max)
     ax.set_ylim(y_min, y_max)
-    x_tick_step = 100.0 if (x_max - x_min) <= 400.0 else 200.0
+    x_tick_step = 100.0 if (x_max - x_min) <= 500.0 else 200.0
     y_tick_step = 100.0 if (y_max - y_min) <= 600.0 else 200.0
     x_tick_start = math.ceil(x_min / x_tick_step) * x_tick_step
     y_tick_start = math.ceil(y_min / y_tick_step) * y_tick_step
