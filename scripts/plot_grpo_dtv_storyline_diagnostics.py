@@ -1129,7 +1129,7 @@ def plot_score_decomposition(
         labels,
         loc="upper center",
         bbox_to_anchor=(0.5, 1.0),
-        ncol=1,
+        ncol=3,
         frameon=False,
         fontsize=LEGEND_FS,
         handlelength=1.0,
