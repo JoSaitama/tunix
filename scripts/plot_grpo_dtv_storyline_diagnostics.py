@@ -41,14 +41,13 @@ COLOR_DTV = "#F28E2B"
 COLOR_DTV_FILL = "#FAD7A0"
 COLOR_LOO = "#D62728"
 COLOR_LOO_FILL = "#F5B5B5"
-COLOR_LOO_BAND_SOLID = "#FDF0F0"
 COLOR_DARK_GREEN = "#017340"
 COLOR_DARK_GRAY = "#4D4D4D"
 COLOR_DARK_GRAY_FILL = "#C7C7C7"
-COLOR_DECISION_DARK_GRAY_FILL = "#E3E3E3"
 COLOR_GREEN = "#2CA02C"
-COLOR_BOTH_KEEP_FILL = "#ECF8E9"
+COLOR_BOTH_KEEP_FILL = "#B7DDB5"
 COLOR_YELLOW = "#E5AE00"
+P10_P90_ALPHA = 0.16
 
 LINE_W = 1.0
 MAIN_FIGSIZE = (5.9, 5.2)
@@ -1694,7 +1693,7 @@ def plot_weak_negative_cross_dynamics(
         p10,
         p90,
         color=COLOR_LOO_FILL,
-        alpha=0.16,
+        alpha=P10_P90_ALPHA,
         linewidth=0.0,
         label="p10-p90",
         zorder=2,
@@ -1764,7 +1763,7 @@ def plot_weak_negative_cross_dynamics(
     report = {
         "weak_negative_bin_size": int(bin_size),
         "weak_negative_outer_band": "p10-p90",
-        "weak_negative_outer_band_alpha": 0.16,
+        "weak_negative_outer_band_alpha": P10_P90_ALPHA,
         "weak_negative_inner_band": "p25-p75",
         "weak_negative_inner_band_alpha": 0.42,
         "weak_negative_conflict_samples": int(
@@ -1843,6 +1842,7 @@ def plot_decision_regions(
             max(0.0, x_min),
             x_max,
             color=COLOR_BOTH_KEEP_FILL,
+            alpha=P10_P90_ALPHA,
             linewidth=0.0,
             zorder=0,
         )
@@ -1855,7 +1855,8 @@ def plot_decision_regions(
             y_min,
             both_drop_upper,
             where=both_drop_upper > y_min,
-            color=COLOR_DECISION_DARK_GRAY_FILL,
+            color=COLOR_DARK_GRAY_FILL,
+            alpha=P10_P90_ALPHA,
             linewidth=0.0,
             zorder=0,
         )
@@ -1865,7 +1866,8 @@ def plot_decision_regions(
             dtv_only_lower,
             y_max,
             where=dtv_only_lower < y_max,
-            color=COLOR_LOO_BAND_SOLID,
+            color=COLOR_LOO_FILL,
+            alpha=P10_P90_ALPHA,
             linewidth=0.0,
             zorder=0,
         )
