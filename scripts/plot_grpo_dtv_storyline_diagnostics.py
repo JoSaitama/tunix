@@ -1134,10 +1134,9 @@ def plot_score_decomposition(
         fontsize=LEGEND_FS,
         handlelength=1.0,
         handletextpad=0.35,
-        columnspacing=0.3,
+        columnspacing=0.2,
         labelspacing=0.35,
         borderpad=0.0,
-        columnspacing=1.5,
     )
     savefig(fig, output_dir / "01_score_decomposition_over_steps.png")
 
@@ -1752,7 +1751,7 @@ def plot_weak_negative_cross_dynamics(
         fontsize=LEGEND_FS,
         handlelength=1.0,
         handletextpad=0.35,
-        columnspacing=1.5,
+        columnspacing=1.0,
         labelspacing=0.35,
         borderpad=0.0,
     )
