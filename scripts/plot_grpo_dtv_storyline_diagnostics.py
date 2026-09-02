@@ -1137,7 +1137,7 @@ def plot_score_decomposition(
         columnspacing=0.3,
         labelspacing=0.35,
         borderpad=0.0,
-        columnspacing=1.3,
+        columnspacing=1.5,
     )
     savefig(fig, output_dir / "01_score_decomposition_over_steps.png")
 
