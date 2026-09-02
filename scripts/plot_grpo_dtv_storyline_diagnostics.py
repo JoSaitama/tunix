@@ -1129,7 +1129,7 @@ def plot_score_decomposition(
         labels,
         loc="upper center",
         bbox_to_anchor=(0.5, 1.0),
-        ncol=2,
+        ncol=1,
         frameon=False,
         fontsize=LEGEND_FS,
         handlelength=1.0,
@@ -1137,6 +1137,7 @@ def plot_score_decomposition(
         columnspacing=0.3,
         labelspacing=0.35,
         borderpad=0.0,
+        columnspacing=1.3,
     )
     savefig(fig, output_dir / "01_score_decomposition_over_steps.png")
 
