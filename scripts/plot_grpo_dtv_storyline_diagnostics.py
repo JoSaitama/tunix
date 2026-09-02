@@ -1288,7 +1288,7 @@ def plot_relative_cross_contribution_dynamics(
         summary["eta_all_std"].to_numpy(dtype=np.float64),
         COLOR_DARK_GRAY,
         COLOR_DARK_GRAY_FILL,
-        "All",
+        "All units",
         5,
         y_limits,
         band_mode,
@@ -1320,6 +1320,7 @@ def plot_relative_cross_contribution_dynamics(
         fontsize=LEGEND_FS,
         handlelength=1.0,
         handletextpad=0.35,
+        columnspacing=1.6,
         labelspacing=0.35,
         borderpad=0.0,
     )
@@ -1556,9 +1557,10 @@ def plot_relative_cross_contribution_ecdf(
     work["self_protected_conflict"] = work["kept_dtv"] & ~work["kept_loo"]
 
     populations = (
-        ("All", work, COLOR_DARK_GRAY),
+        ("All units", "all", work, COLOR_DARK_GRAY),
         (
             "Conflicted units",
+            "conflicts",
             work[work["self_protected_conflict"]],
             COLOR_LOO,
         ),
@@ -1570,7 +1572,7 @@ def plot_relative_cross_contribution_ecdf(
             len(samples) - len(work)
         )
     }
-    for label, population, color in populations:
+    for label, report_key, population, color in populations:
         if population.empty:
             raise ValueError(f"no samples for relative Cross ECDF population {label}")
         ordered = population.sort_values(
@@ -1591,16 +1593,17 @@ def plot_relative_cross_contribution_ecdf(
         values = ordered["relative_cross_contribution"].to_numpy(
             dtype=np.float64
         )
-        key = label.lower()
-        report[f"relative_cross_ecdf_{key}_samples"] = int(len(values))
-        report[f"relative_cross_ecdf_{key}_median"] = float(np.median(values))
-        report[f"relative_cross_ecdf_{key}_le_0p1_fraction"] = float(
+        report[f"relative_cross_ecdf_{report_key}_samples"] = int(len(values))
+        report[f"relative_cross_ecdf_{report_key}_median"] = float(
+            np.median(values)
+        )
+        report[f"relative_cross_ecdf_{report_key}_le_0p1_fraction"] = float(
             np.mean(values <= 0.1)
         )
-        report[f"relative_cross_ecdf_{key}_le_0p2_fraction"] = float(
+        report[f"relative_cross_ecdf_{report_key}_le_0p2_fraction"] = float(
             np.mean(values <= 0.2)
         )
-        report[f"relative_cross_ecdf_{key}_le_0p25_fraction"] = float(
+        report[f"relative_cross_ecdf_{report_key}_le_0p25_fraction"] = float(
             np.mean(values <= 0.25)
         )
         exported.append(ordered)
@@ -1616,7 +1619,7 @@ def plot_relative_cross_contribution_ecdf(
         loc="lower right",
         frameon=False,
         fontsize=LEGEND_FS,
-        handlelength=1.2,
+        handlelength=1.0,
         handletextpad=0.35,
         labelspacing=0.35,
         borderpad=0.0,
@@ -1726,7 +1729,7 @@ def plot_weak_negative_cross_dynamics(
         ax.yaxis.set_major_locator(MaxNLocator(nbins=5))
     ax.set_xlabel("Training step", fontsize=LABEL_FS)
     ax.set_ylabel(
-        "Conflicted-unit cross-term magnitude",
+        "|Cross-term score|",
         labelpad=8,
         fontsize=LABEL_FS,
     )
@@ -1748,6 +1751,7 @@ def plot_weak_negative_cross_dynamics(
         fontsize=LEGEND_FS,
         handlelength=1.0,
         handletextpad=0.35,
+        columnspacing=1.6,
         labelspacing=0.35,
         borderpad=0.0,
     )
@@ -2075,7 +2079,7 @@ def plot_conflict_means(
         plotted["self_std"].to_numpy(),
         COLOR_SELF,
         COLOR_SELF_FILL,
-        "Self-term" + suffix,
+        "Self-term score" + suffix,
         5,
         y_limits,
         band_mode,
@@ -2088,7 +2092,7 @@ def plot_conflict_means(
         plotted["cross_std"].to_numpy(),
         COLOR_LOO,
         COLOR_LOO_FILL,
-        "Cross-term" + suffix,
+        "Cross-term score" + suffix,
         6,
         y_limits,
         band_mode,
@@ -2139,6 +2143,7 @@ def plot_conflict_means(
         ncol=1,
         frameon=False,
         fontsize=LEGEND_FS,
+        handlelength=1.0,
     )
     savefig(fig, output_dir / "04_self_protected_conflict_means.png")
     overflow.to_csv(
@@ -2292,7 +2297,7 @@ def plot_normalized_conflict_strength_ecdf(
         loc="lower right",
         frameon=False,
         fontsize=LEGEND_FS,
-        handlelength=1.2,
+        handlelength=1.0,
         handletextpad=0.35,
         labelspacing=0.35,
         borderpad=0.0,
