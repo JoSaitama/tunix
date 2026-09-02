@@ -41,12 +41,13 @@ COLOR_DTV = "#F28E2B"
 COLOR_DTV_FILL = "#FAD7A0"
 COLOR_LOO = "#D62728"
 COLOR_LOO_FILL = "#F5B5B5"
-COLOR_LOO_BAND_SOLID = "#FBE1E1"
+COLOR_LOO_BAND_SOLID = "#FDF0F0"
 COLOR_DARK_GREEN = "#017340"
 COLOR_DARK_GRAY = "#4D4D4D"
 COLOR_DARK_GRAY_FILL = "#C7C7C7"
+COLOR_DECISION_DARK_GRAY_FILL = "#E3E3E3"
 COLOR_GREEN = "#2CA02C"
-COLOR_BOTH_KEEP_FILL = "#D9F0D3"
+COLOR_BOTH_KEEP_FILL = "#ECF8E9"
 COLOR_YELLOW = "#E5AE00"
 
 LINE_W = 1.0
@@ -1301,7 +1302,7 @@ def plot_relative_cross_contribution_dynamics(
         summary["eta_conflict_std"].to_numpy(dtype=np.float64),
         COLOR_LOO,
         COLOR_LOO_FILL,
-        "Conflicts",
+        "Conflicted units",
         6,
         y_limits,
         band_mode,
@@ -1557,7 +1558,11 @@ def plot_relative_cross_contribution_ecdf(
 
     populations = (
         ("All", work, COLOR_DARK_GRAY),
-        ("Conflicts", work[work["self_protected_conflict"]], COLOR_LOO),
+        (
+            "Conflicted units",
+            work[work["self_protected_conflict"]],
+            COLOR_LOO,
+        ),
     )
     fig, ax = plt.subplots(figsize=MAIN_FIGSIZE)
     exported = []
@@ -1582,7 +1587,7 @@ def plot_relative_cross_contribution_ecdf(
             color=color,
             linewidth=LINE_W,
             label=label,
-            zorder=5 if label == "Conflicts" else 4,
+            zorder=5 if label == "Conflicted units" else 4,
         )
         values = ordered["relative_cross_contribution"].to_numpy(
             dtype=np.float64
@@ -1721,7 +1726,11 @@ def plot_weak_negative_cross_dynamics(
     else:
         ax.yaxis.set_major_locator(MaxNLocator(nbins=5))
     ax.set_xlabel("Training step", fontsize=LABEL_FS)
-    ax.set_ylabel("Negative cross-term magnitude", labelpad=8, fontsize=LABEL_FS)
+    ax.set_ylabel(
+        "Conflicted-unit cross-term magnitude",
+        labelpad=8,
+        fontsize=LABEL_FS,
+    )
     style_axes(ax)
     handles, labels = ax.get_legend_handles_labels()
     legend_items = {label: handle for handle, label in zip(handles, labels)}
@@ -1846,7 +1855,7 @@ def plot_decision_regions(
             y_min,
             both_drop_upper,
             where=both_drop_upper > y_min,
-            color=COLOR_DARK_GRAY_FILL,
+            color=COLOR_DECISION_DARK_GRAY_FILL,
             linewidth=0.0,
             zorder=0,
         )
@@ -2085,7 +2094,7 @@ def plot_conflict_means(
     )
     ax.axhline(0.0, color="black", linewidth=1.0, alpha=0.65)
     ax.set_xlabel("Training step", fontsize=LABEL_FS)
-    ax.set_ylabel("Conflicted case score", labelpad=8, fontsize=LABEL_FS)
+    ax.set_ylabel("Conflicted-unit score", labelpad=8, fontsize=LABEL_FS)
     ax.set_ylim(*y_limits)
     ax.set_yticks(y_ticks)
     style_axes(ax)
