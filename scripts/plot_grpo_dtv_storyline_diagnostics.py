@@ -1751,7 +1751,7 @@ def plot_weak_negative_cross_dynamics(
         fontsize=LEGEND_FS,
         handlelength=1.0,
         handletextpad=0.35,
-        columnspacing=1.6,
+        columnspacing=1.5,
         labelspacing=0.35,
         borderpad=0.0,
     )
@@ -2144,6 +2144,7 @@ def plot_conflict_means(
         frameon=False,
         fontsize=LEGEND_FS,
         handlelength=1.0,
+        handletextpad=0.35,
     )
     savefig(fig, output_dir / "04_self_protected_conflict_means.png")
     overflow.to_csv(
