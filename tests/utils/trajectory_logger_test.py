@@ -96,17 +96,18 @@ class TrajectoryLoggerTest(absltest.TestCase):
       self, mock_getsignal, mock_signal
   ):
     """Tests that nohup's inherited SIGHUP ignore is not overwritten."""
-    logger = trajectory_logger.AsyncTrajectoryLogger(
-        self.create_tempdir().full_path
-    )
-    try:
-      mock_getsignal.assert_called_once_with(signal.SIGHUP)
-      registered_signals = [call.args[0] for call in mock_signal.call_args_list]
-      self.assertIn(signal.SIGINT, registered_signals)
-      self.assertIn(signal.SIGTERM, registered_signals)
-      self.assertNotIn(signal.SIGHUP, registered_signals)
-    finally:
-      logger.stop()
+    with tempfile.TemporaryDirectory() as temp_dir:
+      logger = trajectory_logger.AsyncTrajectoryLogger(temp_dir)
+      try:
+        mock_getsignal.assert_called_once_with(signal.SIGHUP)
+        registered_signals = [
+            call.args[0] for call in mock_signal.call_args_list
+        ]
+        self.assertIn(signal.SIGINT, registered_signals)
+        self.assertIn(signal.SIGTERM, registered_signals)
+        self.assertNotIn(signal.SIGHUP, registered_signals)
+      finally:
+        logger.stop()
 
 
 if __name__ == '__main__':
