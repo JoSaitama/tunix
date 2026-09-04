@@ -1,6 +1,8 @@
 import os
+import signal
 import tempfile
 from typing import TypedDict
+from unittest import mock
 
 from absl.testing import absltest
 import numpy as np
@@ -85,6 +87,26 @@ class TrajectoryLoggerTest(absltest.TestCase):
       self.assertEqual(df['completion'][2], 'a, "b", c')
       self.assertEqual(df['prompt'][2], 'a prompt with\na newline')
       self.assertEqual(df['value'].tolist(), [0, 1, 2])
+
+  @mock.patch.object(trajectory_logger.signal, 'signal')
+  @mock.patch.object(
+      trajectory_logger.signal, 'getsignal', return_value=signal.SIG_IGN
+  )
+  def test_async_logger_preserves_inherited_ignored_sighup(
+      self, mock_getsignal, mock_signal
+  ):
+    """Tests that nohup's inherited SIGHUP ignore is not overwritten."""
+    logger = trajectory_logger.AsyncTrajectoryLogger(
+        self.create_tempdir().full_path
+    )
+    try:
+      mock_getsignal.assert_called_once_with(signal.SIGHUP)
+      registered_signals = [call.args[0] for call in mock_signal.call_args_list]
+      self.assertIn(signal.SIGINT, registered_signals)
+      self.assertIn(signal.SIGTERM, registered_signals)
+      self.assertNotIn(signal.SIGHUP, registered_signals)
+    finally:
+      logger.stop()
 
 
 if __name__ == '__main__':

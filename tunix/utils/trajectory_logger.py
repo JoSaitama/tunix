@@ -199,7 +199,13 @@ class AsyncTrajectoryLogger:
       try:
         signal.signal(signal.SIGINT, self._handle_signal)
         signal.signal(signal.SIGTERM, self._handle_signal)
-        signal.signal(signal.SIGHUP, self._handle_signal)
+        # Preserve nohup's inherited SIGHUP disposition. POSIX keeps ignored
+        # signals ignored across exec, and replacing SIG_IGN here would make a
+        # nohup-launched training process vulnerable to terminal disconnects.
+        if signal.getsignal(signal.SIGHUP) != signal.SIG_IGN:
+          signal.signal(signal.SIGHUP, self._handle_signal)
+        else:
+          logging.info('Preserving inherited SIG_IGN for SIGHUP.')
       except ValueError:
         logging.warning('Failed to register signal handlers.')
 
