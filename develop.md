@@ -11369,3 +11369,105 @@ This file tracks engineering changes made in this repository.
 - 视觉调整：共用`style_axes()`中的`ax.xaxis.labelpad`由8改为6，使所有图的横轴title再向横轴靠近2 points；相对于最初的10累计靠近4 points。
 - 验证命令与结果：`python3 -m py_compile scripts/plot_grpo_dtv_storyline.py`与`git diff --check`通过；AST检查确认统一`labelpad=6`。
 - 已知风险/待办：当前环境缺少Matplotlib，未实际渲染检查标题与刻度标签的最小间距；若出现拥挤，应在实图中回调到7而不是逐图设置不同值。
+## 2026-09-13 — v5p-16单worker复现可行性评估
+
+- 改动范围：本轮仅检查现有GRPO启动、JAX mesh与随机种实现，评估在双worker v5p-16上只使用一个worker复现LearnAlign/GradAlign的影响；无训练或算法代码改动。
+- 修改文件：仅更新`develop.md`，无代码改动。
+- 检查结果：`my_example/run_grpo_gemma.sh`固定传入`--mesh-counts 4,1`；`my_example/sharding.py`基于`jax.devices()`构建mesh；当前入口未调用`jax.distributed.initialize()`。因此直接在单个worker启动且JAX只暴露4个本地设备时，设备数和mesh布局与原v5p-8一致；若启用分布式初始化使`jax.devices()`看到8个全局设备，现有`4,1` mesh与之不匹配。
+- 验证命令与结果：完成对`my_example/main.py`、`my_example/sharding.py`、`my_example/config.py`、`my_example/run_grpo_gemma.sh`、`my_example/train.py`和`my_example/seeding.py`的静态检查；本地无TPU，未执行设备运行时验证。
+- 已知风险/待办：正式训练前需在worker 0输出`jax.process_count()`、`jax.device_count()`、`jax.local_device_count()`和设备列表，确认分别为`1/4/4`；不应使用`--worker=all`或在新baseline入口中启用多主机JAX初始化。即使设备布局一致，JAX/libtpu版本、XLA编译和采样随机性仍可能造成非bitwise一致，需用同一环境与5 seeds统计比较。
+## 2026-09-13 — v5p-16单worker TPU后端初始化实测修正
+
+- 改动范围：根据worker 0实测的\`TPU backend initialization is taking more than 60 seconds\`，修正先前对单worker可直接启动的判断；无训练或算法代码改动。
+- 修改文件：仅更新\`develop.md\`，无代码改动。
+- 实测结论：该v5p-16的PJRT/libtpu在首次访问TPU backend时会按多主机slice等待worker 1，即使应用代码未显式调用\`jax.distributed.initialize()\`。不应继续等待或直接启动长实验。
+- 后续验证：可用一次性设置\`TPU_PROCESS_BOUNDS=1,1,1\`、\`TPU_CHIPS_PER_PROCESS_BOUNDS=2,2,1\`和\`TPU_VISIBLE_CHIPS=0,1,2,3\`尝试将worker 0隔离为四芯片单进程；只有诊断输出\`process_count=1\`且\`device_count=local_device_count=4\`才可用于正式实验。
+- 已知风险/待办：上述子拓扑环境变量是低层runtime隔离机制，需在当前JAX/libtpu版本上实测；如仍等待worker 1或报topology错误，应改用真正的single-host v5p-8，或另行设计并验证双worker训练，不应盲目增加其他未验证变量。
+## 2026-09-13 — v5p-16单worker四芯片隔离验证通过
+
+- 改动范围：分析worker 0实际设备诊断与进程列表；无训练或算法代码改动。
+- 修改文件：仅更新\`develop.md\`，无代码改动。
+- 验证命令与结果：使用\`TPU_PROCESS_BOUNDS=1,1,1\`、\`TPU_CHIPS_PER_PROCESS_BOUNDS=2,2,1\`、\`TPU_VISIBLE_CHIPS=0,1,2,3\`和\`CLOUD_TPU_TASK_ID=0\`运行JAX诊断，得到\`process_count=1\`、\`process_index=0\`、\`device_count=4\`、\`local_device_count=4\`，设备坐标覆盖本地\`2x2x1\`，单worker隔离验证通过。
+- 进程复核：用户提供的\`ps -ef | grep jason\`中不存在残留Python/JAX/libtpu进程；\`sleep 180\`与VS Code Server/extensionHost属于远程开发环境，\`[rg] <defunct>\`为待父进程回收的已终止搜索进程，均不应作为TPU任务清理。
+- 已知风险/待办：隔离变量由一次性\`env\`传入，不会在命令结束后保留；每次训练必须在同一子shell或独立launcher中重新设置，并在正式20-run矩阵前完成一次短baseline smoke test，确认模型加载、mesh、一步训练和checkpoint路径均正常。
+## 2026-09-13 — AIME与GSM8K baseline服务器checkout隔离方案
+
+- 改动范围：本轮仅讨论TPU服务器目录与分支隔离，不修改训练或算法代码。
+- 修改文件：仅更新\`develop.md\`，无代码改动。
+- 建议方案：保留\`~/Project/tunix\`作为当前AIME checkout，另建\`~/Project_8k/tunix\`并从远端直接clone \`for_GRPO_8kBaseline\`，使代码分支、日志、checkpoint和未提交状态相互隔离。
+- 环境策略：首次smoke test可复用当前已验证的JAX/TPU虚拟环境，但不得在共享环境中升级依赖；若新baseline后续确需额外依赖，再在\`Project_8k\`建立独立venv并锁定与原实验相同的JAX/jaxlib/libtpu核心版本。
+- 验证命令与结果：无代码改动，待服务器clone后以\`git status -sb\`、\`git branch -vv\`和单worker\`1/4/4\`设备诊断确认。
+- 已知风险/待办：GSM8K数据、未跟踪的认证文件及缓存通常不会随git clone复制；应逐项确认并仅链接必要资源，不复制AIME日志/checkpoint，也不得提交认证信息。
+## 2026-09-13 — Project_8k smoke test Hugging Face鉴权诊断
+
+- 改动范围：分析新checkout上的单步smoke test报错；无训练或算法代码改动。
+- 修改文件：仅更新\`develop.md\`，无代码改动。
+- 诊断结果：单worker诊断继续得到\`process_count=1\`与4个本地TPU设备，GSM8K train/test数据也已成功下载和构建；smoke test在模型加载前因访问gated repo \`google/gemma-3-1b-it\`返回HTTP 401而退出，与TPU topology、mesh和训练实现无关。
+- 根因：\`my_example/run_grpo_gemma.sh\`仅source当前checkout的\`my_example/.env\`，而该文件由\`.gitignore\`排除，因此新clone不会携带原checkout的\`HF_TOKEN\`/\`HUGGINGFACE_TOKEN\`。
+- 处理建议：优先将\`~/Project_8k/tunix/my_example/.env\`软链接至原AIME checkout的\`~/Project/tunix/my_example/.env\`，或通过Hugging Face CLI/当前shell重新认证；不得输出或提交token。认证后使用相同四芯片隔离变量重跑smoke test。
+- 已知风险/待办：当前激活Python仍来自原checkout的venv，现阶段可复用且不是本次401原因；不得在共享venv中升级依赖。待认证后仍需完成模型加载、一步rollout/update及checkpoint阶段验证。
+## 2026-09-13 — Project_8k独立HF认证文件设置说明
+
+- 改动范围：本轮仅说明新服务器checkout的Hugging Face token安全配置；无训练或算法代码改动。
+- 修改文件：仅更新\`develop.md\`，无代码改动。
+- 目录结论：当前\`~/Project/tunix\`为AIME分支且不含\`my_example/\`，无需在该目录设置；应在\`~/Project_8k/tunix/my_example/.env\`新建仅本用户可读写的认证文件。
+- 安全要求：通过交互式编辑器粘贴\`HF_TOKEN\`，避免把完整token写入shell history或终端日志；使用\`chmod 600\`，并通过\`git check-ignore\`确认文件受\`.gitignore\`保护。验证时只输出token是否存在和账号名，不输出token值。
+- 验证命令与结果：无代码改动；待服务器完成\`whoami(token=...)\`鉴权检查并重跑单步smoke test。
+- 已知风险/待办：如果完整token曾出现在聊天、共享日志或录屏中，应立即在Hugging Face撤销并生成新token；本次用户消息中的token已主动截断，回答不得复述其内容。
+## 2026-09-13 — TFDS/Protobuf错误与共享venv版本漂移诊断
+
+- 改动范围：分析HF认证后的第二次smoke test失败；无训练或算法代码改动。
+- 修改文件：仅更新\`develop.md\`，无代码改动。
+- 已通过阶段：Hugging Face \`whoami\`和\`model_info("google/gemma-3-1b-it")\`均成功，证明token与gated model权限正常；四芯片单worker隔离此前也已通过。
+- 当前错误：TFDS读取已生成的GSM8K \`dataset_info\`时访问\`FieldDescriptor.label\`，但当前Protobuf runtime已移除该API，属于\`tensorflow-datasets\`与\`protobuf\`版本不兼容，不是数据、token或TPU错误。
+- 环境风险：当前shell显示的Python来自原checkout venv，trace中的site-packages又位于共享\`/home/lhf_hongfu_gmail_com/tunix/.venv\`，JAX报告为0.9.2；而当前分支\`pyproject.toml\`约束\`jax[tpu] <= 0.8.1\`。不应直接修改共享venv或仅临时降级protobuf后用于正式baseline。
+- 后续验证：先输出当前环境及\`~/Project/tunix/pip-freeze-lhf-reference.txt\`中的JAX、TFDS、Protobuf、ArrayRecord、Grain、Flax与Orbax版本；再为\`Project_8k\`建立独立锁版本venv，确认TFDS重复读取、四芯片设备发现和一步训练均通过。
+- 已知风险/待办：不得盲目\`pip install -U\`或对共享venv执行原地降级；参考freeze文件可能含不可移植的本地路径，安装前需审查，不能直接整文件安装。
+## 2026-09-13 — 原GSM8K JAX 0.8.1 venv迁移方案
+
+- 改动范围：本轮仅设计从原v5p-8服务器迁移\`.venv_jax081\`软件环境到v5p-16 \`Project_8k\`的方法；无训练或算法代码改动。
+- 修改文件：仅更新\`develop.md\`，无代码改动。
+- 方案结论：原环境为Python venv而非Conda，因此使用\`pip freeze --all\`、Python/pip版本、\`pyvenv.cfg\`和核心包版本作为迁移清单，不使用Conda YAML，也不直接打包复制不可重定位的venv目录。
+- 重建原则：在\`~/Project_8k/tunix/.venv_jax081\`使用相同Python小版本新建venv；安装前检查freeze中的editable/\`file://\`本地路径；依赖锁定后用\`pip install -e . --no-deps\`安装当前baseline分支代码，避免解析器升级已冻结依赖。
+- 验证要求：对比JAX、jaxlib、libtpu、TFDS、Protobuf、ArrayRecord、Grain、Flax和Orbax版本，运行\`pip check\`，随后验证单worker\`1/4/4\`设备拓扑、重复读取TFDS及一步GRPO smoke test。
+- 已知风险/待办：\`pip freeze\`只能锁Python包，不能保证OS镜像、TPU runtime和编译器bitwise一致；如freeze含私有索引token或本地路径，不得直接共享或安装，需先生成portable版本。不得修改当前共享AIME venv。
+
+## 2026-09-13 — LearnAlign与GradAlign独立GSM8K baseline实现
+
+- 改动范围：在`for_GRPO_8kBaseline`分支新增LearnAlign静态选择与GradAlign在线选择baseline；保留现有GSM8K GRPO、DTV、DTV-Loo入口、配置结构和trainer逻辑不变，未修改`RLTrainingConfig`、`tunix/rl/robust_trainer.py`或任何已有过滤实现。
+- 修改文件：新增`my_example/alignment_main.py`、`my_example/alignment_baselines/{__init__,config,data_utils,scoring,gradient_features,curriculum,artifacts}.py`、`my_example/alignment_baselines/README.md`、`my_example/run_alignment_baseline.sh`、`my_example/run_alignment_baseline_suite.sh`、`tests/my_example/alignment_{config,scoring,curriculum}_test.py`；同步更新`develop.md`。
+- LearnAlign实现：先用300 prompts warmup（默认计入冻结的总update预算，小数据smoke时以实际train pool为上限），用8个selector-only rollouts计算binary exact-correctness成功率及`V=p(1-p)`；在actor LoRA空间计算policy-only prompt GRPO gradients，经4096维确定性稀疏JL/feature-hash投影后，以`z_i^T mean(z)`精确等价计算论文Eq. 8的row mean，选择top 25%形成静态curriculum。
+- GradAlign实现：从既有held-out train split保留30个clean validation prompts；每10个真实update重新生成validation/candidate rollouts，以`cos(g_candidate, mean(g_validation))`排序并保留top 25%；当前冻结GSM8K适配默认`k_r=k_v=4`，同时记录跨轮重叠prompt的score Spearman与selected-set Jaccard稳定性。
+- 公平性与论文差异：真实模型update继续使用冻结的4 prompts × 4 completions、LR `1e-6`、KL `0.08`、dense reward和可选20% within-group rank mismatch；selector使用论文所需的clean binary exact correctness，因此mismatch实验属于明确披露的clean-verifier/oracle-assisted baseline。梯度只在LoRA空间计算，并以稀疏特征哈希替代论文未指定实现的通用随机投影；GradAlign估计rollouts显著小于论文标准设置。每次运行在`run_metadata.json`、method summary JSON及selection JSONL中记录这些设定与逐prompt决策。
+- 启动脚本：`run_alignment_baseline.sh`提供单方法入口；`run_alignment_baseline_suite.sh --seeds 0 5 13 21 42 --mismatch 0|0.2`提供2 methods × 5 seeds矩阵。两个脚本不写死v5p-16底层拓扑变量，需在已验证的单worker shell中显式export后运行；README补充了两条独立的最小TPU smoke命令。
+- 验证命令与结果：用户提供的原始GRPO smoke test在JAX 0.8.1环境与单worker 4 TPU设备上完成1 step、checkpoint/LoRA合并保存；本地运行bundled Python `-m unittest tests.my_example.alignment_scoring_test tests.my_example.alignment_config_test tests.my_example.alignment_curriculum_test`共8项通过；`python3 -m py_compile my_example/alignment_main.py my_example/alignment_baselines/*.py tests/my_example/alignment_*_test.py`、`bash -n my_example/run_alignment_baseline.sh my_example/run_alignment_baseline_suite.sh`和`git diff --check`通过。
+- 已知风险/待办：本地无JAX/TPU，尚未执行新增gradient estimator的设备级编译；首先应在TPU用极小LearnAlign与GradAlign参数分别完成selector compile + 1 update smoke，尤其验证JAX 0.8.1的`nnx.jit`、`vmap`和稀疏`segment_sum`对Gemma LoRA gradient tree的兼容性。GradAlign在4-rollout训练下的选择开销远高于论文128-rollout update设置，正式20-run矩阵前必须测量每轮wall time与score稳定性；如稳定性不足，先提高`k_v`而不是更改冻结update rollouts。
+
+## 2026-09-13 — Alignment selector逐rollout审计数据
+
+- 改动范围：为LearnAlign与GradAlign选择过程补充逐prompt、逐selector-rollout的binary correctness和GRPO advantage记录；不改变筛选公式、排序结果、真实update数据或原框架日志/checkpoint/model保存链路。
+- 修改文件：`my_example/alignment_baselines/gradient_features.py`、`my_example/alignment_baselines/curriculum.py`、`my_example/alignment_baselines/README.md`、`tests/my_example/alignment_curriculum_test.py`、`develop.md`。
+- 保存语义：LearnAlign的selection JSONL为每个candidate保存`binary_outcomes`、`advantages`、success rate、selection score与selected；GradAlign在每轮分别写入`record_type=validation`和`record_type=candidate`记录，二者均保存对应数组，candidate另外保存cosine score与selected。
+- 数据来源：binary correctness由GSM8K数据中的标准数值答案和selector生成答案做exact match得到；advantage由同一组0/1 reward通过现有GRPO estimator生成。它们只服务于baseline selection，不替代或修改真实训练的dense reward与可选rank mismatch。
+- 验证命令与结果：bundled Python运行alignment scoring/config/curriculum共8项单元测试通过，其中新增断言确认LearnAlign candidate以及GradAlign validation/candidate均写出预期数组；全部新增Python文件`py_compile`、两个shell脚本`bash -n`和`git diff --check`均通过。
+- 已知风险/待办：20% mismatch实验中selector仍使用未污染标准答案，属于需要在论文中明确披露的clean-verifier/oracle-assisted baseline；当前不保存完整answer文本、token或gradient，以控制隐私和存储体积。
+
+## 2026-09-13 — LearnAlign/GradAlign mismatch公平性修正
+
+- 改动范围：修正两个新增baseline在20% mismatch条件下的selector污染口径；不修改原GRPO、DTV/DTV-Loo、`RLTrainingConfig`、`tunix/rl/robust_trainer.py`或真实update的既有dense-reward污染实现。
+- 修改文件：`my_example/alignment_main.py`、`my_example/alignment_baselines/gradient_features.py`、`my_example/alignment_baselines/curriculum.py`、`my_example/alignment_baselines/README.md`、`my_example/run_alignment_baseline_suite.sh`、`tests/my_example/alignment_curriculum_test.py`、`develop.md`。
+- LearnAlign口径：selector rollout先由GSM8K标准答案得到clean binary correctness；对与现有实验相同的稳定prompt-hash命中的训练candidate group执行binary reward rank reversal，再由实际selector reward计算GRPO advantage与prompt gradient。由于rank reversal只重排0/1分配，`p`和`p(1-p)`保持不变，但completion对应的advantage及gradient会改变。
+- GradAlign口径：training candidate使用同一稳定prompt级binary rank reversal；held-out validation prompts保持clean binary correctness，以保留GradAlign所需的clean reference-gradient定义。真实GRPO update仍重新生成4个completions并使用原dense reward及相同prompt级mismatch assignment。
+- 审计数据：selection JSONL同时保存`clean_binary_outcomes`、实际`selector_rewards`、`selector_advantages`、`mismatch_selected`与`mismatch_effective`；summary、TensorBoard和`run_metadata.json`记录selector污染范围，避免将当前实现误写为clean-verifier/oracle-assisted LearnAlign。
+- 验证命令与结果：Codex bundled Python运行`-m unittest tests.my_example.alignment_scoring_test tests.my_example.alignment_config_test tests.my_example.alignment_curriculum_test`共8项通过；全部新增alignment Python文件`py_compile`通过；`bash -n my_example/run_alignment_baseline.sh my_example/run_alignment_baseline_suite.sh`与`git diff --check`通过。额外尝试原`reward_rank_noise_test`时，系统Python缺NumPy、bundled Python缺Flax，均在测试收集阶段退出而非断言失败；该既有模块本轮未修改，需在服务器完整JAX/Tunix环境随smoke复核。
+- 已知风险/待办：稳定hash保证同一prompt在selector和真实update中具有相同污染身份，但两阶段会重新生成不同completion，因此只共享prompt级污染决定，不共享具体rollout或逐completion置换；GradAlign clean held-out validation是方法本身的额外reference资源，论文中仍需明确披露。
+
+## 2026-09-13 — Alignment 20% mismatch数据链路预检
+
+- 改动范围：新增无需模型或TPU rollout的快速数据链路测试，直接复用生产环境的稳定prompt hash与reward-rank reversal，并通过真实LearnAlign/GradAlign curriculum检查混合候选、筛选结果和训练输入；不修改任何算法或既有训练逻辑。
+- 修改文件：新增`tests/my_example/alignment_mismatch_flow_test.py`；更新`my_example/alignment_baselines/README.md`与`develop.md`。
+- 测试设计：确定性构造40个candidate prompts，其中8个命中`fraction=0.2, seed=0`、32个保持clean；每组clean binary outcomes固定为`[1,1,0,0]`，命中组通过生产函数变为`[0,0,1,1]`，再计算GRPO形式的group-relative advantage。使用同分feature和稳定tie break有意让8个noisy及12个clean prompts共同进入selected training batches，以验证selector没有排除的污染prompt不会被静默清洗。
+- LearnAlign断言：全candidate记录包含20% noisy/80% clean，selection JSONL区分clean outcomes和实际selector rewards，selected阶段只消费selected prompts，且残留noisy prompt在模拟dense reward update时仍由同一hash触发rank reversal。
+- GradAlign断言：held-out validation记录全部clean；candidate pool为20% noisy/80% clean；selected batches同时包含两类prompt，残留noisy prompt在dense reward update链路继续被污染。
+- 验证命令与结果：Codex bundled Python运行`python3 -m unittest -v tests.my_example.alignment_mismatch_flow_test`，LearnAlign与GradAlign两项数据流测试均通过；确认40个candidate中8个noisy/32个clean、GradAlign validation全clean、两种方法selected训练输入均保留8个noisy/12个clean，并且8个残留noisy groups在模拟dense reward update中全部再次触发有效rank reversal。连同alignment scoring/config/curriculum测试共10项全部通过；全部alignment Python文件`py_compile`、两个launcher的`bash -n`和`git diff --check`均通过。
+- 已知风险/待办：这是host-side数据流预检，使用可控的synthetic outcomes/features，不替代真实Gemma rollout、LoRA per-prompt gradient编译、checkpoint restore和模型保存；这些仍由随后四个TPU smoke jobs覆盖。
