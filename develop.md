@@ -11471,3 +11471,68 @@ This file tracks engineering changes made in this repository.
 - GradAlign断言：held-out validation记录全部clean；candidate pool为20% noisy/80% clean；selected batches同时包含两类prompt，残留noisy prompt在dense reward update链路继续被污染。
 - 验证命令与结果：Codex bundled Python运行`python3 -m unittest -v tests.my_example.alignment_mismatch_flow_test`，LearnAlign与GradAlign两项数据流测试均通过；确认40个candidate中8个noisy/32个clean、GradAlign validation全clean、两种方法selected训练输入均保留8个noisy/12个clean，并且8个残留noisy groups在模拟dense reward update中全部再次触发有效rank reversal。连同alignment scoring/config/curriculum测试共10项全部通过；全部alignment Python文件`py_compile`、两个launcher的`bash -n`和`git diff --check`均通过。
 - 已知风险/待办：这是host-side数据流预检，使用可控的synthetic outcomes/features，不替代真实Gemma rollout、LoRA per-prompt gradient编译、checkpoint restore和模型保存；这些仍由随后四个TPU smoke jobs覆盖。
+
+## 2026-09-13 — LearnAlign/GradAlign四组TPU smoke结果复核
+
+- 改动范围：本轮仅根据服务器完整输出复核clean与Mismatch-20%各两种baseline的TPU smoke结果和两阶段污染语义；无算法或训练代码改动，仅更新`develop.md`。
+- 服务器版本与拓扑：commit `175779f`与`origin/for_GRPO_8kBaseline`一致；JAX报告`process_count=1`、`device_count=local_device_count=4`，确认v5p-16 worker 0按四芯片单进程隔离。
+- 数据流预检：服务器完整JAX/Tunix环境运行`tests.my_example.alignment_mismatch_flow_test`两项通过，生产prompt hash/rank reversal、两种curriculum、clean GradAlign validation及残留noisy prompt进入dense-update污染链路均得到验证。
+- TPU smoke结果：LearnAlign clean跑满2/2 steps并保存model；GradAlign clean跑满4/4；LearnAlign mismatch跑满2/2且打印`Reward rank reversal enabled: fraction=0.2 seed=0`；GradAlign mismatch跑满4/4并打印相同配置。四组均完成selector rollout、投影gradient的设备编译、真实GRPO update、checkpoint恢复路径和merged model保存；日志中未出现checkpoint缺失降级提示。
+- 警告判定：Grain/jaxlib profiling、Qwix LoRA rng与actor/reference backbone copy均为非阻塞warning，本轮四个任务未因此失败；后两项仍可能增加复现随机性或HBM占用，但当前四芯片运行已完成。
+- 污染语义：selector阶段为每个candidate prompt单独生成selector answers，以GSM8K标准答案得到clean binary correctness；命中hash的training candidate在组内反转binary reward后计算advantage/gradient。筛选后真实trainer只接收selected prompts并重新生成4个training answers，使用原dense reward；命中同一hash的prompt再执行dense reward rank reversal，因此不复用selector answer，也不以binary reward完成真实update。
+- 已知风险/待办：根盘`97G`已用`78G`、仅余约`20G`；正式2 methods × 2 settings × 5 seeds前需统计单个完整run的checkpoint/model/log体积并扩容、迁移产物或制定完成后checkpoint清理策略，否则20-run矩阵有较高磁盘耗尽风险。小smoke的hash命中比例和effective比例不要求恰为20%，应以selection JSONL与TensorBoard audit字段判断。
+
+## 2026-09-13 — Mismatch prompt身份与两阶段reward污染确认
+
+- 改动范围：本轮仅澄清LearnAlign/GradAlign的selector与真实GRPO update如何共享prompt级污染身份，并复核服务器磁盘测量；无代码改动，仅更新`develop.md`。
+- 污染身份：`selected_prompt()`由完整prompt字符串、`TUNIX_REWARD_RANK_NOISE_SEED`与固定schema做稳定hash；同一prompt和noise seed在selector与真实update阶段得到相同clean/noisy判定。实验suite将noise seed设为对应experiment seed，因此不同seed通常污染不同prompt子集。
+- 两阶段行为：selector为candidate prompt生成独立answers并对命中组反转binary correctness的reward分配；筛选后trainer只接收selected prompts，再生成新的training answers，并对同一命中prompt反转原dense reward的组内分配。两阶段不共享answers，且prompt、标准答案和生成文本本身均未被永久修改。
+- 残留污染：LearnAlign/GradAlign按alignment score选择而非读取mismatch flag；若noisy prompt未被筛除且进入selected set，其真实update仍使用rank-reversed dense reward。若未入选则不训练；clean prompt入选则不反转。命中组若reward全相同，会出现`mismatch_selected=true`但`mismatch_effective=false`。
+- 磁盘复核：四个smoke run各约`2.0G`，合计`7.9G`；根盘当前`97G`中已用`84G`、仅余`14G`。即使按一个setting依次运行2 methods × 5 seeds，10个产物按smoke下限也约需`20G`，顺序启动不会降低累计占用，必须先清理smoke、扩容、迁移或实行逐run归档策略。
+- 验证命令与结果：无代码改动，无需新增测试；依据已通过的生产数据流预检、四组TPU smoke输出和用户提供的`du/df`结果确认。
+
+## 2026-09-13 — Mismatch-20%正式矩阵磁盘与启动策略
+
+- 改动范围：本轮仅提供服务器磁盘盘点、低风险清理和Mismatch-20%两方法五seed启动方案；无代码改动，仅更新`develop.md`。
+- 容量判断：清理后约`25G`可用仍只略高于smoke观测的`2G/run × 10 runs = 20G`下限；正式run还会产生更大的selection/TensorBoard、临时checkpoint与系统/编译缓存。若需本地同时保留全部model，建议启动前至少`35G`、优先`40G`可用空间。
+- 清理原则：先用`du -xhd1/2`、大文件查询、pip cache、Hugging Face cache和deleted-open-file检查定位；保留当前Gemma缓存、独立venv、GSM8K数据与未迁移的正式产物。已核验的smoke run可按精确目录删除；不得对`/tmp`、`~/.cache`或workspace使用宽泛递归删除。
+- 运行策略：空间达到安全阈值后可用suite一次串行运行`--seeds 0 5 13 21 42 --mismatch 0.2`；若仍只有约25G，应逐seed运行两方法，完成后检查结果并将model/checkpoint迁移到外部存储，再开始下一seed。
+- 监控建议：训练期间在独立终端持续观察`df -h /`与`du -sh logs`；剩余空间接近`8–10G`时不应继续启动下一run，以免checkpoint或merged-model写入中途失败。
+- 验证命令与结果：无代码改动；待用户在服务器执行空间盘点和正式启动。
+
+## 2026-09-13 — v5p worker磁盘占用初步定位
+
+- 改动范围：本轮仅分析服务器`/home`盘点并提供`/var`、`/var/log`与可选`/log`的只读检查及分级清理方案；无代码改动，仅更新`develop.md`。
+- 已定位占用：用户home共`31G`，主要为旧AIME checkout `Project=16G`、`.cache=6.9G`、`Project_8k=4.3G`和`.vscode-server=3.9G`。`Project_8k`中`.venv_jax081=2.3G`必须保留，另有默认输出`google/gemma-3-1b-it-lora/model.safetensors≈1.9G`需确认用途；`.cache`中vLLM约`4.4G`、当前Gemma HF缓存约`1.9G`，后者正式训练会复用不建议删除。
+- 关键保护对象：旧AIME run的step-314 checkpoint包含多个0.6–2.3GB OCDBT shard，合计很可能接近`Project`的主要16G；在确认AIME已完成、存在可恢复副本或已迁移外部存储前不得删除单个OCDBT文件或checkpoint子目录，否则整个checkpoint可能不可恢复。
+- 可候选清理：已验证smoke logs已清至4KB；pip purge仅移除三个wheel。无vLLM进程且接受后续重建缓存时，可精确删除`.cache/vllm`释放约4.4G；`Project_8k/tunix/google/gemma-3-1b-it-lora`只有在确认是可丢弃的旧smoke merged model后才可精确删除约1.9G；VS Code仅应清理已确认不活跃的旧server版本/extension，不应删除当前连接目录。
+- 后续检查：需读取`du -xhd1/2 /var`、`/var/log`大文件、journal占用、Docker/containerd占用、`/log`是否存在，以及deleted-open files；根据真实输出再给具体删除目标，禁止对`/var`、`/var/log`、`/tmp`或cache根目录执行宽泛`rm -rf`。
+- 验证命令与结果：用户实测根盘`97G/73G used/25G free`、inode仅3%；确认瓶颈为字节容量而非inode。无代码改动。
+
+## 2026-09-13 — Alignment baseline评测结果持久化复核
+
+- 改动范围：本轮仅复核LearnAlign/GradAlign正式运行的输出目录与训练前后评测保存链路；无训练、算法或启动代码改动，仅更新`develop.md`。
+- 输出布局：`run_alignment_baseline.sh`显式将selection审计数据、TensorBoard、checkpoint和merged model统一写入`logs/<method>_seed<seed>_mismatch<ratio>_<timestamp>/`，这是为了让每次run自包含并避免不同seed覆盖，不是checkpoint异常改写目录。
+- 评测行为：`alignment_main.py`默认执行pre-train和post-train evaluation，并将`num_correct`、`total`、`accuracy`、`partial_accuracy`和`format_accuracy`打印到stdout；smoke命令使用了`--skip-eval-before/after`，因此smoke没有覆盖该链路。
+- 持久化缺口：当前alignment launcher没有为每个run保存stdout，也没有调用既有`save_results_to_my_result.py`，因此不会自动生成旧实验中的`*__eval_accuracy__meta.json`。TensorBoard reward scalars不能等价替代这份pass@1评测JSON。
+- 启动建议：正式Mismatch-20%十个run前，应先补充每个run独立保存评测JSON（优先直接由`alignment_main.py`持久化pre/post结果），或至少逐run保留stdout；suite共用一个stdout文件时，现有解析器会按相同`pre-train/post-train`键覆盖前序run，不能直接生成十份可靠结果。
+- 容量判断：约`30G`可用空间比先前更安全，但仍低于同时保留十个正式model/checkpoint及临时写入所建议的`35–40G`裕量；应逐seed运行、持续监控，并在确认结果完整后迁移或精确清理checkpoint。
+- 验证命令与结果：通过`rg`核对alignment launcher四类输出参数、`alignment_main.py`评测打印位置及旧结果导出工具的JSON写入逻辑；无代码改动，无需新增测试。
+
+## 2026-09-13 — Alignment baseline公共结果结构对齐
+
+- 改动范围：让LearnAlign/GradAlign在保留各自selector审计JSON的同时，复用已有GSM8K结果导出链路，补齐与baseline和DTV系列一致的stdout、eval accuracy及TensorBoard scalar结果结构；不修改选择算法、reward/mismatch链路、训练参数或既有方法。
+- 修改文件：`my_example/run_alignment_baseline.sh`、`my_example/alignment_baselines/README.md`、新增`tests/my_example/save_results_to_my_result_test.py`、同步更新`develop.md`。
+- 输出结构：每个run继续保存在`logs/<run>/`，新增`results/`；其中保存`<method>__grpo_<timestamp>__stdout.log`、`<method>__grpo_<timestamp>__eval_accuracy__meta.json`、可用标准TensorBoard tag的CSV/meta JSON及reward overlay。accuracy JSON直接复用旧解析器，字段和层级严格保持`pre-train`/`post-train`下的`accuracy`、`format_accuracy`、`num_correct`、`partial_accuracy`与`total`。
+- 方法特有数据：LearnAlign/GradAlign的`run_metadata.json`、selection JSONL及summary JSON仍独立位于`selection/`；TensorBoard、checkpoint和merged model原位置不变。无`actor/train/skipped_samples` tag时导出器只提示skip，不伪造该方法不存在的数据。
+- 启动语义：正式矩阵默认保存pre/post两阶段；显式使用`--skip-eval-before/after`的快速smoke只会保存实际执行的phase，两个phase都跳过时不会生成空的eval accuracy JSON。
+- 验证命令与结果：Codex bundled Python运行新增结果解析测试以及alignment scoring/config/curriculum/mismatch-flow测试共11项全部通过；新增测试用用户给出的1319条评测样例逐字段断言pre/post JSON结构和值。`py_compile`、两个alignment shell脚本的`bash -n`和`git diff --check`均通过。桌面bundled Python不含TensorBoard，测试仅对该未使用的导入面提供stub，未修改生产导出器；TPU端正式训练前仍建议做一个包含pre/post eval的微型I/O smoke，确认真实event文件和JSON均落入对应run目录。
+- 已知风险/待办：结果导出在训练和模型保存成功后执行；进程被杀死或磁盘写满时会保留截至失败点的stdout和主框架产物，但不会生成训练完成后的eval/scalar导出文件。正式十run矩阵仍需持续监控磁盘。
+
+## 2026-09-13 — Alignment正式评测默认值与部署命令确认
+
+- 改动范围：本轮仅核对既有GRPO与新增alignment入口的评测默认值，并整理精确提交、服务器快进拉取和Mismatch-20%分阶段启动命令；无代码改动，仅更新`develop.md`。
+- 评测默认值：`my_example/config.py`原有配置默认`eval_before_train=True`、`eval_after_train=True`、`max_eval_examples=1319`、`eval_num_passes=1`；`--skip-eval-before/after`也是原框架既有CLI开关，并非本次为baseline新增。旧launcher和新的正式launcher不传skip参数时均执行完整pre/post评测。
+- smoke差异：此前四个TPU smoke命令显式传入两个skip参数，只为缩短设备验证时间，因此没有产生eval accuracy；正式suite默认未传skip参数，会评测并由本轮新增公共结果链路保存相同结构JSON。
+- 部署策略：提交时只暂存本轮四个明确文件，避免误提交其他本地文档；服务器使用`fetch`、`switch`和`pull --ff-only`。建议先运行Mismatch-20% seed 0两方法，核验首批`results/*__eval_accuracy__meta.json`后，再运行余下四个seed，以降低完整矩阵才发现I/O问题的风险。
+- 验证命令与结果：通过`rg`确认默认值、CLI映射及新旧入口条件分支；当前分支为`for_GRPO_8kBaseline`，`git diff --check`通过。

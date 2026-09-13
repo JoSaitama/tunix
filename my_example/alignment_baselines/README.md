@@ -51,6 +51,25 @@ candidate prompts in every round; validation mismatch flags are always false.
 These are selector-only values. Ordinary training metrics, checkpoints, and the
 merged model continue to use the existing framework outputs.
 
+Each run is self-contained under
+`logs/<method>_seed<seed>_mismatch<ratio>_<timestamp>/`. In addition to the
+method-specific `selection/` artifacts, `tensorboard/`, `checkpoints/`, and
+`model/`, the launcher writes the same common `results/` artifacts as the
+existing GSM8K methods:
+
+- `<method>__grpo_<timestamp>__stdout.log`;
+- `<method>__grpo_<timestamp>__eval_accuracy__meta.json`, containing the exact
+  `pre-train`/`post-train` accuracy, partial accuracy, format accuracy,
+  `num_correct`, and `total` structure;
+- CSV and metadata JSON for every available standard exported TensorBoard tag
+  (`global/eval/rewards/sum` and, when present,
+  `actor/train/skipped_samples`);
+- `global_eval_rewards_sum__overlay.png` when the reward scalar is available.
+
+Passing `--skip-eval-before` or `--skip-eval-after` intentionally omits that
+phase from the accuracy JSON. The full-matrix defaults run and retain both
+phases; the reduced smoke commands below skip them to save time.
+
 ## Launch examples
 
 ```bash
