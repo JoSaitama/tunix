@@ -1,0 +1,140 @@
+"""Numerical checks for LearnAlign promptwise gradient batching."""
+
+from __future__ import annotations
+
+import math
+
+import numpy as np
+
+from .scoring import learnalign_scores, stable_top_indices
+
+
+def _rankdata(values: np.ndarray) -> np.ndarray:
+    values = np.asarray(values, dtype=np.float64).reshape(-1)
+    order = np.argsort(values, kind="mergesort")
+    ranks = np.empty(values.size, dtype=np.float64)
+    start = 0
+    while start < values.size:
+        stop = start + 1
+        while stop < values.size and values[order[stop]] == values[order[start]]:
+            stop += 1
+        ranks[order[start:stop]] = 0.5 * (start + stop - 1)
+        start = stop
+    return ranks
+
+
+def _spearman(left: np.ndarray, right: np.ndarray) -> float | None:
+    if left.size < 2 or right.size != left.size:
+        return None
+    left_ranks = _rankdata(left)
+    right_ranks = _rankdata(right)
+    if np.std(left_ranks) == 0.0 or np.std(right_ranks) == 0.0:
+        return None
+    return float(np.corrcoef(left_ranks, right_ranks)[0, 1])
+
+
+def compare_learnalign_feature_paths(
+    legacy_features: np.ndarray,
+    promptwise_features: np.ndarray,
+    *,
+    selection_ratio: int,
+    rtol: float = 1e-4,
+    atol: float = 1e-5,
+    min_row_cosine: float = 0.99999,
+    min_score_spearman: float = 0.99999,
+) -> dict[str, object]:
+    """Compares full-chunk and one-prompt-at-a-time feature evaluation.
+
+    Deterministic non-uniform weights are used for the downstream LearnAlign
+    score comparison.  This keeps the check informative even when every short
+    smoke-test rollout happens to receive the same binary reward.
+    """
+    legacy = np.asarray(legacy_features, dtype=np.float64)
+    promptwise = np.asarray(promptwise_features, dtype=np.float64)
+    if legacy.shape != promptwise.shape or legacy.ndim != 2:
+        raise ValueError(
+            "feature paths must have the same [prompt, projection] shape; "
+            f"got {legacy.shape} and {promptwise.shape}"
+        )
+    if legacy.shape[0] == 0:
+        raise ValueError("at least one prompt feature is required")
+    if selection_ratio <= 1:
+        raise ValueError("selection_ratio must be greater than one")
+
+    difference = promptwise - legacy
+    max_abs = float(np.max(np.abs(difference)))
+    reference_scale = float(np.max(np.abs(legacy)))
+    max_relative = max_abs / max(reference_scale, np.finfo(np.float64).tiny)
+    feature_allclose = bool(np.allclose(promptwise, legacy, rtol=rtol, atol=atol))
+
+    legacy_norms = np.linalg.norm(legacy, axis=1)
+    promptwise_norms = np.linalg.norm(promptwise, axis=1)
+    both_zero = (legacy_norms == 0.0) & (promptwise_norms == 0.0)
+    denominator = legacy_norms * promptwise_norms
+    row_cosines = np.divide(
+        np.sum(legacy * promptwise, axis=1),
+        denominator,
+        out=np.zeros_like(denominator),
+        where=denominator > 0.0,
+    )
+    row_cosines[both_zero] = 1.0
+    minimum_cosine = float(np.min(row_cosines))
+
+    prompt_count = legacy.shape[0]
+    weights = np.linspace(0.125, 0.25, prompt_count, dtype=np.float64)
+    legacy_scores = learnalign_scores(legacy, weights)
+    promptwise_scores = learnalign_scores(promptwise, weights)
+    score_difference = promptwise_scores - legacy_scores
+    score_max_abs = float(np.max(np.abs(score_difference)))
+    score_scale = float(np.max(np.abs(legacy_scores)))
+    score_max_relative = score_max_abs / max(
+        score_scale, np.finfo(np.float64).tiny
+    )
+    score_spearman = _spearman(legacy_scores, promptwise_scores)
+
+    selected_count = max(1, math.ceil(prompt_count / selection_ratio))
+    legacy_selected = set(
+        int(value) for value in stable_top_indices(legacy_scores, selected_count)
+    )
+    promptwise_selected = set(
+        int(value)
+        for value in stable_top_indices(promptwise_scores, selected_count)
+    )
+    selected_union = legacy_selected | promptwise_selected
+    selected_jaccard = (
+        len(legacy_selected & promptwise_selected) / len(selected_union)
+        if selected_union
+        else 1.0
+    )
+
+    spearman_passed = (
+        score_spearman is None
+        or score_spearman >= min_score_spearman
+    )
+    passed = bool(
+        feature_allclose
+        and minimum_cosine >= min_row_cosine
+        and spearman_passed
+        and selected_jaccard == 1.0
+    )
+    return {
+        "passed": passed,
+        "prompt_count": prompt_count,
+        "projection_dim": legacy.shape[1],
+        "feature_allclose": feature_allclose,
+        "feature_rtol": rtol,
+        "feature_atol": atol,
+        "feature_max_abs_error": max_abs,
+        "feature_max_relative_error": max_relative,
+        "minimum_row_cosine": minimum_cosine,
+        "minimum_required_row_cosine": min_row_cosine,
+        "score_max_abs_error": score_max_abs,
+        "score_max_relative_error": score_max_relative,
+        "score_spearman": score_spearman,
+        "minimum_required_score_spearman": min_score_spearman,
+        "selected_count": selected_count,
+        "selected_jaccard": selected_jaccard,
+        "legacy_selected_indices": sorted(legacy_selected),
+        "promptwise_selected_indices": sorted(promptwise_selected),
+        "score_weights": "deterministic_nonuniform_test_weights",
+    }

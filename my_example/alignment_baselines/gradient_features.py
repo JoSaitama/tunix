@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import dataclasses
+import json
+from pathlib import Path
 from typing import Any, Sequence
 
 from flax import nnx
@@ -22,6 +24,7 @@ from my_example.reward_rank_noise import (
 from my_example.rewards import MATCH_NUMBERS
 
 from .data_utils import Example, batch_examples
+from .equivalence import compare_learnalign_feature_paths
 from .gradient_batching import feature_completion_slices
 
 
@@ -109,6 +112,8 @@ class PromptGradientEstimator:
         selection_micro_batch_size: int,
         noise_config: RewardRankNoiseConfig,
         promptwise_feature_estimation: bool = False,
+        equivalence_report_path: str | None = None,
+        equivalence_selection_ratio: int = 4,
     ):
         self.rl_cluster = rl_cluster
         self.training_algo_config = training_algo_config
@@ -117,7 +122,76 @@ class PromptGradientEstimator:
         self.selection_micro_batch_size = selection_micro_batch_size
         self.noise_config = noise_config
         self.promptwise_feature_estimation = promptwise_feature_estimation
+        self.equivalence_report_path = equivalence_report_path
+        self.equivalence_selection_ratio = equivalence_selection_ratio
         self._compiled: dict[int, Any] = {}
+
+    def _verify_promptwise_equivalence(
+        self,
+        *,
+        feature_fn,
+        train_example: TrainExample,
+        prompt_count: int,
+        num_rollouts: int,
+    ) -> None:
+        """Runs one same-input legacy/promptwise A/B check when requested."""
+        if not self.equivalence_report_path:
+            return
+        report_path = Path(self.equivalence_report_path)
+        if report_path.exists():
+            return
+
+        # The A/B check targets only the batching transformation.  A fixed,
+        # zero-mean advantage vector prevents an all-zero short-rollout reward
+        # batch from turning the numerical check into a vacuous comparison.
+        base_advantages = np.linspace(-1.0, 1.0, num_rollouts, dtype=np.float32)
+        base_advantages -= base_advantages.mean()
+        verification_example = train_example.replace(
+            advantages=jnp.asarray(np.tile(base_advantages, prompt_count))
+        )
+        model = self.rl_cluster.actor_trainer.model
+        legacy = np.asarray(
+            jax.device_get(feature_fn(model, verification_example))
+        )
+        promptwise_parts = []
+        for completion_slice in feature_completion_slices(
+            prompt_count=prompt_count,
+            num_rollouts=num_rollouts,
+            promptwise=True,
+        ):
+            feature_example = rl_utils.get_batch_slice(
+                verification_example,
+                completion_slice,
+            )
+            promptwise_parts.append(
+                np.asarray(jax.device_get(feature_fn(model, feature_example)))
+            )
+        promptwise = np.concatenate(promptwise_parts, axis=0)
+        report = compare_learnalign_feature_paths(
+            legacy,
+            promptwise,
+            selection_ratio=self.equivalence_selection_ratio,
+        )
+        report.update(
+            {
+                "method": "learnalign",
+                "legacy_feature_batch": f"{prompt_count}x{num_rollouts}",
+                "promptwise_feature_batch": f"1x{num_rollouts}",
+                "shared_tokens": True,
+                "shared_model_parameters": True,
+                "advantages": "shared_deterministic_zero_mean_test_vector",
+            }
+        )
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        report_path.write_text(
+            json.dumps(report, indent=2, sort_keys=True, allow_nan=False) + "\n",
+            encoding="utf-8",
+        )
+        if not report["passed"]:
+            raise RuntimeError(
+                "LearnAlign promptwise feature A/B check failed; see "
+                f"{report_path}"
+            )
 
     def _generate_binary_train_example(
         self,
@@ -298,6 +372,12 @@ class PromptGradientEstimator:
             with actor_mesh, self.rl_cluster._get_logical_axis_rules_cm(  # pylint: disable=protected-access
                 rl_cluster_lib.Role.ACTOR
             ):
+                self._verify_promptwise_equivalence(
+                    feature_fn=feature_fn,
+                    train_example=train_example,
+                    prompt_count=len(chunk),
+                    num_rollouts=num_rollouts,
+                )
                 feature_parts = []
                 for completion_slice in feature_completion_slices(
                     prompt_count=len(chunk),

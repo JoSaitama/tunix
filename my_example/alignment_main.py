@@ -256,6 +256,12 @@ def main(argv: list[str] | None = None) -> None:
         selection_micro_batch_size=alignment.selection_micro_batch_size,
         noise_config=selector_noise_config,
         promptwise_feature_estimation=(alignment.method == "learnalign"),
+        equivalence_report_path=(
+            os.environ.get("TUNIX_LEARNALIGN_EQUIVALENCE_REPORT")
+            if alignment.method == "learnalign"
+            else None
+        ),
+        equivalence_selection_ratio=alignment.selection_ratio,
     )
     common_curriculum = dict(
         training_examples=training_examples,

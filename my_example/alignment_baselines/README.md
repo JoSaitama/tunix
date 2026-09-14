@@ -103,6 +103,21 @@ regression smoke on an idle single-worker TPU:
 ./my_example/smoke_learnalign_memory_fix.sh
 ```
 
+To compare the legacy 32-completion feature call with the memory-safe four by
+eight path on exactly the same generated tokens and model parameters, run:
+
+```bash
+./my_example/verify_learnalign_feature_equivalence.sh \
+  logs/learnalign_seed0_mismatch0.2_TIMESTAMP/selection/learnalign_selection.jsonl
+```
+
+The optional JSONL argument adds the old seed-0 top-k boundary diagnostic. The
+TPU A/B check itself writes a temporary JSON report and requires feature
+`allclose(rtol=1e-4, atol=1e-5)`, minimum row cosine `0.99999`, score Spearman
+`0.99999` when defined, and selected-set Jaccard `1.0`. It uses one shared
+rollout batch and deterministic nonzero test advantages, so rollout randomness
+or an all-zero short-smoke reward batch cannot mask a batching discrepancy.
+
 It first runs the fast batching, configuration, curriculum, and mismatch tests,
 then runs a two-update seed-5 Mismatch-20% LearnAlign job using the production
 eight-rollout selector. Large smoke artifacts are written under a temporary

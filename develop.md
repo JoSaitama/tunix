@@ -11632,3 +11632,27 @@ This file tracks engineering changes made in this repository.
 - 快速验证：新增smoke先运行4个相关host test模块，再用seed5、Mismatch-20%、8-rollout selector执行2个真实update；训练/selector参数之外仅缩小smoke数据规模并跳过pre/post eval，所有大型产物写入`mktemp`目录，成功后自动删除、失败时保留供诊断。运行命令为`./my_example/smoke_learnalign_memory_fix.sh`。
 - 本地结果：目标10项unit tests全部通过；相关Python文件`py_compile`、smoke脚本`bash -n`与`git diff --check`通过。全目录discover额外运行20项，其中19项通过、`reward_rank_noise_test`因Codex bundled Python未安装Flax而无法导入；目标mismatch-flow测试已通过其轻量stub路径，非本次代码失败。
 - 已知风险/待办：本地没有TPU，尚未验证最大shape实际HBM峰值。promptwise调用理论上将失败程序关键batch维从32降至8，但会增加每generation chunk的feature调用/host同步次数，selector可能更慢。正式续跑前必须在空闲TPU执行新增smoke；数学等价仍可能存在浮点归约微差，旧LearnAlign seed0是否复用需结合固定batch等价或selected-set审计决定。
+
+## 2026-09-14 — LearnAlign分块后速度与seed 0一致性验证方案
+
+- 改动范围：本轮仅估算promptwise feature分块的运行时间影响，并区分快速算子等价验证与完整seed 0 selected-set验证；无训练代码改动，仅更新`develop.md`。
+- 速度估计：旧seed 0端到端约6小时15分，其中warmup后静态selector约1小时54分、其余阶段约4小时21分。新路径保持相同32条completion总前反向工作量，但每个4-prompt generation chunk由1次32-completion feature调用变为4次8-completion调用，增加dispatch/device_get同步并显著降低HBM峰值。TPU实测前保守预计selector为旧版1.3–2.5倍，对应全run约6小时49分至9小时06分，即端到端约慢9%–46%；较可能落在7–9小时而非4倍时长。
+- 快速A/B验证：应在同一进程、同一个已生成TrainExample上分别执行旧32-completion full-chunk与新4×8 promptwise feature path，比较binary outcomes、selector rewards和advantages逐元素相同，并检查feature `allclose`、逐行cosine、score Spearman及top-k Jaccard。建议门槛为`rtol=1e-4, atol=1e-5`、最小row cosine≥0.99999、Spearman≥0.99999、Jaccard=1.0；使用较短generation shape可让旧路径安全编译，数分钟级完成。
+- Seed 0严格验证：短batch A/B只能证明算子等价，不能直接证明完整2764-candidate selected set完全相同。严格比较需要从相同seed和warmup状态用新代码重放到selector完成，然后比较新旧`learnalign_selection.jsonl`的candidate prompt ID、reward/advantage、score及selected ID集合；只需运行到summary生成即可停止，不需要完成691步，但仍需承担75步warmup和一次全池selector。
+- 实用判断：若快速A/B全部通过且旧seed 0 top-25%边界score间隔明显大于A/B观察到的数值误差，可将旧seed 0视为等价内存调度下的可复用结果并在实验metadata记录；若top-k边界敏感、Jaccard非1或无法复现相同rollout/RNG状态，主表最严谨做法仍是重跑LearnAlign seed 0。GradAlign seed 0因4-rollout路径未改可直接保留。
+
+## 2026-09-14 — LearnAlign同输入新旧feature路径TPU A/B验证
+
+- 改动范围：新增独立、默认关闭的LearnAlign feature等价验证入口；在同一次rollout、同一actor参数与同一组测试advantage上，比较旧版4 prompts×8 rollouts单次32-completion反向路径和新版逐prompt四次8-completion路径。正式LearnAlign和GradAlign在未设置验证环境变量时不增加任何A/B计算，也不改变算法、训练参数或输出。
+- 修改文件：新增`my_example/alignment_baselines/equivalence.py`、`tests/my_example/alignment_equivalence_test.py`和`my_example/verify_learnalign_feature_equivalence.sh`；修改`my_example/alignment_baselines/gradient_features.py`、`my_example/alignment_main.py`、`my_example/alignment_baselines/README.md`并同步更新`develop.md`。
+- 验证定义：feature要求`allclose(rtol=1e-4, atol=1e-5)`且逐row最小cosine不低于0.99999；使用确定性非均匀测试权重重算LearnAlign score，要求Spearman在可定义时不低于0.99999，top集合Jaccard等于1.0。短smoke的advantage改为两路径共享的确定性非零零均值向量，仅用于防止短生成恰好全错导致空检验，不进入正式训练或正式selector。
+- 运行方式：TPU执行`./my_example/verify_learnalign_feature_equivalence.sh [旧seed0 learnalign_selection.jsonl]`。脚本使用seed0、Mismatch-20%、8 selector rollouts、4096维投影，固定只缩短验证数据规模和generation长度；大型临时model/checkpoint默认在成功后删除。可选旧JSONL参数只报告旧selected/dropped边界间隔，不能代替同输入A/B。
+- 验证命令与结果：Codex bundled Python运行新增equivalence与gradient-batching共7项测试，以及既有alignment config/scoring/curriculum/mismatch-flow共10项测试，合计17项全部通过；相关Python文件`py_compile`、脚本`bash -n`和`git diff --check`均通过。真实legacy-32与promptwise-8设备数值比较仍必须在空闲TPU执行。
+- 已知风险/待办：A/B为了让旧32-completion路径适配95.74GB HBM，将generation长度缩短至128，因此证明的是batching算子在安全shape上的数值等价，不是完整2764-candidate selector重放。若A/B失败，旧seed0不可复用；若A/B通过但旧top-k边界极小，仍建议重跑seed0或进一步做相同warmup状态的selector-only重放。
+
+## 2026-09-14 — LearnAlign A/B验证提交状态复核
+
+- 改动范围：本轮仅复核本地分支、远端和暂存状态并整理定向提交/服务器拉取命令；无算法或验证代码改动，仅更新`develop.md`。
+- 状态结论：`my_example/verify_learnalign_feature_equivalence.sh`已被单独提交并推送为`6dc5011`，但其依赖的equivalence模块、estimator验证入口、测试和说明仍在工作区，需追加一个普通commit；不改写或强推已发布历史。
+- 验证命令与结果：`git status --short`、`git ls-files --stage`、`git show HEAD:<script>`和`git log -1 --stat`确认入口脚本已在HEAD及`origin/for_GRPO_8kBaseline`，其余六个代码/说明文件和`develop.md`尚未提交。
+- 已知风险/待办：服务器必须拉取后续完整实现commit后才能运行A/B脚本；仅含`6dc5011`的远端状态会因缺少`my_example.alignment_baselines.equivalence`而失败。
