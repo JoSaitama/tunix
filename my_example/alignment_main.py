@@ -76,9 +76,10 @@ def _write_run_metadata(path: Path, *, alignment, cfg, max_steps: int) -> None:
         )
         adaptations.append(
             f"LearnAlign keeps each {alignment.selection_micro_batch_size}-prompt "
-            "dimension intact, but evaluates the grouped-loss feature backward "
+            "dimension intact, but evaluates legacy per-completion gradients "
             f"pass in ordered {selector_backward_rollouts}-rollout subbatches; "
-            "each prompt's rollout mean remains inside autodiff"
+            "prompt means are formed after differentiation as in the original "
+            "path"
         )
     metadata = {
         "alignment": alignment.to_dict(),

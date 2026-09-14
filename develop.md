@@ -11748,3 +11748,11 @@ This file tracks engineering changes made in this repository.
 - 审计信息：启动日志应显示`generation_chunk=4x8`、`backward_subbatch=4x4`、`backward_calls_per_chunk=2`；summary分别记录prompt batch 4、rollout batch 4、completion batch 16和两次调用。rollout生成、binary/mismatch reward、8-rollout GRPO advantage、projection seed、LearnAlign score、selection ratio及真实update均不变，GradAlign不受影响。
 - 验证命令与结果：Codex bundled Python运行alignment equivalence/config/scoring/curriculum/mismatch-flow共18项测试全部通过；目标Python文件`py_compile`、两个shell脚本`bash -n`及`git diff --check`均通过。服务器仍须重新运行32-prompt同输入A/B，必须恢复selected Jaccard `1.0`且确认非退化，然后运行默认正式长度memory smoke。两个TPU验证均通过前不恢复正式suite、不复用旧seed0。
 - 已知风险/待办：`4×4`保留prompt维度但改变rollout归约分组，仍可能产生小幅bfloat16差异，因此selected-set必须实测；若仍不一致，应优先采用保留完整`4×8`形状的rematerialization，而不是继续缩小prompt维度或放宽验收。
+
+## 2026-09-15 — LearnAlign 4×4 grouped-loss A/B失败与completion-gradient顺序恢复
+
+- 问题结论：服务器32-prompt实测中，`4×4` grouped-loss路径的selected Jaccard仍为`0.7778`，top-8中index 0被index 5替换；最小row cosine为`0.6246`，score Spearman为`0.9856`，score最大相对误差为`27.10%`。这不是可以通过放宽阈值接受的旧seed0复用证据。
+- 修复范围：移除“先对rollout loss求均值、再求prompt gradient”的grouped-loss AD图。新的内存分批路径对每个`4 prompts × 4 rollouts`子批直接复用legacy实现：先求每条completion gradient，再按prompt平均、再做4096维稀疏投影；两个rollout子批的投影结果最后取均值。这保留了原completion-level differentiation顺序，只改变HBM调度。
+- 修改文件：`my_example/alignment_baselines/gradient_features.py`、`equivalence.py`、`README.md`、`my_example/alignment_main.py`、`my_example/smoke_learnalign_memory_fix.sh`及`develop.md`。LearnAlign的rollout生成、binary/Mismatch reward、8-rollout advantage、projection seed、score、top-25%与真实训练不变；GradAlign不受影响。
+- 验证结果与顺序：Codex bundled Python运行alignment equivalence/config/scoring/curriculum/mismatch-flow共18项测试全部通过；目标Python文件`py_compile`、两个shell脚本`bash -n`及`git diff --check`通过。服务器必须先重跑32-prompt同rollout selected-set A/B；只有Jaccard为`1.0`才可考虑复用旧LearnAlign seed0。随后独立运行默认最大长度memory smoke确认不再OOM。
+- 已知风险/待办：分批仍会改变TPU/XLA的batch形状，因此A/B结果不能提前保证。若该路径仍改变selected set，不再继续放宽验收或拆小批次；改为完整`4×8` selector-only rematerialization或用统一内存适配重跑全部LearnAlign seeds。

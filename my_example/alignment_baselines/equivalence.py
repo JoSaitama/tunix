@@ -1,4 +1,4 @@
-"""Numerical checks for LearnAlign grouped gradient evaluation."""
+"""Numerical checks for LearnAlign memory-bounded gradient evaluation."""
 
 from __future__ import annotations
 
@@ -88,7 +88,7 @@ def compare_learnalign_feature_paths(
     min_row_cosine: float = 0.99999,
     min_score_spearman: float = 0.99999,
 ) -> dict[str, object]:
-    """Compares per-completion and grouped-loss feature evaluation.
+    """Compares full-rollout and memory-bounded feature evaluation.
 
     By default deterministic non-uniform weights are used for the downstream
     LearnAlign score comparison.  A caller may instead supply the actual

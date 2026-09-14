@@ -79,7 +79,7 @@ assert selected_count == summary["selected_prompts"]
 assert all(len(record["selector_rewards"]) == 8 for record in records)
 
 print(
-    "PASS: 4x4 rollout-subbatch LearnAlign feature path completed; "
+    "PASS: 4x4 rollout-subbatch completion-gradient path completed; "
     f"candidates={len(records)}, selected={summary['selected_prompts']}"
 )
 PY

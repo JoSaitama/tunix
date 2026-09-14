@@ -139,7 +139,8 @@ python -m unittest -v tests.my_example.alignment_mismatch_flow_test
 ```
 
 Run these two reduced jobs before the full matrix. They exercise selector
-rollout, grouped prompt-gradient compilation, selection, a real GRPO update,
+rollout, memory-bounded per-completion-gradient compilation, selection, a real
+GRPO update,
 checkpoint restore, and merged-model save.
 
 ```bash

@@ -134,7 +134,6 @@ class PromptGradientEstimator:
         self.equivalence_report_path = equivalence_report_path
         self.equivalence_selection_ratio = equivalence_selection_ratio
         self._compiled: dict[int, Any] = {}
-        self._grouped_compiled: dict[int, Any] = {}
 
     def _write_grouped_equivalence_report(
         self,
@@ -176,6 +175,10 @@ class PromptGradientEstimator:
                 ),
                 "grouped_gradient_count_per_chunk": (
                     self.selection_micro_batch_size
+                    * min(self.grouped_rollout_subbatch_size, num_rollouts)
+                ),
+                "memory_bounded_gradient_semantics": (
+                    "per_completion_gradient_then_prompt_mean"
                 ),
                 "grouped_rollout_subbatches_per_chunk": (
                     num_rollouts
@@ -213,7 +216,7 @@ class PromptGradientEstimator:
         )
         if not report["passed"]:
             raise RuntimeError(
-                "LearnAlign grouped selected-set A/B check failed; see "
+                "LearnAlign memory-bounded selected-set A/B check failed; see "
                 f"{report_path}"
             )
 
@@ -359,100 +362,6 @@ class PromptGradientEstimator:
         self._compiled[num_rollouts] = compiled
         return compiled
 
-    def _grouped_feature_function(self, num_rollouts: int):
-        """Projects one gradient of the mean loss for each prompt group.
-
-        The caller keeps the complete prompt dimension and bounds only the
-        rollout dimension in each compiled call. Moving the rollout mean inside
-        automatic differentiation produces one gradient tree per prompt.
-        """
-        if num_rollouts in self._grouped_compiled:
-            return self._grouped_compiled[num_rollouts]
-
-        score_config = dataclasses.replace(
-            self.training_algo_config,
-            beta=0.0,
-            num_generations=num_rollouts,
-        )
-        policy_loss_fn = function_registry.get_policy_loss_fn(
-            score_config.policy_loss_fn
-        )
-        pad_id = self.rl_cluster.rollout.pad_id()
-        eos_id = self.rl_cluster.rollout.eos_id()
-        projection_dim = self.projection_dim
-        projection_seed = self.projection_seed
-
-        def grouped_feature_fn(model, train_example):
-            completion_count = train_example.advantages.shape[0]
-            if completion_count % num_rollouts:
-                raise ValueError(
-                    "completion count must be divisible by num_rollouts; "
-                    f"got {completion_count} and {num_rollouts}"
-                )
-
-            def group_completion_axis(value):
-                if value is None:
-                    return None
-                return value.reshape(
-                    (-1, num_rollouts) + value.shape[1:]
-                )
-
-            grouped_example = jax.tree_util.tree_map(
-                group_completion_axis,
-                train_example,
-                is_leaf=lambda value: value is None,
-            )
-
-            def one_completion_loss(model, one_example):
-                loss, _ = policy_loss_fn(
-                    model,
-                    one_example,
-                    algo_config=score_config,
-                    pad_id=pad_id,
-                    eos_id=eos_id,
-                )
-                return loss
-
-            def group_mean_loss(model, one_prompt_group):
-                completion_in_axes = jax.tree_util.tree_map(
-                    lambda value: None if value is None else 0,
-                    one_prompt_group,
-                    is_leaf=lambda value: value is None,
-                )
-                completion_losses = jax.vmap(
-                    one_completion_loss,
-                    in_axes=(None, completion_in_axes),
-                )(model, one_prompt_group)
-                return jnp.mean(completion_losses)
-
-            wrt = (
-                nnx.LoRAParam
-                if self.rl_cluster.actor_trainer._lora_enabled  # pylint: disable=protected-access
-                else nnx.Param
-            )
-            prompt_grad_fn = nnx.value_and_grad(
-                group_mean_loss,
-                argnums=nnx.DiffState(0, wrt),
-            )
-            prompt_in_axes = jax.tree_util.tree_map(
-                lambda value: None if value is None else 0,
-                grouped_example,
-                is_leaf=lambda value: value is None,
-            )
-            _, prompt_grads = jax.vmap(
-                prompt_grad_fn,
-                in_axes=(None, prompt_in_axes),
-            )(model, grouped_example)
-            return project_gradient_tree(
-                prompt_grads,
-                projection_dim=projection_dim,
-                seed=projection_seed,
-            )
-
-        compiled = nnx.jit(grouped_feature_fn)
-        self._grouped_compiled[num_rollouts] = compiled
-        return compiled
-
     def _evaluate_grouped_features(
         self,
         *,
@@ -463,12 +372,16 @@ class PromptGradientEstimator:
         total_rollouts: int,
         feature_rollouts: int,
     ) -> jax.Array:
-        """Runs memory-bounded grouped gradients without changing rollouts.
+        """Runs memory-bounded completion gradients without changing rollouts.
 
         Every call retains all prompts and selects the same rollout positions
-        from each prompt. Averaging the projected subbatch gradients is
-        mathematically equivalent to the full rollout mean because both
-        differentiation and the sparse projection are linear.
+        from each prompt. Each subbatch follows the legacy path: differentiate
+        every completion, then average its gradients by prompt, then project.
+        Averaging the projected subbatch results is mathematically equivalent
+        to the full rollout mean because both averaging and the sparse
+        projection are linear. Keeping differentiation outside the rollout
+        mean also preserves the legacy AD graph more faithfully than the former
+        grouped-loss implementation.
         """
         feature_parts = []
         for completion_indices in rollout_subbatch_completion_indices(
@@ -526,7 +439,10 @@ class PromptGradientEstimator:
                 f"got {num_rollouts} and {grouped_feature_rollouts}"
             )
         if self.grouped_feature_estimation or self.equivalence_report_path:
-            grouped_feature_fn = self._grouped_feature_function(
+            # Reuse the exact legacy completion-gradient program at a smaller
+            # rollout count. Only the HBM schedule changes; the order of
+            # differentiation, prompt averaging, and projection does not.
+            grouped_feature_fn = self._feature_function(
                 grouped_feature_rollouts
             )
         for start in range(0, len(examples), self.selection_micro_batch_size):
