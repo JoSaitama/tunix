@@ -59,6 +59,21 @@ def _batched(examples, batch_size: int):
 def _write_run_metadata(path: Path, *, alignment, cfg, max_steps: int) -> None:
     path.mkdir(parents=True, exist_ok=True)
     selector_noise = reward_rank_noise_config_from_env()
+    adaptations = [
+        "selection gradients are computed only in the actor LoRA space",
+        "full gradients use a deterministic sparse-JL feature hash",
+        (
+            "selector base rewards use binary exact correctness; selected "
+            "training prompts receive deterministic within-group rank reversal"
+        ),
+        "GradAlign held-out validation selector rewards remain clean",
+        "actual updates retain the frozen dense reward and optional rank mismatch",
+    ]
+    if alignment.method == "learnalign":
+        adaptations.append(
+            "LearnAlign keeps four-prompt rollout generation but evaluates "
+            "configured-rollout gradient features one prompt at a time to bound HBM"
+        )
     metadata = {
         "alignment": alignment.to_dict(),
         "experiment_seed": experiment_seed(),
@@ -82,16 +97,7 @@ def _write_run_metadata(path: Path, *, alignment, cfg, max_steps: int) -> None:
             "max_prompt_length": cfg.grpo.max_prompt_length,
             "total_generation_steps": cfg.grpo.total_generation_steps,
         },
-        "adaptations": [
-            "selection gradients are computed only in the actor LoRA space",
-            "full gradients use a deterministic sparse-JL feature hash",
-            (
-                "selector base rewards use binary exact correctness; selected "
-                "training prompts receive deterministic within-group rank reversal"
-            ),
-            "GradAlign held-out validation selector rewards remain clean",
-            "actual updates retain the frozen dense reward and optional rank mismatch",
-        ],
+        "adaptations": adaptations,
     }
     (path / "run_metadata.json").write_text(
         json.dumps(metadata, indent=2, sort_keys=True, allow_nan=False) + "\n",
@@ -249,6 +255,7 @@ def main(argv: list[str] | None = None) -> None:
         projection_seed=experiment_seed() or 0,
         selection_micro_batch_size=alignment.selection_micro_batch_size,
         noise_config=selector_noise_config,
+        promptwise_feature_estimation=(alignment.method == "learnalign"),
     )
     common_curriculum = dict(
         training_examples=training_examples,

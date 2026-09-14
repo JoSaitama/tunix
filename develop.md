@@ -11536,3 +11536,99 @@ This file tracks engineering changes made in this repository.
 - smoke差异：此前四个TPU smoke命令显式传入两个skip参数，只为缩短设备验证时间，因此没有产生eval accuracy；正式suite默认未传skip参数，会评测并由本轮新增公共结果链路保存相同结构JSON。
 - 部署策略：提交时只暂存本轮四个明确文件，避免误提交其他本地文档；服务器使用`fetch`、`switch`和`pull --ff-only`。建议先运行Mismatch-20% seed 0两方法，核验首批`results/*__eval_accuracy__meta.json`后，再运行余下四个seed，以降低完整矩阵才发现I/O问题的风险。
 - 验证命令与结果：通过`rg`确认默认值、CLI映射及新旧入口条件分支；当前分支为`for_GRPO_8kBaseline`，`git diff --check`通过。
+
+## 2026-09-13 — Mismatch-20%十任务nohup启动说明
+
+- 改动范围：本轮仅整理单worker v5p-16上一次性串行运行LearnAlign/GradAlign五seed的nohup命令，并解释原框架评测参数组合；无代码改动，仅更新`develop.md`。
+- 启动语义：suite按seed 0/5/13/21/42、每个seed内LearnAlign后GradAlign的顺序串行执行共10个run；`nohup`总日志记录矩阵进度，每个run仍独立保存`results/*__stdout.log`、eval accuracy、TensorBoard导出、selection、checkpoint和model。任一run非零退出时suite停止，不继续后续任务。
+- 评测组合：每个run默认在训练前和训练后各对完整1319题GSM8K test split评测一次；`eval_num_passes=1`表示每题只进行一次evaluation generation，因此每个run产生2638次评测回答。它不改变训练步数、训练rollout数或selector rollout数。
+- 容量风险：十个run会累计保留十份checkpoint与merged model；约30GB空间仍需持续监控，剩余8–10GB时不应等待下一次checkpoint写入才处理。
+- 验证命令与结果：无代码改动；沿用已通过的launcher shell语法与11项本地测试，待服务器拉取后执行正式矩阵。
+
+## 2026-09-14 — Alignment baseline正式运行耗时分析
+
+- 改动范围：本轮仅根据正式run时间戳和实现代码分析LearnAlign/GradAlign额外计算量；无代码改动，仅更新`develop.md`。
+- 时间观测：LearnAlign目录时间戳`20260913_143109`到下一项GradAlign的`20260913_204610`相差6小时15分01秒；suite为严格串行，因此该区间基本覆盖LearnAlign完整pre-eval、训练/selection、post-eval、恢复保存及结果导出。
+- LearnAlign工作量：冻结配置产生691个真实update、约2764个training candidate prompts。除300-prompt warmup（75个update，计入691总预算）外，静态selector对全部2764 prompts各生成8个answers，共22,112个额外selector completions；以4 prompts/chunk执行691次生成、per-completion LoRA gradient、4096维稀疏投影和device-to-host同步。
+- GradAlign工作量：691步按10步间隔形成70轮selection。69个完整轮各评估30个validation prompts×4 rollouts和160个candidate prompts×4 rollouts，最后一轮仍评估validation并评估16个candidate prompts，合计约52,624个额外selector completions；并约有3,300次四prompt级gradient-estimation chunks，因此预期明显慢于LearnAlign。
+- 共同成本：两个baseline和旧GRPO方法均保留691个真实update、完整1319题pre/post evaluation，并以原`eval_every_n_steps=32`对held-out训练split做周期性validation；这些解释总时长，但不是alignment相对旧方法的主要新增差异。
+- 代码判断：LearnAlign row-mean score已用`z_i dot mean(z)`避免显式O(N²)矩阵；JIT函数按rollout数缓存，没有发现每个chunk主动重建compiled function或死循环。当前主要放大项是selection micro-batch 4导致的大量串行generate/gradient调用和每chunk `device_get`同步，属于可优化实现开销，但改变batch大小前需实测HBM和数值一致性。
+- 风险/待办：若LearnAlign约6.25小时/run，五seed仅LearnAlign约31小时；GradAlign按当前工作量可能更久，十run mismatch矩阵及后续clean矩阵存在一周内无法完成的风险。应尽快从TensorBoard wall_time与selection summary mtime拆分真实阶段耗时，再决定是否在不改变算法口径下增大selection micro-batch、增大GradAlign selection interval或减少估计rollouts；后三者中后两项会改变baseline配置，需论文披露。
+- 验证命令与结果：只读检查alignment config、curriculum、gradient estimator、训练validation调度及JIT缓存路径；无代码修改、无需新增测试。
+
+## 2026-09-14 — Seed 0实测耗时外推
+
+- 改动范围：本轮仅依据用户提供的GradAlign进程、selection summary和TensorBoard wall time计算单seed耗时，并比较Vanilla/DTV/DTV-Loo计算路径；无代码改动，仅更新`develop.md`。
+- LearnAlign实测：LearnAlign run时间戳`20260913_143109`至下一GradAlign启动`20260913_204610`为6小时15分01秒，代表seed 0完整端到端耗时；后续seed因每个新进程仍需JIT编译，预计约6小时10分至6小时30分，而不会因第一个seed编译完成而跨进程复用。
+- GradAlign进度：20:46:10启动，02:27:51完成round 31（累计32/70 selection rounds），耗时5小时41分41秒；首轮summary birth为21:09:23，此后31个round间隔平均约10.27分钟。按相同速率，最后selection约在服务器UTC 08:58完成，再加post-eval/模型保存，单seed预计约12小时25分至12小时40分。
+- 矩阵估算：每个seed两方法合计约18小时40分至19小时10分；同一worker串行五seed约93至96小时，即约3.9至4.0天。Clean设置开销与Mismatch-20%基本相同；同一worker连续跑两个setting预计约7.8至8天，超过一周窗口。两台独立服务器各承担一个setting时理论上可压缩到约4天，但不能在第二台重复当前已排队的相同seed集合。
+- 活跃性证据：`actor/train/loss`已到step 319且仅0.9分钟前更新；`global/eval/rewards/sum`停在step 288约25分钟前符合每32步一次的训练内validation节奏。GradAlign在每10步前执行新一轮selector，因此进度条阶段性停顿属于预期。
+- 慢速原因：DTV/DTV-Loo主要复用当前真实update生成的completions并在当前batch内评分；LearnAlign额外生成22,112个全池selector completions并计算逐completion LoRA gradients；GradAlign约70轮额外生成52,624个validation/candidate selector completions并做同类梯度。4-prompt selection micro-batch与每chunk device同步进一步降低利用率，但梯度和投影仍在TPU执行。
+- 验证命令与结果：基于summary的32轮、latest start step 310、train step 319以及文件UTC时间戳完成算术外推；无代码修改、无需新增测试。
+
+## 2026-09-14 — Alignment selector TPU/CPU执行边界澄清
+
+- 改动范围：本轮仅澄清`jax.device_get`语义并提供不干扰当前TPU任务的阶段检查方法；无代码改动，仅更新`develop.md`。
+- 设备边界：selector的policy loss、`nnx.value_and_grad`、completion维`jax.vmap`、prompt group mean和4096维feature-hash projection均位于`nnx.jit(feature_fn)`及actor mesh上下文内，在TPU执行。主机仅执行文本exact-match、rank-noise/advantage组织、排序/JSON写入，并通过`jax.device_get(features)`接收已投影的小矩阵。
+- 同步含义：默认每个chunk最多返回`[4,4096]` float32，约64KiB；并未把完整LoRA gradient tree搬到CPU。性能问题在于每4 prompts发生一次host/device同步并串行等待下一轮generate+gradient，691个LearnAlign chunks会积累调度与同步延迟，但主要算力仍在TPU。
+- 排查原则：当前worker上不得另起`import jax; jax.devices()`进程，以免TPU多进程初始化再次阻塞。应使用已有nohup/stdout、selection summary的mtime/round数、TensorBoard event wall-time和OS进程状态判断进度；若event/summary持续更新则不是卡死。
+- 第二服务器：新增v5p-16可用于并行不同seed或做性能smoke，但当前suite已经排定全部五seed，直接在第二台重复启动同一完整suite会重复实验。拆分前需确定当前suite停止边界并保证两台服务器seed集合不重叠；任何性能参数调整都必须从seed0起统一重跑。
+- 验证命令与结果：静态核对`gradient_features.py`中JIT/mesh/device_get位置；无训练代码修改、无需新增测试。
+
+## 2026-09-14 — Alignment selector参数与加速边界评估
+
+- 改动范围：本轮仅对照LearnAlign/GradAlign论文与当前实现，评估selector参数的合理性及不改变冻结GRPO训练配置的加速空间；无训练代码改动，仅更新`develop.md`。
+- 冻结边界：真实训练仍固定4 prompts × 4 completions、691 updates、学习率、KL、评测与Mismatch链路；这些共享参数不应为alignment baseline单独改变。selector的warmup、估计rollouts、validation规模、selection ratio/interval属于方法参数，若调整必须对该方法全部seed与clean/mismatch统一重跑并在论文披露。
+- LearnAlign判断：`warmup_prompts=300`与`estimation_rollouts=8`对应论文GSM8K设置；`selection_ratio=4`是为了与GradAlign统一25%预算的适配，论文自身报告多个固定subset size；`projection_dim=4096`为实现选择而非论文明确固定值。将8 rollouts降至4可近似减半静态selector rollout量，但会降低`p(1-p)`估计分辨率，不建议用于正式主表。
+- GradAlign判断：`selection_ratio=4`、`selection_interval=10`及30条validation probe均有论文设置或消融依据；当前candidate/validation rollouts均为4，已经明显低于论文标准16，且没有满足正文建议的`k_r<k_v`，属于为冻结4-rollout GRPO做的计算折中，不宜继续降至2。按当前691步，selector额外产生44,224个candidate与8,400个validation completions。
+- 慢速结构原因：GradAlign论文标准设置用128个training rollouts/problem摊销16-rollout selector；当前4-rollout训练下，candidate selector相对真实训练的rollout比从论文约`q*k_r/n_t=0.5`上升到`4.0`，即相对摊销负担约放大8倍，因此论文约65%的额外开销不能直接套用当前设置。
+- 优先加速方向：不改变算法口径时，应优先把当前“先生成全部逐completion gradient tree、再按prompt求均值”改为直接对每个prompt的rollout平均loss求梯度；由梯度线性性可保持同一prompt feature语义，同时避免物化8倍/4倍的per-completion LoRA梯度。其次可单独提高selector micro-batch到8做HBM与数值一致性smoke；该项不改变真实训练micro-batch，但会改变执行批次与随机数消费顺序，不能与已经以4运行的seed混用。
+- 不推荐的捷径：降低LearnAlign rollout数、GradAlign rollout数、selection ratio或大幅增大selection interval都会改变baseline定义或选择质量；降低projection维度只影响投影/传输且未必解决生成与反向传播主瓶颈。任何实现优化若用于正式结果，必须从seed 0重新统一运行。
+- 验证命令与结果：只读检查alignment config/curriculum/gradient estimator，并核对两篇论文的方法与计算开销段落；无代码修改、无需新增测试。
+
+## 2026-09-14 — Clean五seed nohup命令与磁盘裕量复核
+
+- 改动范围：本轮仅核对另一台单worker v5p-16服务器上Clean设置的nohup启动命令、suite展开顺序及落盘风险；无训练代码改动，仅更新`develop.md`。
+- 命令语义：`--mismatch 0`表示Clean；未传`--methods`时suite默认依次运行`learnalign gradalign`，并按seed 0/5/13/21/42串行产生十个独立run。每个run继续执行完整pre/post evaluation并保存selection、TensorBoard、checkpoint、merged model和公共results结构。
+- 语法注意：实际shell命令必须使用`--seeds`和`--mismatch`，不能保留富文本转义形式`\--seeds`/`\--mismatch`；最后一个参数后不需要续行反斜杠。启动前应确认位于正确repo/branch、激活`.venv_jax081`且该worker没有其他JAX TPU进程。
+- 容量判断：29GB空闲在已观察约2GB/run的前提下理论上可容纳约20GB的十个完成目录，但只剩约9GB用于当前run临时checkpoint、模型合并、cache和日志，属于可运行但裕量偏低，不能视为稳妥充足。建议启动前记录`df -h /`和`du -sh logs`，运行期间每个run完成后监控；剩余空间接近10GB时先暂停下一run并迁移已完成目录。
+- 验证命令与结果：只读核对`run_alignment_baseline.sh`和suite脚本；确认launcher固定共享GRPO参数、suite默认两方法及失败即停止行为；无代码修改、无需新增测试。
+
+## 2026-09-14 — LearnAlign第75步长停顿解释
+
+- 改动范围：本轮仅根据正式Clean日志和LearnAlign curriculum执行顺序解释step 74→75的长时间停顿；无训练代码改动，仅更新`develop.md`。
+- 根因：默认`learnalign_warmup_prompts=300`且训练batch为4 prompts，因此warmup恰好为75个update。`LearnAlignCurriculum.__iter__`在产出完这75个warmup batches之后、产出第一个selected-data batch之前，同步对完整training pool执行一次静态selector。
+- Selector工作量：该阶段对约2764个候选prompt各生成8个answers，合计22,112个额外completions，并逐chunk计算梯度、4096维投影、device-to-host同步、learnability/alignment score、top-25%排序及selection JSON。进度条只统计691个真实actor updates，不单列selector阶段，所以约1小时54分11秒被错误归入74→75这一“步”的wall time。
+- 日志判断：`24:59`至`2:19:10`的差值约1:54:11，与selector位置完全吻合；step 75的`2061.32s/step`和夸张ETA是`tqdm`移动平均被该停顿污染，并非真实actor update耗时。79步后恢复正常进一步证明selector已完成。
+- 后续行为：LearnAlign selector是warmup后的单次静态选择，本run不会每75步重复；GradAlign则按自身selection interval周期性重算。可通过`selection/learnalign_summary.json`和`learnalign_selection.jsonl`的生成时间验证该阶段完成。
+- 验证命令与结果：只读核对`config.py`、`curriculum.py`与`gradient_features.py`相应执行路径；无代码修改、无需新增测试。
+
+## 2026-09-14 — LearnAlign seed 5 selector编译期HBM OOM诊断
+
+- 改动范围：本轮仅分析ziao1节点Mismatch-20% seed 5在warmup/selector边界的失败日志；无训练代码改动，仅更新`develop.md`。
+- 直接原因：XLA在编译LearnAlign `feature_fn`时报告`RESOURCE_EXHAUSTED`；单worker可用HBM为95.74GB，编译程序要求104.96GB，超出9.21GB。几乎全部需求来自104.95GB HLO temporary，不是磁盘、checkpoint、Python CPU内存或其他进程占用。
+- 触发形状：默认selector一次处理4 prompts×8 rollouts=32条序列；失败程序出现`bf16[32,1,1280,262144]` logits相关临时量，其中单个allocation为20GB，反向scatter临时量为12GB。当前实现对32个completion执行`vmap(value_and_grad)`，先物化逐completion LoRA gradient，再按8个rollouts求prompt mean，放大峰值HBM。
+- Seed差异：selector mismatch在生成后才执行rank reversal，因此错误并非20%反转逻辑直接造成；seed、warmup后的model状态及生成长度/shape会影响selector触发的编译形状。seed 0成功不能保证seed 5在相同上限下也能编译，seed 5本次触发了1280长度路径。
+- Suite影响：suite脚本遇到单run非零退出会写`failed`并立即退出；因此已完成的seed 0不受影响，但seed 5 GradAlign及后续seed通常尚未启动。失败run会保留截至异常的stdout/checkpoint等部分产物，训练完成后的公共结果导出不会执行。
+- 修复边界：重试相同seed/参数大概率复现。降低训练generation长度或LearnAlign的8 rollouts会改变冻结配置/方法口径，不建议。更合适的是在不改变4-prompt生成和8-rollout定义的情况下，将梯度计算拆成每个prompt的8 rollouts，或直接对同一prompt的mean loss求梯度，避免物化32份完整梯度；实施前必须做固定batch feature/score/top-k等价性及TPU HBM smoke。
+- 验证命令与结果：读取完整XLA memory report并只读核对curriculum、selector生成batch、`vmap(value_and_grad)`和suite失败即停止路径；无代码修改、无需新增测试。
+
+## 2026-09-14 — LearnAlign内存修复后seed 0可复用性判断
+
+- 改动范围：本轮仅分析数学等价的selector内存重构是否允许复用旧代码完成的seed 0正式结果；无训练代码改动，仅更新`develop.md`。
+- 理论判断：若修复仅针对LearnAlign 8-rollout feature path，将同一32-completion batch的逐completion梯度分块/按prompt求均值，并保持rollout生成批次与顺序、binary reward、mismatch、advantage、projection seed、score和stable top-k完全不变，则目标prompt gradient在实数算术下等价，seed 0理论结果应一致。
+- 数值风险：JAX/XLA的浮点归约、collective与投影累加顺序改变后可能产生微小误差；若top-25%边界附近多个score非常接近，微小误差仍可能改变selected prompt集合，继而改变后续616个update。数学等价本身不足以直接证明五seed可以跨实现混用。
+- 复用门槛：应在固定安全batch上比较旧/新feature最大误差、cosine/Spearman及top-k；随后用seed 0相同warmup状态做一次selector-only replay，与已保存`learnalign_selection.jsonl`比较selected prompt ID，要求Jaccard=1.0。满足后可保留旧LearnAlign seed 0并在metadata记录等价内存修复；否则应重跑该seed。
+- 影响隔离：GradAlign共用`PromptGradientEstimator`，因此通用重构也会改变其执行路径。为最大限度保留已完成的GradAlign seed 0，修复应优先限定在LearnAlign的8-rollout路径，保持GradAlign 4-rollout feature path原样；若修改公共4-rollout路径，则GradAlign seed 0也需进行相同等价审计或重跑。
+- 非等价方案：将8 rollouts降为4、缩短generation、改用single-correct-rollout gradient或改变projection/selection参数都会改变方法语义，旧seed 0不能与新结果混用。
+- 验证命令与结果：基于现有curriculum、shared estimator和selection artifact结构进行静态判断；无代码修改、无需新增测试。
+
+## 2026-09-14 — LearnAlign 8-rollout selector HBM安全分块修复
+
+- 改动范围：在不修改任何共享GRPO或selector数值参数的前提下，修复LearnAlign 4 prompts×8 rollouts在最大序列shape下对32份逐completion gradient同时编译导致的95.74GB HBM OOM；GradAlign默认4-rollout路径保持原样。
+- 修改文件：新增`my_example/alignment_baselines/gradient_batching.py`、新增`tests/my_example/alignment_gradient_batching_test.py`、新增可执行脚本`my_example/smoke_learnalign_memory_fix.sh`；修改`my_example/alignment_baselines/gradient_features.py`、`my_example/alignment_main.py`、`my_example/alignment_baselines/curriculum.py`、`my_example/alignment_baselines/README.md`并同步更新`develop.md`。
+- 实现语义：LearnAlign仍以相同顺序一次生成4 prompts×8 rollouts，并一次性计算相同binary correctness、Mismatch rank reversal及GRPO advantages；仅将feature反向计算切成4个连续slice`[0:8]`、`[8:16]`、`[16:24]`、`[24:32]`，每次得到一个prompt gradient projection后按原prompt顺序拼接。每个prompt内部仍使用原`vmap(value_and_grad)`、8-rollout mean及同一4096维hash projection，未改score或top-25%选择。
+- 影响隔离：`alignment_main.py`只为`method=learnalign`启用promptwise feature path；GradAlign仍对默认4 prompts×4 rollouts执行原单次16-completion feature call。LearnAlign summary新增`gradient_feature_prompt_batch_size=1`，run metadata记录该HBM适配，便于审计。
+- 快速验证：新增smoke先运行4个相关host test模块，再用seed5、Mismatch-20%、8-rollout selector执行2个真实update；训练/selector参数之外仅缩小smoke数据规模并跳过pre/post eval，所有大型产物写入`mktemp`目录，成功后自动删除、失败时保留供诊断。运行命令为`./my_example/smoke_learnalign_memory_fix.sh`。
+- 本地结果：目标10项unit tests全部通过；相关Python文件`py_compile`、smoke脚本`bash -n`与`git diff --check`通过。全目录discover额外运行20项，其中19项通过、`reward_rank_noise_test`因Codex bundled Python未安装Flax而无法导入；目标mismatch-flow测试已通过其轻量stub路径，非本次代码失败。
+- 已知风险/待办：本地没有TPU，尚未验证最大shape实际HBM峰值。promptwise调用理论上将失败程序关键batch维从32降至8，但会增加每generation chunk的feature调用/host同步次数，selector可能更慢。正式续跑前必须在空闲TPU执行新增smoke；数学等价仍可能存在浮点归约微差，旧LearnAlign seed0是否复用需结合固定batch等价或selected-set审计决定。

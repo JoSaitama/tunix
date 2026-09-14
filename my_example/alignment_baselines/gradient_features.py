@@ -12,6 +12,7 @@ import numpy as np
 from tunix.rl import common
 from tunix.rl import function_registry
 from tunix.rl import rl_cluster as rl_cluster_lib
+from tunix.rl import utils as rl_utils
 from tunix.rl.grpo.grpo_learner import GRPOConfig, TrainExample
 
 from my_example.reward_rank_noise import (
@@ -21,6 +22,7 @@ from my_example.reward_rank_noise import (
 from my_example.rewards import MATCH_NUMBERS
 
 from .data_utils import Example, batch_examples
+from .gradient_batching import feature_completion_slices
 
 
 @dataclasses.dataclass(frozen=True)
@@ -106,6 +108,7 @@ class PromptGradientEstimator:
         projection_seed: int,
         selection_micro_batch_size: int,
         noise_config: RewardRankNoiseConfig,
+        promptwise_feature_estimation: bool = False,
     ):
         self.rl_cluster = rl_cluster
         self.training_algo_config = training_algo_config
@@ -113,6 +116,7 @@ class PromptGradientEstimator:
         self.projection_seed = projection_seed
         self.selection_micro_batch_size = selection_micro_batch_size
         self.noise_config = noise_config
+        self.promptwise_feature_estimation = promptwise_feature_estimation
         self._compiled: dict[int, Any] = {}
 
     def _generate_binary_train_example(
@@ -294,11 +298,22 @@ class PromptGradientEstimator:
             with actor_mesh, self.rl_cluster._get_logical_axis_rules_cm(  # pylint: disable=protected-access
                 rl_cluster_lib.Role.ACTOR
             ):
-                features = feature_fn(
-                    self.rl_cluster.actor_trainer.model,
-                    train_example,
-                )
-            all_features.append(np.asarray(jax.device_get(features)))
+                feature_parts = []
+                for completion_slice in feature_completion_slices(
+                    prompt_count=len(chunk),
+                    num_rollouts=num_rollouts,
+                    promptwise=self.promptwise_feature_estimation,
+                ):
+                    feature_example = rl_utils.get_batch_slice(
+                        train_example,
+                        completion_slice,
+                    )
+                    features = feature_fn(
+                        self.rl_cluster.actor_trainer.model,
+                        feature_example,
+                    )
+                    feature_parts.append(np.asarray(jax.device_get(features)))
+            all_features.append(np.concatenate(feature_parts, axis=0))
             all_clean_outcomes.append(clean_outcomes)
             all_selector_rewards.append(selector_rewards)
             all_advantages.append(advantages)

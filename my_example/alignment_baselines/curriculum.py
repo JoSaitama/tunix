@@ -178,6 +178,7 @@ class LearnAlignCurriculum(_BaseCurriculum):
                 "selector_mismatch_scope": "all_training_candidates",
                 "training_reward": "frozen_dense_reward_with_optional_rank_mismatch",
                 "projection": "deterministic_sparse_jl_feature_hash",
+                "gradient_feature_prompt_batch_size": 1,
             }
         )
         self._log(

@@ -25,6 +25,10 @@ existing dense reward with the same prompt-level mismatch assignment.
 - Estimate success probability with 8 rollouts and `V=p(1-p)`.
 - Compute policy-only prompt gradients in LoRA space and project them to 4096
   dimensions with deterministic sparse feature hashing.
+- Keep each four-prompt rollout-generation chunk unchanged, but evaluate the
+  eight-rollout gradient feature for one prompt at a time. This preserves
+  rollout order, rewards, advantages, projection, and ranking while avoiding
+  the 32-completion gradient-tree HBM peak.
 - Compute the exact Eq. 8 row mean as `z_i dot mean(z)`, avoiding the nominal
   quadratic score matrix.
 - Select the top 25%.  Warmup updates count toward the frozen total update
@@ -91,6 +95,19 @@ On the isolated worker of the current v5p-16 node, export the already validated
 single-worker TPU variables in the same shell before either command.
 
 ## TPU smoke tests
+
+After changing the LearnAlign gradient path, run the combined host/TPU memory
+regression smoke on an idle single-worker TPU:
+
+```bash
+./my_example/smoke_learnalign_memory_fix.sh
+```
+
+It first runs the fast batching, configuration, curriculum, and mismatch tests,
+then runs a two-update seed-5 Mismatch-20% LearnAlign job using the production
+eight-rollout selector. Large smoke artifacts are written under a temporary
+directory and removed after success. Failed-run artifacts are retained for
+diagnosis; set `KEEP_SMOKE_ARTIFACTS=1` to retain successful artifacts too.
 
 Before loading the model, run the fast host-side mismatch preflight. It uses the
 production prompt hash/rank-reversal implementation and the real curricula to
