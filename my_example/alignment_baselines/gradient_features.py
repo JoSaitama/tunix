@@ -14,7 +14,6 @@ import numpy as np
 from tunix.rl import common
 from tunix.rl import function_registry
 from tunix.rl import rl_cluster as rl_cluster_lib
-from tunix.rl import utils as rl_utils
 from tunix.rl.grpo.grpo_learner import GRPOConfig, TrainExample
 
 from my_example.reward_rank_noise import (
@@ -25,7 +24,6 @@ from my_example.rewards import MATCH_NUMBERS
 
 from .data_utils import Example, batch_examples
 from .equivalence import compare_learnalign_feature_paths
-from .gradient_batching import feature_completion_slices
 
 
 @dataclasses.dataclass(frozen=True)
@@ -111,7 +109,7 @@ class PromptGradientEstimator:
         projection_seed: int,
         selection_micro_batch_size: int,
         noise_config: RewardRankNoiseConfig,
-        promptwise_feature_estimation: bool = False,
+        grouped_feature_estimation: bool = False,
         equivalence_report_path: str | None = None,
         equivalence_selection_ratio: int = 4,
     ):
@@ -121,20 +119,22 @@ class PromptGradientEstimator:
         self.projection_seed = projection_seed
         self.selection_micro_batch_size = selection_micro_batch_size
         self.noise_config = noise_config
-        self.promptwise_feature_estimation = promptwise_feature_estimation
+        self.grouped_feature_estimation = grouped_feature_estimation
         self.equivalence_report_path = equivalence_report_path
         self.equivalence_selection_ratio = equivalence_selection_ratio
         self._compiled: dict[int, Any] = {}
+        self._grouped_compiled: dict[int, Any] = {}
 
-    def _verify_promptwise_equivalence(
+    def _verify_grouped_equivalence(
         self,
         *,
-        feature_fn,
+        legacy_feature_fn,
+        grouped_feature_fn,
         train_example: TrainExample,
         prompt_count: int,
         num_rollouts: int,
     ) -> None:
-        """Runs one same-input legacy/promptwise A/B check when requested."""
+        """Runs one same-input legacy/grouped A/B check when requested."""
         if not self.equivalence_report_path:
             return
         report_path = Path(self.equivalence_report_path)
@@ -151,32 +151,22 @@ class PromptGradientEstimator:
         )
         model = self.rl_cluster.actor_trainer.model
         legacy = np.asarray(
-            jax.device_get(feature_fn(model, verification_example))
+            jax.device_get(legacy_feature_fn(model, verification_example))
         )
-        promptwise_parts = []
-        for completion_slice in feature_completion_slices(
-            prompt_count=prompt_count,
-            num_rollouts=num_rollouts,
-            promptwise=True,
-        ):
-            feature_example = rl_utils.get_batch_slice(
-                verification_example,
-                completion_slice,
-            )
-            promptwise_parts.append(
-                np.asarray(jax.device_get(feature_fn(model, feature_example)))
-            )
-        promptwise = np.concatenate(promptwise_parts, axis=0)
+        grouped = np.asarray(
+            jax.device_get(grouped_feature_fn(model, verification_example))
+        )
         report = compare_learnalign_feature_paths(
             legacy,
-            promptwise,
+            grouped,
             selection_ratio=self.equivalence_selection_ratio,
         )
         report.update(
             {
                 "method": "learnalign",
                 "legacy_feature_batch": f"{prompt_count}x{num_rollouts}",
-                "promptwise_feature_batch": f"1x{num_rollouts}",
+                "grouped_feature_batch": f"{prompt_count}x{num_rollouts}",
+                "grouped_gradient_count": prompt_count,
                 "shared_tokens": True,
                 "shared_model_parameters": True,
                 "advantages": "shared_deterministic_zero_mean_test_vector",
@@ -189,7 +179,7 @@ class PromptGradientEstimator:
         )
         if not report["passed"]:
             raise RuntimeError(
-                "LearnAlign promptwise feature A/B check failed; see "
+                "LearnAlign grouped feature A/B check failed; see "
                 f"{report_path}"
             )
 
@@ -335,6 +325,100 @@ class PromptGradientEstimator:
         self._compiled[num_rollouts] = compiled
         return compiled
 
+    def _grouped_feature_function(self, num_rollouts: int):
+        """Projects one gradient of the mean loss for each prompt group.
+
+        This preserves the original full selector input shape while moving the
+        rollout mean inside automatic differentiation.  It therefore produces
+        only one gradient tree per prompt instead of one per completion.
+        """
+        if num_rollouts in self._grouped_compiled:
+            return self._grouped_compiled[num_rollouts]
+
+        score_config = dataclasses.replace(
+            self.training_algo_config,
+            beta=0.0,
+            num_generations=num_rollouts,
+        )
+        policy_loss_fn = function_registry.get_policy_loss_fn(
+            score_config.policy_loss_fn
+        )
+        pad_id = self.rl_cluster.rollout.pad_id()
+        eos_id = self.rl_cluster.rollout.eos_id()
+        projection_dim = self.projection_dim
+        projection_seed = self.projection_seed
+
+        def grouped_feature_fn(model, train_example):
+            completion_count = train_example.advantages.shape[0]
+            if completion_count % num_rollouts:
+                raise ValueError(
+                    "completion count must be divisible by num_rollouts; "
+                    f"got {completion_count} and {num_rollouts}"
+                )
+
+            def group_completion_axis(value):
+                if value is None:
+                    return None
+                return value.reshape(
+                    (-1, num_rollouts) + value.shape[1:]
+                )
+
+            grouped_example = jax.tree_util.tree_map(
+                group_completion_axis,
+                train_example,
+                is_leaf=lambda value: value is None,
+            )
+
+            def one_completion_loss(model, one_example):
+                loss, _ = policy_loss_fn(
+                    model,
+                    one_example,
+                    algo_config=score_config,
+                    pad_id=pad_id,
+                    eos_id=eos_id,
+                )
+                return loss
+
+            def group_mean_loss(model, one_prompt_group):
+                completion_in_axes = jax.tree_util.tree_map(
+                    lambda value: None if value is None else 0,
+                    one_prompt_group,
+                    is_leaf=lambda value: value is None,
+                )
+                completion_losses = jax.vmap(
+                    one_completion_loss,
+                    in_axes=(None, completion_in_axes),
+                )(model, one_prompt_group)
+                return jnp.mean(completion_losses)
+
+            wrt = (
+                nnx.LoRAParam
+                if self.rl_cluster.actor_trainer._lora_enabled  # pylint: disable=protected-access
+                else nnx.Param
+            )
+            prompt_grad_fn = nnx.value_and_grad(
+                group_mean_loss,
+                argnums=nnx.DiffState(0, wrt),
+            )
+            prompt_in_axes = jax.tree_util.tree_map(
+                lambda value: None if value is None else 0,
+                grouped_example,
+                is_leaf=lambda value: value is None,
+            )
+            _, prompt_grads = jax.vmap(
+                prompt_grad_fn,
+                in_axes=(None, prompt_in_axes),
+            )(model, grouped_example)
+            return project_gradient_tree(
+                prompt_grads,
+                projection_dim=projection_dim,
+                seed=projection_seed,
+            )
+
+        compiled = nnx.jit(grouped_feature_fn)
+        self._grouped_compiled[num_rollouts] = compiled
+        return compiled
+
     def estimate(
         self,
         examples: Sequence[Example],
@@ -351,7 +435,10 @@ class PromptGradientEstimator:
         all_advantages: list[np.ndarray] = []
         all_mismatch_selected: list[np.ndarray] = []
         all_mismatch_effective: list[np.ndarray] = []
-        feature_fn = self._feature_function(num_rollouts)
+        legacy_feature_fn = self._feature_function(num_rollouts)
+        grouped_feature_fn = None
+        if self.grouped_feature_estimation or self.equivalence_report_path:
+            grouped_feature_fn = self._grouped_feature_function(num_rollouts)
         for start in range(0, len(examples), self.selection_micro_batch_size):
             chunk = examples[start : start + self.selection_micro_batch_size]
             (
@@ -372,28 +459,28 @@ class PromptGradientEstimator:
             with actor_mesh, self.rl_cluster._get_logical_axis_rules_cm(  # pylint: disable=protected-access
                 rl_cluster_lib.Role.ACTOR
             ):
-                self._verify_promptwise_equivalence(
-                    feature_fn=feature_fn,
-                    train_example=train_example,
-                    prompt_count=len(chunk),
-                    num_rollouts=num_rollouts,
+                if grouped_feature_fn is not None:
+                    self._verify_grouped_equivalence(
+                        legacy_feature_fn=legacy_feature_fn,
+                        grouped_feature_fn=grouped_feature_fn,
+                        train_example=train_example,
+                        prompt_count=len(chunk),
+                        num_rollouts=num_rollouts,
+                    )
+                if self.grouped_feature_estimation:
+                    if grouped_feature_fn is None:
+                        raise RuntimeError(
+                            "grouped LearnAlign feature path is unavailable"
+                        )
+                    active_feature_fn = grouped_feature_fn
+                else:
+                    active_feature_fn = legacy_feature_fn
+                features = active_feature_fn(
+                    self.rl_cluster.actor_trainer.model,
+                    train_example,
                 )
-                feature_parts = []
-                for completion_slice in feature_completion_slices(
-                    prompt_count=len(chunk),
-                    num_rollouts=num_rollouts,
-                    promptwise=self.promptwise_feature_estimation,
-                ):
-                    feature_example = rl_utils.get_batch_slice(
-                        train_example,
-                        completion_slice,
-                    )
-                    features = feature_fn(
-                        self.rl_cluster.actor_trainer.model,
-                        feature_example,
-                    )
-                    feature_parts.append(np.asarray(jax.device_get(features)))
-            all_features.append(np.concatenate(feature_parts, axis=0))
+                host_features = np.asarray(jax.device_get(features))
+            all_features.append(host_features)
             all_clean_outcomes.append(clean_outcomes)
             all_selector_rewards.append(selector_rewards)
             all_advantages.append(advantages)

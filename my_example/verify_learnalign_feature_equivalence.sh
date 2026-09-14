@@ -8,8 +8,7 @@ OLD_SELECTION_JSONL="${1:-}"
 cd "${ROOT_DIR}"
 
 "${PYTHON_BIN}" -m unittest \
-  tests.my_example.alignment_equivalence_test \
-  tests.my_example.alignment_gradient_batching_test
+  tests.my_example.alignment_equivalence_test
 
 VERIFY_ROOT="$(mktemp -d /tmp/learnalign_equivalence.XXXXXX)"
 KEEP_VERIFY_ARTIFACTS="${KEEP_VERIFY_ARTIFACTS:-0}"
@@ -25,7 +24,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-echo "Running same-rollout LearnAlign legacy-32 versus promptwise-8 A/B check."
+echo "Running same-rollout LearnAlign legacy-32 versus grouped-gradient A/B check."
 echo "Temporary artifacts: ${VERIFY_ROOT}"
 
 TUNIX_EXPERIMENT_SEED=0 \
@@ -63,7 +62,7 @@ report = json.loads(report_path.read_text(encoding="utf-8"))
 print(json.dumps(report, indent=2, sort_keys=True))
 if not report["passed"]:
     raise SystemExit("FAIL: numerical A/B thresholds were not met")
-print("PASS: legacy full-chunk and promptwise LearnAlign features are equivalent")
+print("PASS: legacy and grouped-gradient LearnAlign features are equivalent")
 
 old_path_text = sys.argv[2]
 if not old_path_text:

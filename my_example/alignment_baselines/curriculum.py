@@ -178,7 +178,11 @@ class LearnAlignCurriculum(_BaseCurriculum):
                 "selector_mismatch_scope": "all_training_candidates",
                 "training_reward": "frozen_dense_reward_with_optional_rank_mismatch",
                 "projection": "deterministic_sparse_jl_feature_hash",
-                "gradient_feature_prompt_batch_size": 1,
+                "gradient_feature_prompt_batch_size": self.train_batch_size,
+                "gradient_feature_completion_batch_size": (
+                    self.train_batch_size * self.estimation_rollouts
+                ),
+                "gradient_aggregation": "rollout_mean_loss_before_gradient",
             }
         )
         self._log(

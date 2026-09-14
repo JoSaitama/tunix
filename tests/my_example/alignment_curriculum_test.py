@@ -93,6 +93,18 @@ class AlignmentCurriculumTest(unittest.TestCase):
             )
             self.assertTrue(first_record["mismatch_selected"])
             self.assertTrue(first_record["mismatch_effective"])
+            with open(
+                f"{tmp}/learnalign_summary.json", encoding="utf-8"
+            ) as stream:
+                summary = json.load(stream)
+            self.assertEqual(summary["gradient_feature_prompt_batch_size"], 4)
+            self.assertEqual(
+                summary["gradient_feature_completion_batch_size"], 16
+            )
+            self.assertEqual(
+                summary["gradient_aggregation"],
+                "rollout_mean_loss_before_gradient",
+            )
 
     def test_gradalign_selects_exact_interval_budget(self):
         with tempfile.TemporaryDirectory() as tmp:

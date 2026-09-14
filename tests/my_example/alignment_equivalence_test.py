@@ -24,11 +24,11 @@ class AlignmentEquivalenceTest(unittest.TestCase):
 
     def test_material_feature_change_fails(self):
         legacy = np.eye(4, dtype=np.float64)
-        changed = legacy.copy()
-        changed[0] = -changed[0]
+        grouped = legacy.copy()
+        grouped[0] = -grouped[0]
         report = compare_learnalign_feature_paths(
             legacy,
-            changed,
+            grouped,
             selection_ratio=4,
         )
         self.assertFalse(report["passed"])

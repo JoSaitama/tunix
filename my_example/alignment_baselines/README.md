@@ -25,10 +25,11 @@ existing dense reward with the same prompt-level mismatch assignment.
 - Estimate success probability with 8 rollouts and `V=p(1-p)`.
 - Compute policy-only prompt gradients in LoRA space and project them to 4096
   dimensions with deterministic sparse feature hashing.
-- Keep each four-prompt rollout-generation chunk unchanged, but evaluate the
-  eight-rollout gradient feature for one prompt at a time. This preserves
-  rollout order, rewards, advantages, projection, and ranking while avoiding
-  the 32-completion gradient-tree HBM peak.
+- Keep each four-prompt by eight-rollout input chunk intact, move the
+  eight-rollout mean loss inside automatic differentiation, and materialize
+  four prompt-gradient trees rather than 32 completion-gradient trees. This
+  preserves rollout order, rewards, advantages, projection, and one selector
+  call per chunk while avoiding the original HBM peak.
 - Compute the exact Eq. 8 row mean as `z_i dot mean(z)`, avoiding the nominal
   quadratic score matrix.
 - Select the top 25%.  Warmup updates count toward the frozen total update
@@ -103,8 +104,9 @@ regression smoke on an idle single-worker TPU:
 ./my_example/smoke_learnalign_memory_fix.sh
 ```
 
-To compare the legacy 32-completion feature call with the memory-safe four by
-eight path on exactly the same generated tokens and model parameters, run:
+To compare the legacy 32-completion-gradient feature call with the memory-safe
+grouped-gradient path on exactly the same generated tokens and model parameters,
+run:
 
 ```bash
 ./my_example/verify_learnalign_feature_equivalence.sh \
@@ -135,8 +137,8 @@ python -m unittest -v tests.my_example.alignment_mismatch_flow_test
 ```
 
 Run these two reduced jobs before the full matrix. They exercise selector
-rollout, projected per-completion gradient compilation, selection, a real GRPO
-update, checkpoint restore, and merged-model save.
+rollout, grouped prompt-gradient compilation, selection, a real GRPO update,
+checkpoint restore, and merged-model save.
 
 ```bash
 ./my_example/run_alignment_baseline.sh learnalign \

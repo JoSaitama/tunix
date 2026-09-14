@@ -11656,3 +11656,25 @@ This file tracks engineering changes made in this repository.
 - 状态结论：`my_example/verify_learnalign_feature_equivalence.sh`已被单独提交并推送为`6dc5011`，但其依赖的equivalence模块、estimator验证入口、测试和说明仍在工作区，需追加一个普通commit；不改写或强推已发布历史。
 - 验证命令与结果：`git status --short`、`git ls-files --stage`、`git show HEAD:<script>`和`git log -1 --stat`确认入口脚本已在HEAD及`origin/for_GRPO_8kBaseline`，其余六个代码/说明文件和`develop.md`尚未提交。
 - 已知风险/待办：服务器必须拉取后续完整实现commit后才能运行A/B脚本；仅含`6dc5011`的远端状态会因缺少`my_example.alignment_baselines.equivalence`而失败。
+
+## 2026-09-14 — LearnAlign TPU A/B首次失败定位
+
+- 改动范围：本轮仅分析服务器首次同输入legacy-32与promptwise-8验证的异常位置；无验证或训练代码改动，仅更新`develop.md`。
+- 现象判断：host端7项测试通过，TPU完成第一次真实update并进入selector；异常由`_verify_promptwise_equivalence`在写出报告后主动抛出，而非XLA HBM OOM、TPU初始化失败或正式训练逻辑异常。因此两条feature路径均已成功执行，但至少一项`allclose`、row cosine、score Spearman或top-set Jaccard门槛未通过。
+- 验证命令与结果：失败产物保留在`/tmp/learnalign_equivalence.mYXrNe/equivalence.json`；需读取该JSON后才能判断是浮点容差过严、短batch排名边界敏感，还是promptwise实现存在实质数值差异。
+- 已知风险/待办：在读取报告前不放宽阈值、不复用旧seed0，也无需重跑同一A/B；若feature近似一致但top-set变化，仍说明旧seed0复用需要完整selector审计或重跑。
+
+## 2026-09-14 — LearnAlign grouped-loss梯度内存修复
+
+- 改动范围：将上一版四次`1 prompt × 8 rollouts`反向调用替换为一次完整`4 prompts × 8 rollouts`的grouped-loss调用。rollout生成批次、顺序、binary correctness、Mismatch rank reversal、GRPO advantage、4096维投影、LearnAlign score、top-25%选择及691个真实update预算均未改变；GradAlign继续使用原legacy逐completion gradient路径。
+- 核心实现：在每个prompt内部继续通过原`one_completion_loss`计算8个completion loss，先求其均值，再对该均值求一次LoRA gradient；外层对4个prompt做`vmap`。实数算术下这等于原实现“先求32个completion gradient、再每8个取均值”，但只物化4份prompt gradient tree，并保持单次selector feature调用，避免上一版四次TPU dispatch与`device_get`同步。
+- 修改文件：修改`my_example/alignment_baselines/gradient_features.py`、`equivalence.py`、`curriculum.py`、`README.md`、`my_example/alignment_main.py`、两个LearnAlign smoke/A-B脚本及对应测试；删除仅服务于上一版promptwise切片的`gradient_batching.py`和测试；同步更新`develop.md`。
+- 可比性审计：run metadata记录grouped-loss HBM adaptation；`learnalign_summary.json`记录`gradient_feature_prompt_batch_size=4`、`gradient_feature_completion_batch_size=32`及`gradient_aggregation=rollout_mean_loss_before_gradient`。A/B入口改为在同一模型、同一32条tokens和同一advantages上比较legacy completion-gradient与grouped-loss结果，仍要求feature allclose、row cosine、score Spearman及selected-set Jaccard全部达到原门槛。
+- 验证命令与结果：Codex bundled Python运行alignment equivalence/config/scoring/curriculum/mismatch-flow共13项测试，全部通过；相关Python文件`py_compile`、两个shell脚本`bash -n`及`git diff --check`通过。
+- 已知风险/待办：本地无TPU，尚不能确认最大1280-token shape的实际HBM峰值，也不能提前保证XLA对两种等价自动微分图的bitwise结果。服务器应先重新运行`verify_learnalign_feature_equivalence.sh`；通过后再运行`smoke_learnalign_memory_fix.sh`确认不OOM。若A/B的selected Jaccard不是1.0，旧LearnAlign seed0仍不可与新实现混用；GradAlign seed0不受本次路径变更影响。
+
+## 2026-09-14 — 代码交付命令约定
+
+- 改动范围：确认后续每次完成代码修改时，同时提供本地检查、提交推送和服务器安全拉取命令；本轮无训练逻辑改动，仅更新`develop.md`记录该交付约定。
+- 验证命令与结果：无需新增运行时测试；提交前仍执行`git diff --check`及与当次改动对应的定向测试。
+- 已知风险/待办：提交命令应列出精确文件，不使用`git add .`，避免将用户未纳入任务的本地文档或其他修改误提交；服务器拉取前必须确认分支和工作区状态。

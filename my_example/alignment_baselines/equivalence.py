@@ -1,4 +1,4 @@
-"""Numerical checks for LearnAlign promptwise gradient batching."""
+"""Numerical checks for LearnAlign grouped gradient evaluation."""
 
 from __future__ import annotations
 
@@ -35,7 +35,7 @@ def _spearman(left: np.ndarray, right: np.ndarray) -> float | None:
 
 def compare_learnalign_feature_paths(
     legacy_features: np.ndarray,
-    promptwise_features: np.ndarray,
+    grouped_features: np.ndarray,
     *,
     selection_ratio: int,
     rtol: float = 1e-4,
@@ -43,36 +43,36 @@ def compare_learnalign_feature_paths(
     min_row_cosine: float = 0.99999,
     min_score_spearman: float = 0.99999,
 ) -> dict[str, object]:
-    """Compares full-chunk and one-prompt-at-a-time feature evaluation.
+    """Compares per-completion and grouped-loss feature evaluation.
 
     Deterministic non-uniform weights are used for the downstream LearnAlign
     score comparison.  This keeps the check informative even when every short
     smoke-test rollout happens to receive the same binary reward.
     """
     legacy = np.asarray(legacy_features, dtype=np.float64)
-    promptwise = np.asarray(promptwise_features, dtype=np.float64)
-    if legacy.shape != promptwise.shape or legacy.ndim != 2:
+    grouped = np.asarray(grouped_features, dtype=np.float64)
+    if legacy.shape != grouped.shape or legacy.ndim != 2:
         raise ValueError(
             "feature paths must have the same [prompt, projection] shape; "
-            f"got {legacy.shape} and {promptwise.shape}"
+            f"got {legacy.shape} and {grouped.shape}"
         )
     if legacy.shape[0] == 0:
         raise ValueError("at least one prompt feature is required")
     if selection_ratio <= 1:
         raise ValueError("selection_ratio must be greater than one")
 
-    difference = promptwise - legacy
+    difference = grouped - legacy
     max_abs = float(np.max(np.abs(difference)))
     reference_scale = float(np.max(np.abs(legacy)))
     max_relative = max_abs / max(reference_scale, np.finfo(np.float64).tiny)
-    feature_allclose = bool(np.allclose(promptwise, legacy, rtol=rtol, atol=atol))
+    feature_allclose = bool(np.allclose(grouped, legacy, rtol=rtol, atol=atol))
 
     legacy_norms = np.linalg.norm(legacy, axis=1)
-    promptwise_norms = np.linalg.norm(promptwise, axis=1)
-    both_zero = (legacy_norms == 0.0) & (promptwise_norms == 0.0)
-    denominator = legacy_norms * promptwise_norms
+    grouped_norms = np.linalg.norm(grouped, axis=1)
+    both_zero = (legacy_norms == 0.0) & (grouped_norms == 0.0)
+    denominator = legacy_norms * grouped_norms
     row_cosines = np.divide(
-        np.sum(legacy * promptwise, axis=1),
+        np.sum(legacy * grouped, axis=1),
         denominator,
         out=np.zeros_like(denominator),
         where=denominator > 0.0,
@@ -83,26 +83,26 @@ def compare_learnalign_feature_paths(
     prompt_count = legacy.shape[0]
     weights = np.linspace(0.125, 0.25, prompt_count, dtype=np.float64)
     legacy_scores = learnalign_scores(legacy, weights)
-    promptwise_scores = learnalign_scores(promptwise, weights)
-    score_difference = promptwise_scores - legacy_scores
+    grouped_scores = learnalign_scores(grouped, weights)
+    score_difference = grouped_scores - legacy_scores
     score_max_abs = float(np.max(np.abs(score_difference)))
     score_scale = float(np.max(np.abs(legacy_scores)))
     score_max_relative = score_max_abs / max(
         score_scale, np.finfo(np.float64).tiny
     )
-    score_spearman = _spearman(legacy_scores, promptwise_scores)
+    score_spearman = _spearman(legacy_scores, grouped_scores)
 
     selected_count = max(1, math.ceil(prompt_count / selection_ratio))
     legacy_selected = set(
         int(value) for value in stable_top_indices(legacy_scores, selected_count)
     )
-    promptwise_selected = set(
+    grouped_selected = set(
         int(value)
-        for value in stable_top_indices(promptwise_scores, selected_count)
+        for value in stable_top_indices(grouped_scores, selected_count)
     )
-    selected_union = legacy_selected | promptwise_selected
+    selected_union = legacy_selected | grouped_selected
     selected_jaccard = (
-        len(legacy_selected & promptwise_selected) / len(selected_union)
+        len(legacy_selected & grouped_selected) / len(selected_union)
         if selected_union
         else 1.0
     )
@@ -135,6 +135,6 @@ def compare_learnalign_feature_paths(
         "selected_count": selected_count,
         "selected_jaccard": selected_jaccard,
         "legacy_selected_indices": sorted(legacy_selected),
-        "promptwise_selected_indices": sorted(promptwise_selected),
+        "grouped_selected_indices": sorted(grouped_selected),
         "score_weights": "deterministic_nonuniform_test_weights",
     }

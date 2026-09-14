@@ -71,8 +71,9 @@ def _write_run_metadata(path: Path, *, alignment, cfg, max_steps: int) -> None:
     ]
     if alignment.method == "learnalign":
         adaptations.append(
-            "LearnAlign keeps four-prompt rollout generation but evaluates "
-            "configured-rollout gradient features one prompt at a time to bound HBM"
+            "LearnAlign keeps the full four-prompt rollout batch and moves each "
+            "prompt's rollout-mean inside autodiff to materialize four prompt "
+            "gradients instead of 32 completion gradients"
         )
     metadata = {
         "alignment": alignment.to_dict(),
@@ -255,7 +256,7 @@ def main(argv: list[str] | None = None) -> None:
         projection_seed=experiment_seed() or 0,
         selection_micro_batch_size=alignment.selection_micro_batch_size,
         noise_config=selector_noise_config,
-        promptwise_feature_estimation=(alignment.method == "learnalign"),
+        grouped_feature_estimation=(alignment.method == "learnalign"),
         equivalence_report_path=(
             os.environ.get("TUNIX_LEARNALIGN_EQUIVALENCE_REPORT")
             if alignment.method == "learnalign"
