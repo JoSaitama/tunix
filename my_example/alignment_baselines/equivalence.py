@@ -20,27 +20,35 @@ def feature_execution_mode(
     return "legacy"
 
 
-def prompt_subbatch_completion_slices(
+def rollout_subbatch_completion_indices(
     *,
     prompt_count: int,
     num_rollouts: int,
-    prompt_subbatch_size: int,
-) -> tuple[slice, ...]:
-    """Maps prompt subbatches to contiguous completion-axis slices."""
+    rollout_subbatch_size: int,
+) -> tuple[tuple[int, ...], ...]:
+    """Returns prompt-major indices for rollout subbatches."""
     for name, value in (
         ("prompt_count", prompt_count),
         ("num_rollouts", num_rollouts),
-        ("prompt_subbatch_size", prompt_subbatch_size),
+        ("rollout_subbatch_size", rollout_subbatch_size),
     ):
         if value <= 0:
             raise ValueError(f"{name} must be positive; got {value}")
-    return tuple(
-        slice(
-            prompt_start * num_rollouts,
-            min(prompt_start + prompt_subbatch_size, prompt_count)
-            * num_rollouts,
+    if num_rollouts % rollout_subbatch_size:
+        raise ValueError(
+            "num_rollouts must be divisible by rollout_subbatch_size; "
+            f"got {num_rollouts} and {rollout_subbatch_size}"
         )
-        for prompt_start in range(0, prompt_count, prompt_subbatch_size)
+    return tuple(
+        tuple(
+            prompt_index * num_rollouts + rollout_index
+            for prompt_index in range(prompt_count)
+            for rollout_index in range(
+                rollout_start,
+                rollout_start + rollout_subbatch_size,
+            )
+        )
+        for rollout_start in range(0, num_rollouts, rollout_subbatch_size)
     )
 
 

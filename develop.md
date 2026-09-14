@@ -11732,3 +11732,19 @@ This file tracks engineering changes made in this repository.
 - 审计信息：启动日志直接打印generation chunk、backward subbatch和每chunk调用次数；`run_metadata.json`记录两次有序`2×8`反向适配；`learnalign_summary.json`记录`gradient_feature_prompt_batch_size=2`、`gradient_feature_completion_batch_size=16`和每个生成chunk两次feature调用。预计最大`[prompt, rollout, ..., vocab]`临时张量第一维从4降到2；计算总量不变，但增加一次TPU dispatch，速度可能小幅下降。
 - 验证命令与结果：Codex bundled Python运行alignment equivalence/config/scoring/curriculum/mismatch-flow共18项测试全部通过；目标Python文件`py_compile`、两个shell脚本`bash -n`及`git diff --check`均通过。首次测试暴露mismatch-flow轻量fake estimator缺少新增审计属性，已通过仅用于summary的旧对象回退修复，真实estimator仍明确使用`2`。服务器必须重新运行32-prompt同rollout selected-set A/B，因为`2×8`数值归约路径不同于已通过的`4×8`路径。A/B通过后再运行使用8 selector rollouts的最大长度memory smoke，二者均通过后方可恢复正式seed5/13/21/42 suite。
 - 已知风险/待办：本地无TPU，无法直接证明正式1280-token HBM峰值；若`2×8`仍超出95.74 GiB，下一步只能改为`1×8`，代价是每个候选chunk四次dispatch。当前OOM的seed5 run未完成，不可作为有效实验结果；旧seed0能否继续复用取决于新版32-prompt selected-set A/B结果。
+
+## 2026-09-14 — LearnAlign 2×8路径首次A/B失败待审计
+
+- 改动范围：本轮仅根据服务器异常栈区分HBM错误与selected-set验证失败；无算法或训练代码改动，仅更新`develop.md`。
+- 现象判断：验证已运行到`_write_grouped_equivalence_report`并成功写出`/tmp/learnalign_equivalence.1Q4a79/equivalence.json`，随后由`report["passed"] == false`主动抛出`RuntimeError`。这说明legacy `4×8`与新版grouped `2×8`都已完成短序列feature计算，本次不是104.96 GiB HBM OOM。
+- 验证需求：读取报告中的`selected_jaccard`、两组selected indices/prompt IDs、`score_spearman`、score误差及非零learnability行数后再决定是否调整实现；在报告数据明确前不放宽selected-set验收、不运行正式suite，也不判定旧seed0可复用。
+- 已知风险/待办：若仅有一个靠近top-25%边界的样本交换，仍需结合score margin判断；若排序或非零行出现明显差异，应回到数值路径修复，不能把失败改成通过。
+
+## 2026-09-15 — LearnAlign改为保留prompt维度的4×4 rollout分块
+
+- 问题结论：`2 prompts × 8 rollouts` A/B并非可接受的边界微扰。实测最小row cosine为`0.4678`、score相对误差为`33.86%`、Spearman为`0.9838`，top-8中index 0被index 5替换，selected Jaccard仅`0.7778`。虽然13个非零learnability/feature行完全对应，但改变prompt batch维度会改变TPU/FSDP数值程序，因此不能以放宽门槛处理。
+- 修复范围：恢复每次feature程序的完整4-prompt维度，将每个prompt的8个rollouts拆成前4和后4，形成两次`4 prompts × 4 rollouts`反向调用；对两次4096维投影梯度逐元素取平均。由于微分、prompt内均值和稀疏线性投影均为线性运算，该结构在实数算术下等价于原8-rollout mean，同时将每个XLA程序的completion数从32降为16，并保留原4-device/FSDP prompt映射。
+- 修改文件：`my_example/alignment_baselines/equivalence.py`、`gradient_features.py`、`curriculum.py`、`README.md`、`my_example/alignment_main.py`、`my_example/smoke_learnalign_memory_fix.sh`、`tests/my_example/alignment_equivalence_test.py`、`tests/my_example/alignment_curriculum_test.py`，并同步更新`develop.md`。
+- 审计信息：启动日志应显示`generation_chunk=4x8`、`backward_subbatch=4x4`、`backward_calls_per_chunk=2`；summary分别记录prompt batch 4、rollout batch 4、completion batch 16和两次调用。rollout生成、binary/mismatch reward、8-rollout GRPO advantage、projection seed、LearnAlign score、selection ratio及真实update均不变，GradAlign不受影响。
+- 验证命令与结果：Codex bundled Python运行alignment equivalence/config/scoring/curriculum/mismatch-flow共18项测试全部通过；目标Python文件`py_compile`、两个shell脚本`bash -n`及`git diff --check`均通过。服务器仍须重新运行32-prompt同输入A/B，必须恢复selected Jaccard `1.0`且确认非退化，然后运行默认正式长度memory smoke。两个TPU验证均通过前不恢复正式suite、不复用旧seed0。
+- 已知风险/待办：`4×4`保留prompt维度但改变rollout归约分组，仍可能产生小幅bfloat16差异，因此selected-set必须实测；若仍不一致，应优先采用保留完整`4×8`形状的rematerialization，而不是继续缩小prompt维度或放宽验收。

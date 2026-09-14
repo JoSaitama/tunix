@@ -7,36 +7,47 @@ import numpy as np
 from my_example.alignment_baselines.equivalence import (
     compare_learnalign_feature_paths,
     feature_execution_mode,
-    prompt_subbatch_completion_slices,
+    rollout_subbatch_completion_indices,
 )
 
 
 class AlignmentEquivalenceTest(unittest.TestCase):
 
-    def test_prompt_subbatches_preserve_complete_rollout_groups(self):
+    def test_rollout_subbatches_preserve_all_prompts_and_order(self):
         self.assertEqual(
-            prompt_subbatch_completion_slices(
+            rollout_subbatch_completion_indices(
                 prompt_count=4,
                 num_rollouts=8,
-                prompt_subbatch_size=2,
+                rollout_subbatch_size=4,
             ),
-            (slice(0, 16), slice(16, 32)),
-        )
-        self.assertEqual(
-            prompt_subbatch_completion_slices(
-                prompt_count=3,
-                num_rollouts=8,
-                prompt_subbatch_size=2,
+            (
+                (
+                    0, 1, 2, 3,
+                    8, 9, 10, 11,
+                    16, 17, 18, 19,
+                    24, 25, 26, 27,
+                ),
+                (
+                    4, 5, 6, 7,
+                    12, 13, 14, 15,
+                    20, 21, 22, 23,
+                    28, 29, 30, 31,
+                ),
             ),
-            (slice(0, 16), slice(16, 24)),
         )
 
-    def test_prompt_subbatches_reject_nonpositive_sizes(self):
+    def test_rollout_subbatches_reject_invalid_sizes(self):
         with self.assertRaisesRegex(ValueError, "prompt_count"):
-            prompt_subbatch_completion_slices(
+            rollout_subbatch_completion_indices(
                 prompt_count=0,
                 num_rollouts=8,
-                prompt_subbatch_size=2,
+                rollout_subbatch_size=4,
+            )
+        with self.assertRaisesRegex(ValueError, "divisible"):
+            rollout_subbatch_completion_indices(
+                prompt_count=4,
+                num_rollouts=8,
+                rollout_subbatch_size=3,
             )
 
     def test_feature_execution_modes_are_mutually_exclusive(self):
