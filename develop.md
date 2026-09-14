@@ -11700,3 +11700,17 @@ This file tracks engineering changes made in this repository.
 - 修改文件：修改`my_example/alignment_baselines/equivalence.py`、`gradient_features.py`、`README.md`、`my_example/verify_learnalign_feature_equivalence.sh`和`tests/my_example/alignment_equivalence_test.py`，并同步更新`develop.md`。
 - 验证命令与结果：Codex bundled Python运行alignment equivalence/config/scoring/curriculum/mismatch-flow共15项测试全部通过；目标Python文件`py_compile`、验证脚本`bash -n`及`git diff --check`通过。真实32-prompt A/B仍必须在单worker TPU运行。
 - 已知风险/待办：32-prompt A/B比4-prompt检查更有代表性但仍不是完整2764-candidate selector replay；报告额外记录非零learnability与非零feature行数。若全部为零，脚本拒绝退化通过，可通过`VERIFY_GENERATION_STEPS=256`增加安全测试生成长度后重测。
+
+## 2026-09-14 — 32-prompt A/B对正式训练的影响复核
+
+- 改动范围：本轮仅解释32-prompt验证为何需要修改公共estimator文件，并复核其运行时开关边界；无训练逻辑改动，仅更新`develop.md`。
+- 影响结论：累计legacy/grouped双路径、实际`p(1-p)`重算和selected-set验收仅在显式设置`TUNIX_LEARNALIGN_EQUIVALENCE_REPORT`时启用。正式suite脚本不设置该变量，因此LearnAlign仍只执行一次grouped feature路径，GradAlign仍只执行legacy路径；rollout、reward、Mismatch、selection、训练步数、checkpoint和evaluation均不变。
+- 已知风险/待办：不要在正式训练命令或nohup环境中遗留`TUNIX_LEARNALIGN_EQUIVALENCE_REPORT`。可在正式启动前用`env | grep TUNIX_LEARNALIGN_EQUIVALENCE`确认无输出，或显式执行`unset TUNIX_LEARNALIGN_EQUIVALENCE_REPORT`。
+
+## 2026-09-14 — 修复32-prompt A/B分支未初始化调用
+
+- 改动范围：修复A/B验证模式完成legacy/grouped双路径计算后仍落入普通单路径调用，导致`active_feature_fn`未赋值即调用的`UnboundLocalError`；正式算法与训练参数不变。
+- 修改文件：修改`my_example/alignment_baselines/gradient_features.py`并同步更新`develop.md`。
+- 修复方式：将A/B、正式LearnAlign grouped、GradAlign legacy三种执行路径改成显式互斥分支，每个分支直接计算并赋值`host_features`，移除跨分支共享的延迟函数变量，避免未初始化状态。
+- 验证命令与结果：新增三种execution mode互斥选择回归测试；Codex bundled Python运行alignment equivalence/config/scoring/curriculum/mismatch-flow共16项测试全部通过，目标Python文件`py_compile`、验证脚本`bash -n`、确认源码不再含`active_feature_fn`的静态搜索及`git diff --check`均通过。真实32-prompt A/B需在服务器重新执行。
+- 已知风险/待办：本次失败发生在第一个selector chunk，未生成有效32-prompt报告或可复用训练结果；失败临时目录可删除。重新测试前服务器必须拉取包含本修复的新commit。

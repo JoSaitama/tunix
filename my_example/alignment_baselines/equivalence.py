@@ -9,6 +9,17 @@ import numpy as np
 from .scoring import learnalign_scores, stable_top_indices
 
 
+def feature_execution_mode(
+    *, equivalence_enabled: bool, grouped_feature_estimation: bool
+) -> str:
+    """Returns one mutually exclusive estimator execution mode."""
+    if equivalence_enabled:
+        return "dual"
+    if grouped_feature_estimation:
+        return "grouped"
+    return "legacy"
+
+
 def _rankdata(values: np.ndarray) -> np.ndarray:
     values = np.asarray(values, dtype=np.float64).reshape(-1)
     order = np.argsort(values, kind="mergesort")

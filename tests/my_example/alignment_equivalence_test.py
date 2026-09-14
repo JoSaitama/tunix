@@ -6,10 +6,34 @@ import numpy as np
 
 from my_example.alignment_baselines.equivalence import (
     compare_learnalign_feature_paths,
+    feature_execution_mode,
 )
 
 
 class AlignmentEquivalenceTest(unittest.TestCase):
+
+    def test_feature_execution_modes_are_mutually_exclusive(self):
+        self.assertEqual(
+            feature_execution_mode(
+                equivalence_enabled=True,
+                grouped_feature_estimation=True,
+            ),
+            "dual",
+        )
+        self.assertEqual(
+            feature_execution_mode(
+                equivalence_enabled=False,
+                grouped_feature_estimation=True,
+            ),
+            "grouped",
+        )
+        self.assertEqual(
+            feature_execution_mode(
+                equivalence_enabled=False,
+                grouped_feature_estimation=False,
+            ),
+            "legacy",
+        )
 
     def test_identical_features_pass_all_checks(self):
         features = np.arange(6 * 8, dtype=np.float64).reshape((6, 8)) + 1.0

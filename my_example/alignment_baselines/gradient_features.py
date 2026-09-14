@@ -24,7 +24,10 @@ from my_example.rewards import MATCH_NUMBERS
 
 from .artifacts import prompt_id
 from .data_utils import Example, batch_examples
-from .equivalence import compare_learnalign_feature_paths
+from .equivalence import (
+    compare_learnalign_feature_paths,
+    feature_execution_mode,
+)
 from .scoring import learnability
 
 
@@ -460,6 +463,10 @@ class PromptGradientEstimator:
         equivalence_enabled = bool(self.equivalence_report_path) and not Path(
             self.equivalence_report_path
         ).exists()
+        execution_mode = feature_execution_mode(
+            equivalence_enabled=equivalence_enabled,
+            grouped_feature_estimation=self.grouped_feature_estimation,
+        )
         legacy_feature_fn = self._feature_function(num_rollouts)
         grouped_feature_fn = None
         if self.grouped_feature_estimation or self.equivalence_report_path:
@@ -484,7 +491,7 @@ class PromptGradientEstimator:
             with actor_mesh, self.rl_cluster._get_logical_axis_rules_cm(  # pylint: disable=protected-access
                 rl_cluster_lib.Role.ACTOR
             ):
-                if equivalence_enabled:
+                if execution_mode == "dual":
                     if grouped_feature_fn is None:
                         raise RuntimeError(
                             "grouped LearnAlign feature path is unavailable"
@@ -503,19 +510,26 @@ class PromptGradientEstimator:
                     host_features = np.asarray(jax.device_get(grouped_features))
                     equivalence_legacy_features.append(legacy_host_features)
                     equivalence_grouped_features.append(host_features)
-                elif self.grouped_feature_estimation:
+                elif execution_mode == "grouped":
                     if grouped_feature_fn is None:
                         raise RuntimeError(
                             "grouped LearnAlign feature path is unavailable"
                         )
-                    active_feature_fn = grouped_feature_fn
+                    features = grouped_feature_fn(
+                        self.rl_cluster.actor_trainer.model,
+                        train_example,
+                    )
+                    host_features = np.asarray(jax.device_get(features))
+                elif execution_mode == "legacy":
+                    features = legacy_feature_fn(
+                        self.rl_cluster.actor_trainer.model,
+                        train_example,
+                    )
+                    host_features = np.asarray(jax.device_get(features))
                 else:
-                    active_feature_fn = legacy_feature_fn
-                features = active_feature_fn(
-                    self.rl_cluster.actor_trainer.model,
-                    train_example,
-                )
-                host_features = np.asarray(jax.device_get(features))
+                    raise AssertionError(
+                        f"unexpected feature execution mode: {execution_mode}"
+                    )
             all_features.append(host_features)
             all_clean_outcomes.append(clean_outcomes)
             all_selector_rewards.append(selector_rewards)
