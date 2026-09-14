@@ -14,6 +14,7 @@ import numpy as np
 from tunix.rl import common
 from tunix.rl import function_registry
 from tunix.rl import rl_cluster as rl_cluster_lib
+from tunix.rl import utils as rl_utils
 from tunix.rl.grpo.grpo_learner import GRPOConfig, TrainExample
 
 from my_example.reward_rank_noise import (
@@ -27,6 +28,7 @@ from .data_utils import Example, batch_examples
 from .equivalence import (
     compare_learnalign_feature_paths,
     feature_execution_mode,
+    prompt_subbatch_completion_slices,
 )
 from .scoring import learnability
 
@@ -115,6 +117,7 @@ class PromptGradientEstimator:
         selection_micro_batch_size: int,
         noise_config: RewardRankNoiseConfig,
         grouped_feature_estimation: bool = False,
+        grouped_prompt_subbatch_size: int = 2,
         equivalence_report_path: str | None = None,
         equivalence_selection_ratio: int = 4,
     ):
@@ -125,6 +128,14 @@ class PromptGradientEstimator:
         self.selection_micro_batch_size = selection_micro_batch_size
         self.noise_config = noise_config
         self.grouped_feature_estimation = grouped_feature_estimation
+        if grouped_prompt_subbatch_size <= 0:
+            raise ValueError("grouped_prompt_subbatch_size must be positive")
+        if selection_micro_batch_size % grouped_prompt_subbatch_size:
+            raise ValueError(
+                "selection_micro_batch_size must be divisible by "
+                "grouped_prompt_subbatch_size"
+            )
+        self.grouped_prompt_subbatch_size = grouped_prompt_subbatch_size
         self.equivalence_report_path = equivalence_report_path
         self.equivalence_selection_ratio = equivalence_selection_ratio
         self._compiled: dict[int, Any] = {}
@@ -165,10 +176,10 @@ class PromptGradientEstimator:
                     f"{self.selection_micro_batch_size}x{num_rollouts}"
                 ),
                 "grouped_feature_chunk": (
-                    f"{self.selection_micro_batch_size}x{num_rollouts}"
+                    f"{self.grouped_prompt_subbatch_size}x{num_rollouts}"
                 ),
                 "grouped_gradient_count_per_chunk": (
-                    self.selection_micro_batch_size
+                    self.grouped_prompt_subbatch_size
                 ),
                 "legacy_selected_source_indices": [
                     source_indices[index] for index in legacy_selected
@@ -351,9 +362,9 @@ class PromptGradientEstimator:
     def _grouped_feature_function(self, num_rollouts: int):
         """Projects one gradient of the mean loss for each prompt group.
 
-        This preserves the original full selector input shape while moving the
-        rollout mean inside automatic differentiation.  It therefore produces
-        only one gradient tree per prompt instead of one per completion.
+        The caller bounds the number of prompt groups in each compiled call.
+        Moving the rollout mean inside automatic differentiation produces only
+        one gradient tree per prompt instead of one per completion.
         """
         if num_rollouts in self._grouped_compiled:
             return self._grouped_compiled[num_rollouts]
@@ -442,6 +453,40 @@ class PromptGradientEstimator:
         self._grouped_compiled[num_rollouts] = compiled
         return compiled
 
+    def _evaluate_grouped_features(
+        self,
+        *,
+        grouped_feature_fn,
+        model,
+        train_example: TrainExample,
+        prompt_count: int,
+        num_rollouts: int,
+    ) -> jax.Array:
+        """Runs memory-bounded grouped gradients without changing rollouts.
+
+        The generated TrainExample stays in its original four-prompt order.
+        Only the feature backward pass is split along complete prompt groups,
+        so rewards, advantages, projections, and downstream ranking are
+        unchanged.
+        """
+        feature_parts = []
+        for completion_slice in prompt_subbatch_completion_slices(
+            prompt_count=prompt_count,
+            num_rollouts=num_rollouts,
+            prompt_subbatch_size=self.grouped_prompt_subbatch_size,
+        ):
+            feature_example = rl_utils.get_batch_slice(
+                train_example,
+                completion_slice,
+            )
+            feature_part = grouped_feature_fn(model, feature_example)
+            # TPU dispatch is asynchronous.  Synchronize each small result so
+            # two feature programs cannot overlap their large HBM temporaries.
+            feature_parts.append(jax.block_until_ready(feature_part))
+        if len(feature_parts) == 1:
+            return feature_parts[0]
+        return jnp.concatenate(feature_parts, axis=0)
+
     def estimate(
         self,
         examples: Sequence[Example],
@@ -500,9 +545,12 @@ class PromptGradientEstimator:
                         self.rl_cluster.actor_trainer.model,
                         train_example,
                     )
-                    grouped_features = grouped_feature_fn(
-                        self.rl_cluster.actor_trainer.model,
-                        train_example,
+                    grouped_features = self._evaluate_grouped_features(
+                        grouped_feature_fn=grouped_feature_fn,
+                        model=self.rl_cluster.actor_trainer.model,
+                        train_example=train_example,
+                        prompt_count=len(chunk),
+                        num_rollouts=num_rollouts,
                     )
                     legacy_host_features = np.asarray(
                         jax.device_get(legacy_features)
@@ -515,9 +563,12 @@ class PromptGradientEstimator:
                         raise RuntimeError(
                             "grouped LearnAlign feature path is unavailable"
                         )
-                    features = grouped_feature_fn(
-                        self.rl_cluster.actor_trainer.model,
-                        train_example,
+                    features = self._evaluate_grouped_features(
+                        grouped_feature_fn=grouped_feature_fn,
+                        model=self.rl_cluster.actor_trainer.model,
+                        train_example=train_example,
+                        prompt_count=len(chunk),
+                        num_rollouts=num_rollouts,
                     )
                     host_features = np.asarray(jax.device_get(features))
                 elif execution_mode == "legacy":

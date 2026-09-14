@@ -7,10 +7,37 @@ import numpy as np
 from my_example.alignment_baselines.equivalence import (
     compare_learnalign_feature_paths,
     feature_execution_mode,
+    prompt_subbatch_completion_slices,
 )
 
 
 class AlignmentEquivalenceTest(unittest.TestCase):
+
+    def test_prompt_subbatches_preserve_complete_rollout_groups(self):
+        self.assertEqual(
+            prompt_subbatch_completion_slices(
+                prompt_count=4,
+                num_rollouts=8,
+                prompt_subbatch_size=2,
+            ),
+            (slice(0, 16), slice(16, 32)),
+        )
+        self.assertEqual(
+            prompt_subbatch_completion_slices(
+                prompt_count=3,
+                num_rollouts=8,
+                prompt_subbatch_size=2,
+            ),
+            (slice(0, 16), slice(16, 24)),
+        )
+
+    def test_prompt_subbatches_reject_nonpositive_sizes(self):
+        with self.assertRaisesRegex(ValueError, "prompt_count"):
+            prompt_subbatch_completion_slices(
+                prompt_count=0,
+                num_rollouts=8,
+                prompt_subbatch_size=2,
+            )
 
     def test_feature_execution_modes_are_mutually_exclusive(self):
         self.assertEqual(

@@ -71,9 +71,11 @@ def _write_run_metadata(path: Path, *, alignment, cfg, max_steps: int) -> None:
     ]
     if alignment.method == "learnalign":
         adaptations.append(
-            "LearnAlign keeps the full four-prompt rollout batch and moves each "
-            "prompt's rollout-mean inside autodiff to materialize four prompt "
-            "gradients instead of 32 completion gradients"
+            f"LearnAlign keeps each {alignment.selection_micro_batch_size}-prompt "
+            "rollout batch, but evaluates the grouped-loss feature backward "
+            "pass in ordered two-prompt by "
+            f"{alignment.learnalign_estimation_rollouts}-rollout subbatches; "
+            "each prompt's rollout mean remains inside autodiff"
         )
     metadata = {
         "alignment": alignment.to_dict(),
@@ -257,6 +259,7 @@ def main(argv: list[str] | None = None) -> None:
         selection_micro_batch_size=alignment.selection_micro_batch_size,
         noise_config=selector_noise_config,
         grouped_feature_estimation=(alignment.method == "learnalign"),
+        grouped_prompt_subbatch_size=2,
         equivalence_report_path=(
             os.environ.get("TUNIX_LEARNALIGN_EQUIVALENCE_REPORT")
             if alignment.method == "learnalign"
@@ -264,6 +267,20 @@ def main(argv: list[str] | None = None) -> None:
         ),
         equivalence_selection_ratio=alignment.selection_ratio,
     )
+    if alignment.method == "learnalign":
+        backward_calls_per_chunk = (
+            alignment.selection_micro_batch_size
+            // estimator.grouped_prompt_subbatch_size
+        )
+        print(
+            "LearnAlign feature batching:",
+            f"generation_chunk={alignment.selection_micro_batch_size}x"
+            f"{alignment.learnalign_estimation_rollouts}",
+            f"backward_subbatch={estimator.grouped_prompt_subbatch_size}x"
+            f"{alignment.learnalign_estimation_rollouts}",
+            f"backward_calls_per_chunk={backward_calls_per_chunk}",
+            sep=" | ",
+        )
     common_curriculum = dict(
         training_examples=training_examples,
         train_batch_size=train_batch_size,

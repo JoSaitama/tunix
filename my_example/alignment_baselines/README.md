@@ -25,11 +25,12 @@ existing dense reward with the same prompt-level mismatch assignment.
 - Estimate success probability with 8 rollouts and `V=p(1-p)`.
 - Compute policy-only prompt gradients in LoRA space and project them to 4096
   dimensions with deterministic sparse feature hashing.
-- Keep each four-prompt by eight-rollout input chunk intact, move the
-  eight-rollout mean loss inside automatic differentiation, and materialize
-  four prompt-gradient trees rather than 32 completion-gradient trees. This
-  preserves rollout order, rewards, advantages, projection, and one selector
-  call per chunk while avoiding the original HBM peak.
+- Keep each four-prompt by eight-rollout generation chunk intact, then evaluate
+  the feature backward pass as two ordered two-prompt by eight-rollout
+  subbatches. The eight-rollout mean remains inside automatic differentiation,
+  so each compiled program materializes at most two prompt-gradient trees
+  rather than 32 completion-gradient trees. This preserves rollout order,
+  rewards, advantages, projection, and ranking while bounding the XLA HBM peak.
 - Compute the exact Eq. 8 row mean as `z_i dot mean(z)`, avoiding the nominal
   quadratic score matrix.
 - Select the top 25%.  Warmup updates count toward the frozen total update
@@ -105,7 +106,7 @@ regression smoke on an idle single-worker TPU:
 ```
 
 To compare the legacy completion-gradient feature call with the memory-safe
-grouped-gradient path over 32 prompts using the same generated tokens, actual
+two-prompt grouped-gradient path over 32 prompts using the same generated tokens, actual
 selector advantages, and actual `p(1-p)` weights, run:
 
 ```bash

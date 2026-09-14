@@ -15,6 +15,8 @@ from my_example.alignment_baselines.curriculum import (
 
 
 class _Estimator:
+    grouped_prompt_subbatch_size = 2
+
     def estimate(self, examples, *, num_rollouts, apply_mismatch):
         indices = np.asarray([example["index"] for example in examples])
         features = np.stack([indices + 1.0, np.ones_like(indices)], axis=1)
@@ -97,9 +99,12 @@ class AlignmentCurriculumTest(unittest.TestCase):
                 f"{tmp}/learnalign_summary.json", encoding="utf-8"
             ) as stream:
                 summary = json.load(stream)
-            self.assertEqual(summary["gradient_feature_prompt_batch_size"], 4)
+            self.assertEqual(summary["gradient_feature_prompt_batch_size"], 2)
             self.assertEqual(
-                summary["gradient_feature_completion_batch_size"], 16
+                summary["gradient_feature_completion_batch_size"], 8
+            )
+            self.assertEqual(
+                summary["gradient_feature_calls_per_rollout_chunk"], 2
             )
             self.assertEqual(
                 summary["gradient_aggregation"],

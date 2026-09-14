@@ -66,8 +66,9 @@ records = [
 
 assert summary["method"] == "learnalign"
 assert summary["estimation_rollouts"] == 8
-assert summary["gradient_feature_prompt_batch_size"] == 4
-assert summary["gradient_feature_completion_batch_size"] == 32
+assert summary["gradient_feature_prompt_batch_size"] == 2
+assert summary["gradient_feature_completion_batch_size"] == 16
+assert summary["gradient_feature_calls_per_rollout_chunk"] == 2
 assert summary["gradient_aggregation"] == "rollout_mean_loss_before_gradient"
 assert len(records) == summary["candidate_prompts"]
 selected_count = sum(bool(record["selected"]) for record in records)
@@ -75,7 +76,7 @@ assert selected_count == summary["selected_prompts"]
 assert all(len(record["selector_rewards"]) == 8 for record in records)
 
 print(
-    "PASS: grouped-gradient LearnAlign feature path completed; "
+    "PASS: 2x8 grouped-gradient LearnAlign feature path completed; "
     f"candidates={len(records)}, selected={summary['selected_prompts']}"
 )
 PY

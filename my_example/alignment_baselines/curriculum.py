@@ -131,6 +131,13 @@ class LearnAlignCurriculum(_BaseCurriculum):
         selected_indices = stable_top_indices(scores, selected_count)
         selected = [self.examples[index] for index in selected_indices]
         selected_set = set(int(index) for index in selected_indices)
+        gradient_prompt_batch_size = int(
+            getattr(
+                self.estimator,
+                "grouped_prompt_subbatch_size",
+                self.train_batch_size,
+            )
+        )
 
         self.writer.write_records(
             {
@@ -178,9 +185,12 @@ class LearnAlignCurriculum(_BaseCurriculum):
                 "selector_mismatch_scope": "all_training_candidates",
                 "training_reward": "frozen_dense_reward_with_optional_rank_mismatch",
                 "projection": "deterministic_sparse_jl_feature_hash",
-                "gradient_feature_prompt_batch_size": self.train_batch_size,
+                "gradient_feature_prompt_batch_size": gradient_prompt_batch_size,
                 "gradient_feature_completion_batch_size": (
-                    self.train_batch_size * self.estimation_rollouts
+                    gradient_prompt_batch_size * self.estimation_rollouts
+                ),
+                "gradient_feature_calls_per_rollout_chunk": math.ceil(
+                    self.train_batch_size / gradient_prompt_batch_size
                 ),
                 "gradient_aggregation": "rollout_mean_loss_before_gradient",
             }

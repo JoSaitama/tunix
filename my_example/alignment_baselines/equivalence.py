@@ -20,6 +20,30 @@ def feature_execution_mode(
     return "legacy"
 
 
+def prompt_subbatch_completion_slices(
+    *,
+    prompt_count: int,
+    num_rollouts: int,
+    prompt_subbatch_size: int,
+) -> tuple[slice, ...]:
+    """Maps prompt subbatches to contiguous completion-axis slices."""
+    for name, value in (
+        ("prompt_count", prompt_count),
+        ("num_rollouts", num_rollouts),
+        ("prompt_subbatch_size", prompt_subbatch_size),
+    ):
+        if value <= 0:
+            raise ValueError(f"{name} must be positive; got {value}")
+    return tuple(
+        slice(
+            prompt_start * num_rollouts,
+            min(prompt_start + prompt_subbatch_size, prompt_count)
+            * num_rollouts,
+        )
+        for prompt_start in range(0, prompt_count, prompt_subbatch_size)
+    )
+
+
 def _rankdata(values: np.ndarray) -> np.ndarray:
     values = np.asarray(values, dtype=np.float64).reshape(-1)
     order = np.argsort(values, kind="mergesort")

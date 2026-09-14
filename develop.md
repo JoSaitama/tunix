@@ -11714,3 +11714,21 @@ This file tracks engineering changes made in this repository.
 - 修复方式：将A/B、正式LearnAlign grouped、GradAlign legacy三种执行路径改成显式互斥分支，每个分支直接计算并赋值`host_features`，移除跨分支共享的延迟函数变量，避免未初始化状态。
 - 验证命令与结果：新增三种execution mode互斥选择回归测试；Codex bundled Python运行alignment equivalence/config/scoring/curriculum/mismatch-flow共16项测试全部通过，目标Python文件`py_compile`、验证脚本`bash -n`、确认源码不再含`active_feature_fn`的静态搜索及`git diff --check`均通过。真实32-prompt A/B需在服务器重新执行。
 - 已知风险/待办：本次失败发生在第一个selector chunk，未生成有效32-prompt报告或可复用训练结果；失败临时目录可删除。重新测试前服务器必须拉取包含本修复的新commit。
+
+## 2026-09-14 — LearnAlign 32-prompt selected-set A/B通过
+
+- 改动范围：本轮仅审计服务器32-prompt A/B结果并准备剩余Mismatch-20% baseline suite启动命令；无训练逻辑改动，仅更新`develop.md`。
+- 实测结论：legacy与grouped路径选择的8/32个indices、source indices及prompt IDs完全一致，selected Jaccard为`1.0`，score Spearman为`1.0`；13/32个prompt具有非零learnability且两侧均有13个非零feature rows，因此不是全零并列的退化通过。最小row cosine为`0.999585`，但按约定不作为selected-set验收条件。
+- Seed 0处理：按用户确定的32-prompt selected-set一致性标准，旧LearnAlign Mismatch-20% seed0可保留。旧完整selector边界gap为`0.0`，说明旧全池top-25%边界存在零分并列，因此32-prompt结果不能被表述为对2764个候选完全重放的一致性证明。
+- 启动范围：后续suite显式限定`--seeds 5 13 21 42 --methods learnalign gradalign --mismatch 0.2`，每个seed先LearnAlign后GradAlign，避免重复已完成的seed0；正式启动环境必须移除A/B专用`TUNIX_LEARNALIGN_EQUIVALENCE_REPORT`。
+- 验证命令与结果：服务器A/B脚本输出`PASS: both paths selected the same 8 of 32 prompt source indices`并正常完成临时训练、模型保存与报告导出。
+- 已知风险/待办：启动前确认无残留JAX任务并复核磁盘；按既有约2GB/run估算，剩余8个run约需16GB，仍需为当前checkpoint、模型合并和cache预留额外空间并持续监控。
+
+## 2026-09-14 — LearnAlign正式长度HBM二次修复（2 prompts×8 rollouts）
+
+- 问题定位：Mismatch-20% seed5在warmup第75步进入正式LearnAlign selector后仍发生XLA HBM OOM，程序需求`104.96 GiB`、设备可用`95.74 GiB`。异常栈已进入新版`grouped_feature_fn`，说明修改确实生效；XLA内存报告中的主张量仍为`bf16[4,8,1,1280,262144]`，证明外层四prompt `vmap`被编译器融合回完整`4×8`反向程序，减少gradient-tree输出不足以降低logits/反向临时张量峰值。
+- 修复范围：保留一次`4 prompts × 8 rollouts`生成及其原始顺序、binary correctness、Mismatch rank reversal、GRPO advantage、4096维投影、LearnAlign score、top-25%和真实训练配置；仅将grouped-loss feature backward按完整prompt组顺序拆为两次`2 prompts × 8 rollouts`，每次等待小型投影结果就绪以禁止两个大HBM程序重叠，拼接结果后统一传回host。GradAlign及现有GRPO/DTV/DTV-Loo路径不变。
+- 修改文件：`my_example/alignment_baselines/equivalence.py`、`gradient_features.py`、`curriculum.py`、`README.md`、`my_example/alignment_main.py`、`my_example/smoke_learnalign_memory_fix.sh`、`tests/my_example/alignment_equivalence_test.py`、`tests/my_example/alignment_curriculum_test.py`，并同步更新`develop.md`。
+- 审计信息：启动日志直接打印generation chunk、backward subbatch和每chunk调用次数；`run_metadata.json`记录两次有序`2×8`反向适配；`learnalign_summary.json`记录`gradient_feature_prompt_batch_size=2`、`gradient_feature_completion_batch_size=16`和每个生成chunk两次feature调用。预计最大`[prompt, rollout, ..., vocab]`临时张量第一维从4降到2；计算总量不变，但增加一次TPU dispatch，速度可能小幅下降。
+- 验证命令与结果：Codex bundled Python运行alignment equivalence/config/scoring/curriculum/mismatch-flow共18项测试全部通过；目标Python文件`py_compile`、两个shell脚本`bash -n`及`git diff --check`均通过。首次测试暴露mismatch-flow轻量fake estimator缺少新增审计属性，已通过仅用于summary的旧对象回退修复，真实estimator仍明确使用`2`。服务器必须重新运行32-prompt同rollout selected-set A/B，因为`2×8`数值归约路径不同于已通过的`4×8`路径。A/B通过后再运行使用8 selector rollouts的最大长度memory smoke，二者均通过后方可恢复正式seed5/13/21/42 suite。
+- 已知风险/待办：本地无TPU，无法直接证明正式1280-token HBM峰值；若`2×8`仍超出95.74 GiB，下一步只能改为`1×8`，代价是每个候选chunk四次dispatch。当前OOM的seed5 run未完成，不可作为有效实验结果；旧seed0能否继续复用取决于新版32-prompt selected-set A/B结果。
