@@ -68,6 +68,15 @@ case "$VLLM_ASYNC_SCHEDULING" in
     exit 2
     ;;
 esac
+TUNIX_VLLM_KV_CACHE_REFRESH_MODE="${TUNIX_VLLM_KV_CACHE_REFRESH_MODE:-reuse}"
+case "$TUNIX_VLLM_KV_CACHE_REFRESH_MODE" in
+  reuse|reinitialize) ;;
+  *)
+    echo "TUNIX_VLLM_KV_CACHE_REFRESH_MODE must be reuse or reinitialize; got $TUNIX_VLLM_KV_CACHE_REFRESH_MODE" >&2
+    exit 2
+    ;;
+esac
+export TUNIX_VLLM_KV_CACHE_REFRESH_MODE
 mkdir -p "$RUN_ROOT" "$LOG_ROOT" "$CACHE_ROOT"
 exec > >(tee "${LOG_ROOT}/nohup.log") 2>&1
 
@@ -168,6 +177,7 @@ echo "Method: $METHOD"
 echo "Run: $RUN_ROOT"
 echo "Logs: $LOG_ROOT"
 echo "vLLM async scheduling: $VLLM_ASYNC_SCHEDULING"
+echo "vLLM KV cache refresh mode: $TUNIX_VLLM_KV_CACHE_REFRESH_MODE"
 set +e
 bash "${REPO}/runs_xuesong/scripts/run_official_like_dual_worker.sh" "${ARGS[@]}" "$@"
 status=$?
@@ -193,6 +203,7 @@ LR_INIT=${SUMMARY_LR_INIT}
 LR_DECAY_STEPS=${SUMMARY_LR_DECAY_STEPS}
 WARMUP=none
 VLLM_ASYNC_SCHEDULING=${VLLM_ASYNC_SCHEDULING}
+VLLM_KV_CACHE_REFRESH_MODE=${TUNIX_VLLM_KV_CACHE_REFRESH_MODE}
 EXIT_CODE=${status}
 EOF
 exit "$status"

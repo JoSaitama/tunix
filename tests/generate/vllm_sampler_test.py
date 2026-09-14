@@ -529,6 +529,69 @@ class VllmSamplerTest(absltest.TestCase):
 class VllmSamplerConfigTest(absltest.TestCase):
   """Unit tests for VllmSampler config plumbing (no hardware required)."""
 
+  def _make_weight_update_sampler(self):
+    sampler = object.__new__(vllm_sampler.VllmSampler)
+    sampler.llm = mock.MagicMock()
+    sampler._driver = None
+    sampler.to_hf_key_mappings = {"source": "target"}
+    sampler.to_hf_transpose_keys = {}
+    sampler.to_hf_hook_fns = {}
+    sampler.llm.llm_engine.model_executor.driver_worker.model_runner.state = {
+        "weight": mock.sentinel.weight
+    }
+    return sampler
+
+  def test_weight_update_reuses_kv_cache_allocation_by_default(self):
+    sampler = self._make_weight_update_sampler()
+
+    with mock.patch.dict(
+        os.environ, {}, clear=True
+    ), mock.patch.object(
+        vllm_sampler.utils, "transfer_state_with_mappings"
+    ), mock.patch.object(
+        vllm_sampler.jax, "block_until_ready"
+    ), mock.patch.object(
+        vllm_sampler.jax, "effects_barrier"
+    ):
+      sampler._update_params_on_idle_engine(mock.sentinel.updated_weights)
+
+    sampler.llm.reset_prefix_cache.assert_called_once_with()
+    sampler.llm.collective_rpc.assert_not_called()
+
+  def test_weight_update_can_use_legacy_kv_cache_reinitialization(self):
+    sampler = self._make_weight_update_sampler()
+
+    with mock.patch.dict(
+        os.environ,
+        {"TUNIX_VLLM_KV_CACHE_REFRESH_MODE": "reinitialize"},
+    ), mock.patch.object(
+        vllm_sampler.utils, "transfer_state_with_mappings"
+    ), mock.patch.object(
+        vllm_sampler.jax, "block_until_ready"
+    ), mock.patch.object(
+        vllm_sampler.jax, "effects_barrier"
+    ):
+      sampler._update_params_on_idle_engine(mock.sentinel.updated_weights)
+
+    self.assertEqual(
+        sampler.llm.collective_rpc.call_args_list,
+        [
+            mock.call("delete_kv_cache"),
+            mock.call("reinitialize_kv_cache"),
+        ],
+    )
+
+  def test_weight_update_rejects_unknown_kv_cache_refresh_mode(self):
+    sampler = self._make_weight_update_sampler()
+
+    with mock.patch.dict(
+        os.environ, {"TUNIX_VLLM_KV_CACHE_REFRESH_MODE": "unknown"}
+    ):
+      with self.assertRaisesRegex(ValueError, "must be reuse or reinitialize"):
+        sampler._update_params_on_idle_engine(mock.sentinel.updated_weights)
+
+    sampler.llm.reset_prefix_cache.assert_not_called()
+
   def _make_mock_mesh(self, total_devices):
     mesh = mock.MagicMock()
     mesh.shape = {"axis": total_devices}

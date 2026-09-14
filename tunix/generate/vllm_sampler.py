@@ -195,18 +195,46 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
   def _update_params_on_idle_engine(
       self, updated_weights: jaxtyping.PyTree
   ) -> None:
-    """Replaces weights and KV cache while the vLLM engine is idle."""
+    """Replaces weights after invalidating model-dependent cached state."""
 
-    logging.info("VLLM_WEIGHT_SYNC phase=cache_delete_start")
+    cache_refresh_mode = os.environ.get(
+        "TUNIX_VLLM_KV_CACHE_REFRESH_MODE", "reuse"
+    ).strip().lower()
+    if cache_refresh_mode not in ("reuse", "reinitialize"):
+      raise ValueError(
+          "TUNIX_VLLM_KV_CACHE_REFRESH_MODE must be reuse or reinitialize;"
+          f" got {cache_refresh_mode!r}."
+      )
+
     if self.llm is not None:
-      self.llm.reset_prefix_cache()
-      self.llm.collective_rpc("delete_kv_cache") # will free hbm
+      engine = self.llm
     elif self._driver is not None:
-      self._driver.llm_engine.reset_prefix_cache()
-      self._driver.llm_engine.collective_rpc("delete_kv_cache")
-    logging.info("VLLM_WEIGHT_SYNC phase=cache_delete_complete")
+      engine = self._driver.llm_engine
+    else:
+      raise RuntimeError("vLLM engine is not initialized.")
+    logging.info(
+        "VLLM_WEIGHT_SYNC phase=prefix_cache_reset_start"
+        " kv_cache_refresh_mode=%s",
+        cache_refresh_mode,
+    )
+    reset_result = engine.reset_prefix_cache()
+    if reset_result is False:
+      raise RuntimeError(
+          "vLLM refused to reset its prefix cache before a weight update."
+      )
+    logging.info("VLLM_WEIGHT_SYNC phase=prefix_cache_reset_complete")
 
-    # Perform explicit garbage collection and synchronization to free up HBM memory before loading new weights
+    if cache_refresh_mode == "reinitialize":
+      logging.info("VLLM_WEIGHT_SYNC phase=cache_delete_start")
+      engine.collective_rpc("delete_kv_cache")  # Frees HBM temporarily.
+      logging.info("VLLM_WEIGHT_SYNC phase=cache_delete_complete")
+    else:
+      logging.info(
+          "VLLM_WEIGHT_SYNC phase=cache_delete_skipped"
+          " reason=kv_cache_allocation_reused"
+      )
+
+    # Release temporary Python/JAX objects before loading the new weights.
     logging.info("VLLM_WEIGHT_SYNC phase=jax_cache_clear_start")
     gc.collect()
     clear_jax_caches = os.environ.get(
@@ -270,14 +298,22 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
           reshard_fn=reshard.reshard_pytree,
           delete_dst_buffers=True,  # Ensure old weights are deleted to free up HBM memory
       )
+    # Weight transfers and resharding may be asynchronous.  The cache refresh
+    # used to provide an incidental synchronization point, so preserve that
+    # ordering explicitly when the allocation is reused.
+    jax.block_until_ready(self.transformer_state)
+    jax.effects_barrier()
     logging.info("VLLM_WEIGHT_SYNC phase=weight_transfer_complete")
 
-    logging.info("VLLM_WEIGHT_SYNC phase=cache_reinitialize_start")
-    if self.llm is not None:
-      self.llm.collective_rpc("reinitialize_kv_cache")
-    elif self._driver is not None:
-      self._driver.llm_engine.collective_rpc("reinitialize_kv_cache")
-    logging.info("VLLM_WEIGHT_SYNC phase=cache_reinitialize_complete")
+    if cache_refresh_mode == "reinitialize":
+      logging.info("VLLM_WEIGHT_SYNC phase=cache_reinitialize_start")
+      engine.collective_rpc("reinitialize_kv_cache")
+      logging.info("VLLM_WEIGHT_SYNC phase=cache_reinitialize_complete")
+    else:
+      logging.info(
+          "VLLM_WEIGHT_SYNC phase=cache_reinitialize_skipped"
+          " reason=kv_cache_allocation_reused"
+      )
 
   def load_checkpoint(self, path_or_weights: str | jaxtyping.PyTree):
     # TODO(b/434741253): Consider support orbax checkpoint loading
