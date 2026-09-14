@@ -104,9 +104,9 @@ regression smoke on an idle single-worker TPU:
 ./my_example/smoke_learnalign_memory_fix.sh
 ```
 
-To compare the legacy 32-completion-gradient feature call with the memory-safe
-grouped-gradient path on exactly the same generated tokens and model parameters,
-run:
+To compare the legacy completion-gradient feature call with the memory-safe
+grouped-gradient path over 32 prompts using the same generated tokens, actual
+selector advantages, and actual `p(1-p)` weights, run:
 
 ```bash
 ./my_example/verify_learnalign_feature_equivalence.sh \
@@ -114,11 +114,12 @@ run:
 ```
 
 The optional JSONL argument adds the old seed-0 top-k boundary diagnostic. The
-TPU A/B check itself writes a temporary JSON report and requires feature
-`allclose(rtol=1e-4, atol=1e-5)`, minimum row cosine `0.99999`, score Spearman
-`0.99999` when defined, and selected-set Jaccard `1.0`. It uses one shared
-rollout batch and deterministic nonzero test advantages, so rollout randomness
-or an all-zero short-smoke reward batch cannot mask a batching discrepancy.
+TPU A/B check itself writes a temporary JSON report and passes only when both
+paths select exactly the same eight source prompts (top 25%, selected-set
+Jaccard `1.0`). Feature, cosine, score-error, and Spearman diagnostics remain in
+the report but are not acceptance conditions. This 32-prompt check does not by
+itself replay the full seed-0 selector. If all short rollouts produce zero
+learnability, rerun with `VERIFY_GENERATION_STEPS=256` (or a larger safe value).
 
 It first runs the fast batching, configuration, curriculum, and mismatch tests,
 then runs a two-update seed-5 Mismatch-20% LearnAlign job using the production

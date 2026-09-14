@@ -4,6 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PYTHON_BIN="${PYTHON_BIN:-python}"
 OLD_SELECTION_JSONL="${1:-}"
+VERIFY_GENERATION_STEPS="${VERIFY_GENERATION_STEPS:-128}"
 
 cd "${ROOT_DIR}"
 
@@ -24,7 +25,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-echo "Running same-rollout LearnAlign legacy-32 versus grouped-gradient A/B check."
+echo "Running a 32-prompt LearnAlign selected-set A/B check."
 echo "Temporary artifacts: ${VERIFY_ROOT}"
 
 TUNIX_EXPERIMENT_SEED=0 \
@@ -33,13 +34,13 @@ TUNIX_REWARD_RANK_NOISE_FRACTION=0.2 \
 TUNIX_LEARNALIGN_EQUIVALENCE_REPORT="${VERIFY_ROOT}/equivalence.json" \
 TUNIX_MY_RESULT_DIR="${VERIFY_ROOT}/results" \
 "${ROOT_DIR}/my_example/run_alignment_baseline.sh" learnalign \
-  --max-train-examples 16 \
+  --max-train-examples 64 \
   --train-fraction 0.5 \
   --learnalign-warmup-prompts 4 \
   --learnalign-estimation-rollouts 8 \
   --selection-ratio 4 \
   --projection-dim 4096 \
-  --total-generation-steps 128 \
+  --total-generation-steps "${VERIFY_GENERATION_STEPS}" \
   --alignment-artifact-dir "${VERIFY_ROOT}/selection" \
   --metrics-log-dir "${VERIFY_ROOT}/tensorboard" \
   --checkpoint-root "${VERIFY_ROOT}/checkpoints" \
@@ -61,8 +62,20 @@ report_path = Path(sys.argv[1])
 report = json.loads(report_path.read_text(encoding="utf-8"))
 print(json.dumps(report, indent=2, sort_keys=True))
 if not report["passed"]:
-    raise SystemExit("FAIL: numerical A/B thresholds were not met")
-print("PASS: legacy and grouped-gradient LearnAlign features are equivalent")
+    raise SystemExit("FAIL: legacy and grouped selected prompt sets differ")
+if report["prompt_count"] != 32 or report["selected_count"] != 8:
+    raise SystemExit(
+        "FAIL: expected 32 compared prompts and 8 selected prompts; got "
+        f"{report['prompt_count']} and {report['selected_count']}"
+    )
+if report["acceptance_mode"] != "selected-set":
+    raise SystemExit("FAIL: verification did not use selected-set acceptance")
+if report["nonzero_learnability_prompts"] == 0:
+    raise SystemExit(
+        "FAIL: all 32 prompt groups had zero learnability; increase "
+        "--total-generation-steps and rerun to avoid a degenerate tie test"
+    )
+print("PASS: both paths selected the same 8 of 32 prompt source indices")
 
 old_path_text = sys.argv[2]
 if not old_path_text:

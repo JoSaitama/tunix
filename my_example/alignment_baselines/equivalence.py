@@ -38,6 +38,8 @@ def compare_learnalign_feature_paths(
     grouped_features: np.ndarray,
     *,
     selection_ratio: int,
+    score_weights: np.ndarray | None = None,
+    acceptance_mode: str = "strict",
     rtol: float = 1e-4,
     atol: float = 1e-5,
     min_row_cosine: float = 0.99999,
@@ -45,9 +47,10 @@ def compare_learnalign_feature_paths(
 ) -> dict[str, object]:
     """Compares per-completion and grouped-loss feature evaluation.
 
-    Deterministic non-uniform weights are used for the downstream LearnAlign
-    score comparison.  This keeps the check informative even when every short
-    smoke-test rollout happens to receive the same binary reward.
+    By default deterministic non-uniform weights are used for the downstream
+    LearnAlign score comparison.  A caller may instead supply the actual
+    learnability weights. ``selected-set`` acceptance requires only identical
+    top-k prompt indices; the numerical diagnostics remain in the report.
     """
     legacy = np.asarray(legacy_features, dtype=np.float64)
     grouped = np.asarray(grouped_features, dtype=np.float64)
@@ -60,6 +63,8 @@ def compare_learnalign_feature_paths(
         raise ValueError("at least one prompt feature is required")
     if selection_ratio <= 1:
         raise ValueError("selection_ratio must be greater than one")
+    if acceptance_mode not in {"strict", "selected-set"}:
+        raise ValueError(f"unsupported acceptance mode: {acceptance_mode}")
 
     difference = grouped - legacy
     max_abs = float(np.max(np.abs(difference)))
@@ -81,7 +86,17 @@ def compare_learnalign_feature_paths(
     minimum_cosine = float(np.min(row_cosines))
 
     prompt_count = legacy.shape[0]
-    weights = np.linspace(0.125, 0.25, prompt_count, dtype=np.float64)
+    if score_weights is None:
+        weights = np.linspace(0.125, 0.25, prompt_count, dtype=np.float64)
+        score_weights_label = "deterministic_nonuniform_test_weights"
+    else:
+        weights = np.asarray(score_weights, dtype=np.float64).reshape(-1)
+        if weights.shape != (prompt_count,):
+            raise ValueError(
+                "score_weights must have one value per prompt; "
+                f"got {weights.shape} for {prompt_count} prompts"
+            )
+        score_weights_label = "provided"
     legacy_scores = learnalign_scores(legacy, weights)
     grouped_scores = learnalign_scores(grouped, weights)
     score_difference = grouped_scores - legacy_scores
@@ -111,14 +126,21 @@ def compare_learnalign_feature_paths(
         score_spearman is None
         or score_spearman >= min_score_spearman
     )
-    passed = bool(
+    strict_passed = bool(
         feature_allclose
         and minimum_cosine >= min_row_cosine
         and spearman_passed
         and selected_jaccard == 1.0
     )
+    passed = (
+        selected_jaccard == 1.0
+        if acceptance_mode == "selected-set"
+        else strict_passed
+    )
     return {
         "passed": passed,
+        "acceptance_mode": acceptance_mode,
+        "strict_checks_passed": strict_passed,
         "prompt_count": prompt_count,
         "projection_dim": legacy.shape[1],
         "feature_allclose": feature_allclose,
@@ -136,5 +158,5 @@ def compare_learnalign_feature_paths(
         "selected_jaccard": selected_jaccard,
         "legacy_selected_indices": sorted(legacy_selected),
         "grouped_selected_indices": sorted(grouped_selected),
-        "score_weights": "deterministic_nonuniform_test_weights",
+        "score_weights": score_weights_label,
     }

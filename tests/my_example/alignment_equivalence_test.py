@@ -42,6 +42,29 @@ class AlignmentEquivalenceTest(unittest.TestCase):
                 selection_ratio=4,
             )
 
+    def test_selected_set_mode_accepts_same_selection(self):
+        legacy = np.arange(8 * 6, dtype=np.float64).reshape((8, 6)) + 1.0
+        grouped = legacy * 1.01
+        report = compare_learnalign_feature_paths(
+            legacy,
+            grouped,
+            selection_ratio=4,
+            score_weights=np.linspace(0.1, 0.25, 8),
+            acceptance_mode="selected-set",
+        )
+        self.assertFalse(report["strict_checks_passed"])
+        self.assertEqual(report["selected_jaccard"], 1.0)
+        self.assertTrue(report["passed"])
+
+    def test_rejects_wrong_score_weight_count(self):
+        with self.assertRaisesRegex(ValueError, "one value per prompt"):
+            compare_learnalign_feature_paths(
+                np.ones((4, 3)),
+                np.ones((4, 3)),
+                selection_ratio=4,
+                score_weights=np.ones(3),
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -11678,3 +11678,25 @@ This file tracks engineering changes made in this repository.
 - 改动范围：确认后续每次完成代码修改时，同时提供本地检查、提交推送和服务器安全拉取命令；本轮无训练逻辑改动，仅更新`develop.md`记录该交付约定。
 - 验证命令与结果：无需新增运行时测试；提交前仍执行`git diff --check`及与当次改动对应的定向测试。
 - 已知风险/待办：提交命令应列出精确文件，不使用`git add .`，避免将用户未纳入任务的本地文档或其他修改误提交；服务器拉取前必须确认分支和工作区状态。
+
+## 2026-09-14 — LearnAlign grouped-loss TPU A/B仍未通过
+
+- 改动范围：本轮仅根据服务器异常栈定位第二版grouped-loss验证失败阶段；无训练逻辑改动，仅更新`develop.md`。
+- 现象判断：新路径没有发生HBM OOM，legacy与grouped两次feature计算均已返回并写出`equivalence.json`；异常是`_verify_grouped_equivalence`读取比较结果后主动中止，说明至少一个feature allclose、row cosine、score Spearman或selected Jaccard门槛未满足。
+- 验证需求：必须读取`/tmp/learnalign_equivalence.OWybZV/equivalence.json`中的完整指标，再判断是grouped-loss缩放/实现错误，还是数学等价表达式在JAX/XLA低精度反向归约下产生了不可忽略的数值差异。在报告前不放宽阈值、不恢复正式suite，也不判定旧LearnAlign seed0可复用。
+- 已知风险/待办：四prompt短检验的top-1 Jaccard即使为1也不足以证明全池top-25%一致；若feature方向仍有显著差异，需要改成能保持原数值程序的内存调度或统一重跑全部LearnAlign seeds，不能只依赖排名恰好一致。
+
+## 2026-09-14 — LearnAlign grouped-loss A/B数值误差评估
+
+- 改动范围：本轮仅分析服务器`equivalence.OWybZV/equivalence.json`，无训练逻辑改动，仅更新`develop.md`。
+- 实测结果：grouped路径相对legacy路径的feature最大绝对误差为`0.007967`、相对误差为`1.6339%`，最小row cosine为`0.998251`；下游score最大相对误差为`0.4221%`，四prompt的score Spearman为`1.0`且top-1 selected Jaccard为`1.0`。相比上一版promptwise路径的最小cosine `0.6790`和约`26%` score相对误差已有本质改善。
+- 解释：该结果支持两种实现的gradient方向高度一致及短样本排序一致，但不等于逐元素allclose，也不能仅凭四prompt top-1推出完整候选池top-25%完全一致。当前失败由原先偏保守的`allclose(rtol=1e-4, atol=1e-5)`和cosine `0.99999`门槛触发，而非公式缩放错误或HBM OOM。
+- 已知风险/待办：若目标是验证算法级可比性而非bitwise复现，可将验收重点改为更符合selection用途的方向、score排序和top-k稳定性；但在放宽门槛前，应增加候选prompt数量以避免四点检验过弱，并明确旧seed0复用属于数值等价审计而非完全复现。
+
+## 2026-09-14 — LearnAlign 32-prompt selected-set A/B验证
+
+- 改动范围：将原先单chunk、4 prompts、严格feature allclose验证升级为累计32 prompts后统一计算LearnAlign score并比较top-25% selected set；正式训练在未设置验证环境变量时保持不变。
+- 实现语义：A/B模式对每个真实selector chunk共享同一模型参数、tokens、binary/Mismatch rewards和实际GRPO advantages，分别计算legacy与grouped features；累计32个prompt后使用实际learnability权重`p(1-p)`重算两侧score。验收仅要求两侧选出的8个source indices完全相同，即Jaccard为`1.0`；feature误差、row cosine、score误差和Spearman继续记录但不作为通过条件。
+- 修改文件：修改`my_example/alignment_baselines/equivalence.py`、`gradient_features.py`、`README.md`、`my_example/verify_learnalign_feature_equivalence.sh`和`tests/my_example/alignment_equivalence_test.py`，并同步更新`develop.md`。
+- 验证命令与结果：Codex bundled Python运行alignment equivalence/config/scoring/curriculum/mismatch-flow共15项测试全部通过；目标Python文件`py_compile`、验证脚本`bash -n`及`git diff --check`通过。真实32-prompt A/B仍必须在单worker TPU运行。
+- 已知风险/待办：32-prompt A/B比4-prompt检查更有代表性但仍不是完整2764-candidate selector replay；报告额外记录非零learnability与非零feature行数。若全部为零，脚本拒绝退化通过，可通过`VERIFY_GENERATION_STEPS=256`增加安全测试生成长度后重测。

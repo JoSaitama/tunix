@@ -22,8 +22,10 @@ from my_example.reward_rank_noise import (
 )
 from my_example.rewards import MATCH_NUMBERS
 
+from .artifacts import prompt_id
 from .data_utils import Example, batch_examples
 from .equivalence import compare_learnalign_feature_paths
+from .scoring import learnability
 
 
 @dataclasses.dataclass(frozen=True)
@@ -125,51 +127,69 @@ class PromptGradientEstimator:
         self._compiled: dict[int, Any] = {}
         self._grouped_compiled: dict[int, Any] = {}
 
-    def _verify_grouped_equivalence(
+    def _write_grouped_equivalence_report(
         self,
         *,
-        legacy_feature_fn,
-        grouped_feature_fn,
-        train_example: TrainExample,
-        prompt_count: int,
+        examples: Sequence[Example],
+        legacy_features: np.ndarray,
+        grouped_features: np.ndarray,
+        selector_rewards: np.ndarray,
         num_rollouts: int,
     ) -> None:
-        """Runs one same-input legacy/grouped A/B check when requested."""
+        """Writes one selection-oriented report over all requested prompts."""
         if not self.equivalence_report_path:
             return
         report_path = Path(self.equivalence_report_path)
-        if report_path.exists():
-            return
-
-        # The A/B check targets only the batching transformation.  A fixed,
-        # zero-mean advantage vector prevents an all-zero short-rollout reward
-        # batch from turning the numerical check into a vacuous comparison.
-        base_advantages = np.linspace(-1.0, 1.0, num_rollouts, dtype=np.float32)
-        base_advantages -= base_advantages.mean()
-        verification_example = train_example.replace(
-            advantages=jnp.asarray(np.tile(base_advantages, prompt_count))
-        )
-        model = self.rl_cluster.actor_trainer.model
-        legacy = np.asarray(
-            jax.device_get(legacy_feature_fn(model, verification_example))
-        )
-        grouped = np.asarray(
-            jax.device_get(grouped_feature_fn(model, verification_example))
-        )
+        values = learnability(selector_rewards)
         report = compare_learnalign_feature_paths(
-            legacy,
-            grouped,
+            legacy_features,
+            grouped_features,
             selection_ratio=self.equivalence_selection_ratio,
+            score_weights=values,
+            acceptance_mode="selected-set",
         )
+        source_indices = [
+            int(example.get("index", index))
+            for index, example in enumerate(examples)
+        ]
+        prompt_ids = [prompt_id(str(example["prompts"])) for example in examples]
+        legacy_selected = report["legacy_selected_indices"]
+        grouped_selected = report["grouped_selected_indices"]
         report.update(
             {
                 "method": "learnalign",
-                "legacy_feature_batch": f"{prompt_count}x{num_rollouts}",
-                "grouped_feature_batch": f"{prompt_count}x{num_rollouts}",
-                "grouped_gradient_count": prompt_count,
+                "legacy_feature_chunk": (
+                    f"{self.selection_micro_batch_size}x{num_rollouts}"
+                ),
+                "grouped_feature_chunk": (
+                    f"{self.selection_micro_batch_size}x{num_rollouts}"
+                ),
+                "grouped_gradient_count_per_chunk": (
+                    self.selection_micro_batch_size
+                ),
+                "legacy_selected_source_indices": [
+                    source_indices[index] for index in legacy_selected
+                ],
+                "grouped_selected_source_indices": [
+                    source_indices[index] for index in grouped_selected
+                ],
+                "legacy_selected_prompt_ids": [
+                    prompt_ids[index] for index in legacy_selected
+                ],
+                "grouped_selected_prompt_ids": [
+                    prompt_ids[index] for index in grouped_selected
+                ],
+                "nonzero_learnability_prompts": int(np.count_nonzero(values)),
+                "nonzero_legacy_feature_rows": int(
+                    np.count_nonzero(np.linalg.norm(legacy_features, axis=1))
+                ),
+                "nonzero_grouped_feature_rows": int(
+                    np.count_nonzero(np.linalg.norm(grouped_features, axis=1))
+                ),
                 "shared_tokens": True,
                 "shared_model_parameters": True,
-                "advantages": "shared_deterministic_zero_mean_test_vector",
+                "advantages": "shared_actual_selector_advantages",
+                "score_weights": "actual_learnability_p(1-p)",
             }
         )
         report_path.parent.mkdir(parents=True, exist_ok=True)
@@ -179,7 +199,7 @@ class PromptGradientEstimator:
         )
         if not report["passed"]:
             raise RuntimeError(
-                "LearnAlign grouped feature A/B check failed; see "
+                "LearnAlign grouped selected-set A/B check failed; see "
                 f"{report_path}"
             )
 
@@ -435,6 +455,11 @@ class PromptGradientEstimator:
         all_advantages: list[np.ndarray] = []
         all_mismatch_selected: list[np.ndarray] = []
         all_mismatch_effective: list[np.ndarray] = []
+        equivalence_legacy_features: list[np.ndarray] = []
+        equivalence_grouped_features: list[np.ndarray] = []
+        equivalence_enabled = bool(self.equivalence_report_path) and not Path(
+            self.equivalence_report_path
+        ).exists()
         legacy_feature_fn = self._feature_function(num_rollouts)
         grouped_feature_fn = None
         if self.grouped_feature_estimation or self.equivalence_report_path:
@@ -459,15 +484,26 @@ class PromptGradientEstimator:
             with actor_mesh, self.rl_cluster._get_logical_axis_rules_cm(  # pylint: disable=protected-access
                 rl_cluster_lib.Role.ACTOR
             ):
-                if grouped_feature_fn is not None:
-                    self._verify_grouped_equivalence(
-                        legacy_feature_fn=legacy_feature_fn,
-                        grouped_feature_fn=grouped_feature_fn,
-                        train_example=train_example,
-                        prompt_count=len(chunk),
-                        num_rollouts=num_rollouts,
+                if equivalence_enabled:
+                    if grouped_feature_fn is None:
+                        raise RuntimeError(
+                            "grouped LearnAlign feature path is unavailable"
+                        )
+                    legacy_features = legacy_feature_fn(
+                        self.rl_cluster.actor_trainer.model,
+                        train_example,
                     )
-                if self.grouped_feature_estimation:
+                    grouped_features = grouped_feature_fn(
+                        self.rl_cluster.actor_trainer.model,
+                        train_example,
+                    )
+                    legacy_host_features = np.asarray(
+                        jax.device_get(legacy_features)
+                    )
+                    host_features = np.asarray(jax.device_get(grouped_features))
+                    equivalence_legacy_features.append(legacy_host_features)
+                    equivalence_grouped_features.append(host_features)
+                elif self.grouped_feature_estimation:
                     if grouped_feature_fn is None:
                         raise RuntimeError(
                             "grouped LearnAlign feature path is unavailable"
@@ -486,7 +522,7 @@ class PromptGradientEstimator:
             all_advantages.append(advantages)
             all_mismatch_selected.append(mismatch_selected)
             all_mismatch_effective.append(mismatch_effective)
-        return PromptGradientEstimate(
+        estimate = PromptGradientEstimate(
             features=np.concatenate(all_features),
             clean_binary_outcomes=np.concatenate(all_clean_outcomes),
             selector_rewards=np.concatenate(all_selector_rewards),
@@ -494,3 +530,12 @@ class PromptGradientEstimator:
             mismatch_selected=np.concatenate(all_mismatch_selected),
             mismatch_effective=np.concatenate(all_mismatch_effective),
         )
+        if equivalence_enabled:
+            self._write_grouped_equivalence_report(
+                examples=examples,
+                legacy_features=np.concatenate(equivalence_legacy_features),
+                grouped_features=np.concatenate(equivalence_grouped_features),
+                selector_rewards=estimate.selector_rewards,
+                num_rollouts=num_rollouts,
+            )
+        return estimate
