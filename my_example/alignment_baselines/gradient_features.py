@@ -31,6 +31,8 @@ from .equivalence import (
     rollout_subbatch_completion_indices,
 )
 from .scoring import learnability
+from .projection_hash import bucket_and_sign, mix_u32
+from .selector_objectives import selector_loss, selector_metadata
 
 
 @dataclasses.dataclass(frozen=True)
@@ -61,10 +63,7 @@ def exact_correctness(completions: Sequence[str], answers: Sequence[str]) -> np.
 
 def _mix_u32(values: jax.Array, seed: int) -> jax.Array:
     """Deterministic integer mixing used by the sparse feature hash."""
-    x = values.astype(jnp.uint32) + jnp.uint32(seed & 0xFFFFFFFF)
-    x = (x ^ (x >> jnp.uint32(16))) * jnp.uint32(0x7FEB352D)
-    x = (x ^ (x >> jnp.uint32(15))) * jnp.uint32(0x846CA68B)
-    return x ^ (x >> jnp.uint32(16))
+    return mix_u32(values, seed, xp=jnp)
 
 
 def project_gradient_tree(
@@ -73,11 +72,11 @@ def project_gradient_tree(
     projection_dim: int,
     seed: int,
 ) -> jax.Array:
-    """Applies a deterministic sparse JL/feature-hashing projection.
+    """Applies a deterministic signed feature-hashing approximation.
 
     The projection is accumulated leaf-by-leaf, so no dense P x D matrix and no
     flattened full-gradient copy is materialized.  This is an implementation
-    adaptation of the papers' random projection for a single-node TPU setup.
+    adaptation for a single-worker TPU setup, not a claimed JL guarantee.
     """
     leaves = jax.tree_util.tree_leaves(prompt_grads)
     if not leaves:
@@ -91,9 +90,10 @@ def project_gradient_tree(
         coordinates = jnp.arange(size, dtype=jnp.uint32) + jnp.uint32(
             coordinate_offset
         )
-        mixed = _mix_u32(coordinates, seed + 0x9E3779B9 * (leaf_index + 1))
-        buckets = (mixed % jnp.uint32(projection_dim)).astype(jnp.int32)
-        signs = jnp.where((mixed & jnp.uint32(1)) == 0, 1.0, -1.0)
+        buckets, signs = bucket_and_sign(
+            coordinates, leaf_index=leaf_index, dimension=projection_dim,
+            seed=seed, xp=jnp,
+        )
         leaf_projection = jax.vmap(
             lambda row: jax.ops.segment_sum(
                 row * signs, buckets, num_segments=projection_dim
@@ -116,6 +116,7 @@ class PromptGradientEstimator:
         projection_seed: int,
         selection_micro_batch_size: int,
         noise_config: RewardRankNoiseConfig,
+        method: str,
         grouped_feature_estimation: bool = False,
         grouped_rollout_subbatch_size: int = 4,
         equivalence_report_path: str | None = None,
@@ -127,6 +128,8 @@ class PromptGradientEstimator:
         self.projection_seed = projection_seed
         self.selection_micro_batch_size = selection_micro_batch_size
         self.noise_config = noise_config
+        self.method = method
+        self.definition = selector_metadata(method, training_algo_config.beta)
         self.grouped_feature_estimation = grouped_feature_estimation
         if grouped_rollout_subbatch_size <= 0:
             raise ValueError("grouped_rollout_subbatch_size must be positive")
@@ -303,14 +306,8 @@ class PromptGradientEstimator:
         if num_rollouts in self._compiled:
             return self._compiled[num_rollouts]
 
-        score_config = dataclasses.replace(
-            self.training_algo_config,
-            beta=0.0,
-            num_generations=num_rollouts,
-        )
-        policy_loss_fn = function_registry.get_policy_loss_fn(
-            score_config.policy_loss_fn
-        )
+        method = self.method
+        beta = self.definition["selector_beta"]
         pad_id = self.rl_cluster.rollout.pad_id()
         eos_id = self.rl_cluster.rollout.eos_id()
         projection_dim = self.projection_dim
@@ -318,14 +315,10 @@ class PromptGradientEstimator:
 
         def feature_fn(model, train_example):
             def one_loss(model, one_example):
-                loss, _ = policy_loss_fn(
-                    model,
-                    one_example,
-                    algo_config=score_config,
-                    pad_id=pad_id,
-                    eos_id=eos_id,
+                return selector_loss(
+                    model, one_example, method=method, beta=beta,
+                    pad_id=pad_id, eos_id=eos_id,
                 )
-                return loss
 
             wrt = (
                 nnx.LoRAParam
@@ -362,6 +355,28 @@ class PromptGradientEstimator:
         self._compiled[num_rollouts] = compiled
         return compiled
 
+    def _with_reference_logps(self, example: TrainExample) -> TrainExample:
+        """Sequential small reference forward, outside the actor AD graph."""
+        if self.definition["selector_beta"] == 0.0:
+            return example
+        # Keep reference forward at four completions per dispatch by default,
+        # never at the full LearnAlign 4x8 generation-chunk size.
+        reference_parts = []
+        micro_batch_size = min(4, self.selection_micro_batch_size)
+        for start in range(0, example.prompt_ids.shape[0], micro_batch_size):
+            stop = start + micro_batch_size
+            reference = self.rl_cluster.get_ref_per_token_logps(
+                prompt_tokens=example.prompt_ids[start:stop],
+                completion_tokens=example.completion_ids[start:stop],
+                pad_id=self.rl_cluster.rollout.pad_id(),
+                eos_id=self.rl_cluster.rollout.eos_id(),
+                micro_batch_size=micro_batch_size,
+            )
+            # Do not merely enqueue four asynchronous reference programs.
+            reference_parts.append(jax.block_until_ready(jax.lax.stop_gradient(reference)))
+        reference = jax.block_until_ready(jnp.concatenate(reference_parts, axis=0))
+        return example.replace(ref_per_token_logps=reference)
+
     def _evaluate_grouped_features(
         self,
         *,
@@ -393,6 +408,7 @@ class PromptGradientEstimator:
                 train_example,
                 jnp.asarray(completion_indices, dtype=jnp.int32),
             )
+            feature_example = self._with_reference_logps(feature_example)
             feature_part = grouped_feature_fn(model, feature_example)
             # TPU dispatch is asynchronous.  Synchronize each small result so
             # two feature programs cannot overlap their large HBM temporaries.
@@ -422,6 +438,12 @@ class PromptGradientEstimator:
         equivalence_enabled = bool(self.equivalence_report_path) and not Path(
             self.equivalence_report_path
         ).exists()
+        if equivalence_enabled and num_rollouts > 4:
+            raise ValueError(
+                "Legacy full-8-rollout A/B dispatch is disabled for selector v2: "
+                "it can exceed HBM. Unset TUNIX_LEARNALIGN_EQUIVALENCE_REPORT "
+                "and use the bounded selector/HBM tests instead."
+            )
         execution_mode = feature_execution_mode(
             equivalence_enabled=equivalence_enabled,
             grouped_feature_estimation=self.grouped_feature_estimation,
@@ -438,7 +460,7 @@ class PromptGradientEstimator:
                 "rollout subbatch size; "
                 f"got {num_rollouts} and {grouped_feature_rollouts}"
             )
-        if self.grouped_feature_estimation or self.equivalence_report_path:
+        if self.grouped_feature_estimation or self.equivalence_report_path or num_rollouts > 4:
             # Reuse the exact legacy completion-gradient program at a smaller
             # rollout count. Only the HBM schedule changes; the order of
             # differentiation, prompt averaging, and projection does not.
@@ -472,7 +494,7 @@ class PromptGradientEstimator:
                         )
                     legacy_features = legacy_feature_fn(
                         self.rl_cluster.actor_trainer.model,
-                        train_example,
+                        self._with_reference_logps(train_example),
                     )
                     grouped_features = self._evaluate_grouped_features(
                         grouped_feature_fn=grouped_feature_fn,
@@ -488,7 +510,7 @@ class PromptGradientEstimator:
                     host_features = np.asarray(jax.device_get(grouped_features))
                     equivalence_legacy_features.append(legacy_host_features)
                     equivalence_grouped_features.append(host_features)
-                elif execution_mode == "grouped":
+                elif execution_mode == "grouped" or (execution_mode == "legacy" and num_rollouts > 4):
                     if grouped_feature_fn is None:
                         raise RuntimeError(
                             "grouped LearnAlign feature path is unavailable"
@@ -503,6 +525,7 @@ class PromptGradientEstimator:
                     )
                     host_features = np.asarray(jax.device_get(features))
                 elif execution_mode == "legacy":
+                    train_example = self._with_reference_logps(train_example)
                     features = legacy_feature_fn(
                         self.rl_cluster.actor_trainer.model,
                         train_example,
@@ -512,6 +535,11 @@ class PromptGradientEstimator:
                     raise AssertionError(
                         f"unexpected feature execution mode: {execution_mode}"
                     )
+            if not np.isfinite(host_features).all():
+                raise FloatingPointError(
+                    f"{self.method} selector produced non-finite features in "
+                    f"prompt chunk starting at {start}; refusing silent top-k"
+                )
             all_features.append(host_features)
             all_clean_outcomes.append(clean_outcomes)
             all_selector_rewards.append(selector_rewards)

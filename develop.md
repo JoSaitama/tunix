@@ -11952,3 +11952,227 @@ This file tracks engineering changes made in this repository.
 - 输出与资源：`logs/projection_audits/audit_TIMESTAMP.XXXXXX/report`含audit_report.json、prompt_audit.jsonl、scores_and_cosines.npz，外层stdout.log；默认raw临时总容量预算8GiB（含组合副本），完成报告后仅删除本审计新建的candidate/reference/combined_raw.npy，`--keep-raw`保留。异常时scratch可保留供排查，不触碰训练checkpoint。首批原梯度输出的TPU HBM风险仍需服务器smoke验证。
 - 验证命令与结果：bundled Python `python -m my_example.audit_alignment_projection --self-test` PASS；CPU随机样本验证分块Gram、LearnAlign/GradAlign精确score与已有scoring一致、current/control hash与逐坐标实现一致，PASS；`py_compile`、`bash -n`、`git diff --check`通过；已有alignment scoring/config/curriculum/mismatch/equivalence共18项测试全部通过。未在本地执行TPU/checkpoint恢复和完整审计，不声称服务器检查已通过。
 - 使用计划/风险：待seed42两方法结束并查看结果后先LearnAlign32/64候选smoke，再128；GradAlign先小batch再完整160候选+30参考。读取的模型为事后checkpoint而非历史warmup状态；LearnAlign子池top-k只是局部诊断。仅支持现有TFDS Gemma/LoRA路径，metadata未记录的model/LoRA/data选项沿用冻结默认，非默认运行需显式传入对应原配置。源checkpoint不存在时需指定实际actor/.../model_params路径，不支持将merged model目录冒充LoRA checkpoint。
+
+## 2026-09-18 — 诊断32候选投影审计磁盘预算退出与模型缓存日志
+
+- 改动范围：无代码改动；仅更新`develop.md`，按用户服务器trace核对审计预算和模型加载。
+- 修改文件：仅`develop.md`；训练、审计实现和参数默认均未修改。
+- 原因：32条raw LoRA梯度预计5.99GiB；当前LearnAlign原梯度文件与combined副本各占一次，峰值约11.98GiB。默认总预算8GiB为candidate原文件分配4GiB，因此5.99超过有效4GiB，报错文字未显示分配后额度易误解。发生于first chunk feature计算后、raw memmap创建前，不是TPU HBM OOM或projection fidelity失败，尚无audit_report结论。
+- 无代码替代：先查服务器df；若空闲≥约14GiB，可使用candidate32+max-raw-disk-gb16（仅审计磁盘预算，不改训练/算法）；空间不足可先candidate16，预计raw约3GiB、两副本合计6GiB，默认8GiB预算可容纳，但样本代表性更弱。实际后续内存/耗时/验证是否过尚未知。
+- 模型解释：model.download_model无条件打印Downloading并调用snapshot_download；服务器Fetching10在00:00完成且返回已有HF cache snapshot路径，符合缓存命中，不是重新下载整套模型的证据。审计新进程仍需加载base weights并恢复LoRA checkpoint；可在缓存完整时用HF_HUB_OFFLINE=1禁止Hub联网，缺缓存时应报错而非下载。
+- 验证命令与结果：只读核对collect_gradients预算、run分配及model.download_model；查阅HF Hub下载/环境变量官方文档；`git diff --check`通过。未访问服务器df、未重新运行TPU审计。
+- 已知风险/待办：默认审计总预算低于本模型32样本实测规模、错误提示欠清晰，独立审计存在可优化的raw副本开销，但本轮未获实现修复授权；不得只提高预算而不确认实际可用磁盘，不删除训练结果/checkpoints/HF缓存来盲目腾空间。
+
+## 2026-09-18 — 确认18GiB空闲可重试32候选审计
+
+- 改动范围：无代码改动；仅更新`develop.md`。
+- 修改文件：仅`develop.md`。
+- 判断：用户df显示根盘与repo同盘、Avail18G。32候选临时梯度两副本预计11.98GiB，加512MiB保留仍有余量；无需删除训练checkpoint或HF缓存。用`--max-raw-disk-gb 16`放宽脚本预算，该选项不预分配16GiB也不改变selector/training配置。
+- 验证命令与结果：根据用户`df -h /`与`df -h .`及前次5.99GiB估计核算，`git diff --check`通过；未访问服务器或重跑TPU审计。
+- 已知风险/待办：18G为df近似值，其他进程写盘可减少余量；正常生成报告后删除本审计raw临时文件，异常中止可能保留scratch。空间允许不等于投影检查已通过。
+
+## 2026-09-18 — 解读seed42 LearnAlign32候选审计的双重false
+
+- 改动范围：无代码改动；只读解析用户上传完整audit_report JSON，仅更新`develop.md`；未放宽阈值或修改训练/审计实现。
+- 修改文件：仅`develop.md`。
+- 来源：seed42 mismatch0.2 final checkpoint actor/691/model_params，32候选，原LoRA维度50266112，wall417.43秒。仅事后小子池审计，不是历史2764候选selector恢复。
+- false原因：提取路径相对行误差0.00070024低于1e-3，LoRA权重不变；CPU hash mirror最大相对行误差0.00128403高于1e-3，导致implementation_checks false。另current pairwise cosine非近零符号一致率39/45=0.866667低于0.95（5对反号、1对变近零），即便放宽镜像阈值整体仍不通过。不能归因于Spearman未过。
+- 有利结果：实际LearnAlign score Spearman0.997829、非近零score符号10/10一致、top8 overlap/Jaccard1.0、selected mismatch皆25%，但顺序不一致（前三名位置交换）。current cosine p95误差0.0138367、最大0.0444069；分数最大绝对误差0.000178091，精确cutoff gap0.000613130，有2E<gap，对本次计算出的top8身份稳定提供明确边界证据，不保证未来/历史池。
+- zero解读：32中22原梯度为零且22当前feature为零，score非近零10个；9个V>0 score0全部原梯度0，无非零原梯度压缩成zero feature的记录分类。支持这些9个zero不是压缩导致，不能外推之前834条记录。零分tie可使全32 Spearman显得更高，需非零子集rank才评估有效信号内部排序。
+- 对照与限制：两个去耦合sign controls同样top8一致、score符号一致，但pairwise cosine sign agreement分别0.866667/0.844444，说明本批观察到的反号并非当前耦合hash独有；不能因此证明耦合无害。451/496pair近零，汇总mean/p95可能被zero pairs稀释；需NPZ查看非零pairs的幅值及误差、有效score分布。小子池LearnAlign含self项V_i²/N且全池平均方向不同，不能把32top8稳定等同2764top688稳定。
+- 验证命令与结果：bundled Python解析完整JSON（省略leaf sizes打印其余字段）、核对默认pass gates及数值边界；`git diff --check`通过。未新运行TPU或原梯度审计。
+- 已知风险/待办：镜像误差可能来自float32/float64累加与归约差异，但未单独验证不能断言只是roundoff；此结果不要求立即重训，也不满足全局无误差证明。建议保留报告并区分选择稳定性证据与几何保真限制，不为获得PASS任意放宽阈值。
+
+## 2026-09-18 — 估算128候选及GradAlign完整轮审计磁盘并建议先优化审计
+
+- 改动范围：无代码改动；仅更新`develop.md`，根据实测原LoRA维度50266112核算float32磁盘量。
+- 修改文件：仅`develop.md`。
+- 容量：单prompt原梯度约0.1873GiB；当前raw文件+combined副本的峰值LearnAlign32约11.98GiB、LearnAlign128约47.94GiB；GradAlign32候选+30参考约23.22GiB、完整160候选+30参考约71.16GiB（另需空间保留）。18GiB空闲不能安全运行后三种，增max-raw预算不会增加物理容量。
+- 建议：补充更大LearnAlign池及独立GradAlign审计有价值，不能把LearnAlign结论外推GradAlign；先仅优化新审计文件的存储，不删除冻结结果/HF缓存或改训练selector。去重复combined文件可减半但128单份23.97GiB、190单份35.58GiB仍超过18GiB；需要CPU参数分块Gram与按实际非零raw rows存储等保持精确参照的设计，或扩独立临时磁盘，不能以参数子采样冒充精确全LoRA内积。
+- 无代码短期替代：串行重复不同sample-seed的32prompt LearnAlign审计，每次完成自动释放raw，占用不叠加；不保证样本不重叠，且多个32子池的局部top8不等于一次128子池top32（平均参考方向与self项权重不同）。GradAlign保持原30参考集时当前实现也存在显著磁盘压力，不建议为省盘无披露地缩小reference并作为正式保真结论。
+- 验证命令与结果：bundled Python按N×50266112×4计算上述单份及两副本容量；`git diff --check`通过。未优化脚本或新运行TPU审计。
+- 已知风险/待办：先前32中22raw rows0可支持零行跳过的存储优化，但更大池/GradAlign非零比例未知，不能据此保证峰值必低于18GiB；需预估/动态容量保护。审计修改不改变训练版本或现有结果，仍需独立正确性验证。
+
+## 2026-09-18 — 提供两个alignment baseline的评测结果统计命令
+
+- 改动范围：无代码改动；提供用户在服务器执行的独立统计命令，仅更新本日志。
+- 修改文件：仅`develop.md`。
+- 统计设计：识别learnalign/gradalign、seed0/5/13/21/42与mismatch0/0.2的results eval_accuracy meta；列出所有运行的pre/post三种accuracy、correct、total及文件路径。汇总采用跨seed样本标准差；同一方法/污染率/seed的重复有效运行不静默选最新或重复计数，暂停该组汇总并提醒人工选择。结果写入logs外时间戳目录，缺post或非完整1319评测不进入正式汇总。
+- 验证命令与结果：只读检查仓库状态；`git diff --check`通过。服务器结果未在本机提供，未实际扫描或统计服务器文件。
+- 已知风险/待办：统计不能解决新旧LearnAlign实现混用或证明结果可复用；用户须明确补跑seed0版本。删除/迁移训练目录前需备份results、selection、配置及日志，并保留后续投影审计要恢复的actor最终model_params checkpoint；本次不执行删除。
+
+## 2026-09-18 — 核对alignment清理与seed42审计所需checkpoint
+
+- 改动范围：无代码改动；只读核对alignment_main最终恢复/模型合并保存与audit_alignment_projection恢复路径，仅更新日志。
+- 修改文件：仅`develop.md`。
+- 结论：后续仅审计seed42时，其他已完成且已备份的seed checkpoint不是这次审计依赖；删除会失去其原LoRA重评测/投影审计/恢复能力。优先保留所有seed最终actor model_params、清理中间checkpoint；若空间仍不足，应先迁移再删除其他seed最终checkpoint。不把已导出TSV当实验全备份。
+- 必须保留：待审计条件/method的seed42 selection/run_metadata.json、最终checkpoints/actor/<effective_max_steps>/model_params完整目录及results/selection/log/config。clean与mismatch属于不同模型，不能用单个seed42替代所有条件。当前审计恢复Orbax LoRA而非model合并safetensors。
+- 验证命令与结果：rg/sed核对上述两个入口；`git diff --check`通过；未访问或删除服务器文件。
+- 已知风险/待办：不得清理正在写入的运行或仍需恢复的checkpoint；保留路径应从各run_metadata读取effective_max_steps而非盲目假设691。先用只读du确认实际空间，未提供批量破坏性删除命令。
+
+## 2026-09-18 — 解释alignment model合并导出与LoRA checkpoint区别
+
+- 改动范围：无代码改动；读取用户服务器du输出并核对model.save_merged_lora与alignment_main训练后导出，仅更新日志。
+- 修改文件：仅`develop.md`。
+- 结论：十个mismatch0.2运行各model约1.9G，最终actor/691/model_params各69M，全部checkpoint各138M。model为合并LoRA后的完整模型safetensors导出，适合部署/独立推理；checkpoint最终model_params为LoRA参数，当前审计使用base缓存+该checkpoint而不使用model。post评测发生在model导出前，删除已完成导出不会改变已保存指标。
+- 建议：对已完成、最终LoRA完整且精确base revision仍可取得的运行，可备份/清理不再需要的model导出；保留所有seed最终LoRA而非仅42，有助后续验证。十个导出合计约19G仅是du近似估算，不代表用户已删除或释放。18G+19G约37G仍低于当前128审计约48GiB峰值，需以实际df和单位为准，继续采用审计存储优化/外部临时盘。
+- 验证命令与结果：读取附件du；sed核对my_example/model.py与alignment_main.py调用和执行顺序；`git diff --check`通过。未删除服务器文件、未改训练/审计代码。
+- 已知风险/待办：移除完整导出后不能直接加载该导出推理，重建依赖原base版本、LoRA、配置及合并代码；HF原始模型缓存不作为重复导出清理目标，不清理正在写入的运行。
+
+## 2026-09-18 — 提供限定alignment已完成运行model导出的批量清理命令
+
+- 改动范围：无代码改动；按用户明确请求提供服务器清理命令，仅更新日志；未执行删除。
+- 修改文件：仅`develop.md`。
+- 命令范围：固定Project_8k/tunix/logs路径，锚定learnalign/gradalign、五个seed、显式mismatch0.2或0及八位日期六位时间格式，仅删除各匹配运行下model；不删除checkpoint/results/selection、HF cache、logs根目录。默认0.2，后续可切0；避免无边界通配符。
+- 保护：排除符号链接，检查metadata最终actor/model_params完整目录存在及1319 post评测，扫描当前可读取/proc命令行排除正在使用运行路径的进程，列出目标与du大小，要求交互输入DELETE_MODELS后逐个复查再删除。建议优先备份完整模型或确认base revision与LoRA/配置可取得后执行。
+- 验证命令与结果：`git diff --check`通过。未在本机创建/执行清理脚本、未访问服务器进程或磁盘。
+- 已知风险/待办：清理为永久删除而非回收站；/proc读取可受权限限制，必须由用户确认目标运行已结束，检查目录存在不等同恢复测试通过；清理释放量以df实际为准，不保证128审计空间已足。
+
+## 2026-09-18 — 修正清理命令交互终端r+非seekable问题
+
+- 改动范围：无代码改动；修正对话提供的清理命令确认输入片段，仅更新日志。
+- 修改文件：仅`develop.md`。
+- 原因：以文本更新模式r+打开/dev/tty后切换写入与读取，可能触发非seekable错误。改为独立w句柄提示、r句柄读取，保持逐目标复查及明确DELETE_MODELS授权不变。
+- 验证命令与结果：依据用户trace错误在确认读取阶段、shutil.rmtree循环之前，确认本次执行未删除任何目录；`git diff --check`通过。未在服务器执行修正命令或删除文件。
+- 已知风险/待办：需用户重新运行完整命令并在出现提示时输入带下划线的DELETE_MODELS；不可在当前shell直接输入该字符串当作命令。
+
+## 2026-09-18 — 37GB空闲后继续只读定位磁盘冗余
+
+- 改动范围：无代码改动；核对两个审计/验证脚本临时路径并提供服务器只读磁盘清单命令，仅更新日志。
+- 修改文件：仅`develop.md`。
+- 检查范围：根盘空间/inodes、logs/runs及projection_audits、/tmp/learnalign_equivalence.*与/tmp一级目录、个人cache、/home与/var一级目录；用sudo lsof +L1辅助确认已删除仍占用文件。文件系统挂载边界使用du -x避免跨盘误计。
+- 核对：失败projection审计可能留candidate_raw.npy/reference_raw.npy/combined_raw.npy，成功默认清理；feature等价测试使用/tmp/learnalign_equivalence.XXXXXX，需检查是否留model/checkpoint而非盲删所有tmp。两类JSON/NPZ报告保留，base model cache/最终LoRA不优先清理。
+- 验证命令与结果：rg核对脚本路径和unlink逻辑；`git diff --check`通过。用户37GB仅足够部分小审计，128当前约48GiB、GradAlign完整轮约71GiB峰值，未访问服务器或执行清理。
+- 已知风险/待办：收到占用清单后确定精确删除目标；本轮命令均只读，不自动删除缓存/他人目录或正在使用的临时文件。37GB与GiB单位差异、磁盘保留及其他进程写入需结合实际df评估，不能保证仅清理冗余能满足全部审计峰值。
+
+## 2026-09-18 — 按服务器37G空闲选择Learn64与Grad32候选抽样审计
+
+- 改动范围：无代码改动；读取磁盘附件并核对审计CLI/预算，仅更新日志。
+- 修改文件：仅`develop.md`。
+- 用户输出：十个mismatch0.2 model已成功删除，df37G；logs仅1.5G且本节点无projection_audits目录；/tmp2.8G主要memory_smoke2.0G，A/B残留六个各41M；pip578M，HF1.9G需保留；journal3.1G；他人home18G不在删除授权范围。现有数据没有足以安全直接清出55G的明显冗余证据，不建议勉强清理。
+- 容量：Learn64两副本23.97GiB，Grad32+30 refs23.22GiB，建议各预算max-raw-disk-gb32并依次执行；Grad64+30 refs35.21GiB，37G空闲过于接近不推荐直接跑。不缩减Grad30参考问题以省空间。
+- 解释：64可扩大32抽样证据但不是历史2764池等价证明；不同方法/候选子池测试范围需披露。成功默认释放raw后再启动下一项，失败先检查残留，避免叠加占用；脚本存在和self-test先核对，无审计目录不代表缺checkpoint。
+- 验证命令与结果：sed/rg核对预算分配、参考生成、CLI max-raw与清理行为；`git diff --check`通过。未运行服务器TPU测试/删除文件/改动训练。
+- 已知风险/待办：实际HBM/时间/审计结论未验证，磁盘空闲可能变动；Grad完整160+30约71GiB仍不适合本盘。32或64局部top-k不能当完整训练筛选一致性证明。
+
+## 2026-09-18 — 解读Learn64与Grad32/30投影审计及零分并列影响
+
+- 改动范围：无代码改动；解析用户两份完整JSON报告及64/62行prompt JSONL，核对审计gates与NPZ字段，仅更新日志。
+- 修改文件：仅`develop.md`。
+- Learn64：seed42 mismatch0.2 final691，score Spearman0.99970872、非近零score18/18符号一致、top16身份/Jaccard1.0但顺序不同，selected mismatch双方18.75%；46原梯度/feature为零，V0为25；21条V>0 score0全部原梯度0，未见非零raw被hash压零。最大score误差7.1581e-5而cutoff gap1.5897e-5，不能沿用前次32的2E<gap边界保证。false因提取误差0.00100792与CPU mirror0.00255922超过0.001，以及非近零pair cosine符号138/152=0.907895低于0.95（12反号2塌缩）。几何p95误差0.006696、max0.043136，含大量零pair；控制符号率0.92105/0.94737仍不足0.95。
+- Grad32+30：score Spearman0.995412844、非近零5/5符号一致、top8身份/顺序均一致，1正27零4负，top8为1正+7零，cutoff gap0，污染率双方0%；原梯度/feature零候选27，pair cosine10/10符号一致但有效pair仅10，p95误差0受零pair稀释。false仅implementation mirror0.001139865>0.001，提取0.000684267过；不要把warning或score rank视为失败原因。
+- 并列风险：全量Spearman包含大零分块，不能直接等同有效梯度内部排序。假设仅零分并列、其余非零无额外并列，可由报告反推Learn18非零rho约0.991744、Grad5非零rho约0.5；此为条件推算，需用户从现存scores_and_cosines.npz提取exact/current用现有rank_correlation确认，CPU秒级不需新TPU或raw磁盘。不把0.5条件结果写成已NPZ实测。
+- prompt核对：Learn64 mixed outcomes/nonzero advantages39，selected noise14/effective6；Grad candidate32 mixed/nonzeroadv11，noise6/effective3，ref30 mixed12、noise0，符合clean reference设置。mixed但raw0不自动归因于压缩；本审计不说明原梯度零的原因。
+- 验证命令与结果：Python解析全部上传JSON/JSONL、条件rank代数，sed核对NPZ字段exact/current和gates；`git diff --check`通过。未读取服务器NPZ或重跑TPU。
+- 已知风险/待办：上述结果支持这两个最终checkpoint抽样的入选集合稳定，不证明历史Learn2764top688或Grad每轮160top40/其他seed/clean一致；训练顺序也可能受rank影响，不立即要求重训也不称完全复现/JL保证。实现镜像误差源未定位，控制出现类似翻号不证明耦合无害；保留报告并披露确定性梯度哈希压缩及验证范围。
+
+## 2026-09-18 — 确认NPZ有效分数Spearman并建议扩充Grad独立候选
+
+- 改动范围：无代码改动；依据用户CPU NPZ结果解释并核对candidate-offset行为，仅更新日志。
+- 修改文件：仅`develop.md`。
+- 用户确认：Learn64非近零18项rho0.9917440660474718、最大误差7.1581059e-5；Grad32非近零5项rho0.5、最大误差0.02632703。前次条件推算得到实际确认，全量rho不应用于证明Grad有效分数排序近乎不变。
+- 结论：Learn支持该批有效排序/集合稳定但入选顺序仍不同；Grad该批仅一正分入选，其余七零分并列，四负分内部rank变化不改变当前top8，不证明历史筛选无影响，也不因rho0.5就断言模型结果失效。有效样本仅5，不外推总体误差或要求盲目重训。
+- 下一步：优先Grad32+原30参考、candidate-offset160新候选窗口，磁盘预算32、保持原最终模型和投影维度/种子不变；默认释放raw，先df确认≥约28GiB余量，不并行启动。若仍仅少量非零，考虑现存早期checkpoint而非不断扩大终点零分池；不缩小reference或修改训练配置。
+- 验证命令与结果：sed核对Grad候选[(offset+k)%len(train)]、heldout固定前refs项及rank_correlation；`git diff --check`通过。未再次运行服务器TPU审计。
+- 已知风险/待办：新窗口测试为最终checkpoint局部抽样，不恢复历史160候选筛选；绝对误差0.0263不代表性能下降2.63个百分点。实验可先保留为当前哈希压缩适配实现结果，但不可宣称原文完整梯度筛选严格等价。
+
+## 2026-09-18 — Grad offset160审计确认一次score反号及top8替换
+
+- 改动范围：无代码改动；解析上传完整报告和62条prompt记录，核对hash controls及compare_scores，仅更新日志。
+- 修改文件：仅`develop.md`。
+- 实际结果：相同seed42最终691、32候选source160–191/30固定clean参考；score rho0.653211、有效score5项符号4/5一致（1反号），27raw/feature零；exact top8局部[15,30,11,0,1,2,3,4]，current[15,30,0,1,2,3,4,5]，故source171正分被压缩成负分后丢弃，source165零分补入。overlap7/8=.875、Jaccard7/9=.7778；exact正3/current正2，maxscore误差.0197514。两者selected mismatch均0，但不能因此称集合等价。
+- false：不仅mirror.00110623>.001；score符号.8、rho.6532与overlap.875均未过。提取relative.000684267过、LoRA权重不变；报告不能把这些较小实现误差完全排除出敏感边界的影响。候选间pair cosine10/10符号一致仅覆盖candidate-candidate，不覆盖Grad score针对reference平均方向的cosine。
+- 对照：decorrelated control0/1均rho1、score符号1、top8身份/顺序均与exact一致，maxscore误差仍.0170195/.0274195；control0保持同bucket仅sign使用不同哈希stream，支持当前耦合sign设计是值得修正的因素，但小样本不能证明去耦合总体总是更优或历史性能影响幅度。不得宣称标准JL保证。
+- 机制：固定bucket合并产生碰撞交叉项，可翻转靠近0的reference cosine；27零分块使一个positive→negative跳过整个零分块，放大全量rank相关下降；精确cutoff gap0。需要读现有NPZ给出source171 exact/current/controls具体值，无新TPU，报告最大误差不一定属于该点，不能捏造符号前后数值。
+- prompt核对：candidate mixed/nonzeroadv12，hash污染7/effective2；reference mixed12、污染0；丢source171与补source165均未污染。变号非由于此次clean/mismatch链路切换，不能反推算法未筛净污染。
+- 验证命令与结果：Python解析全部JSON和JSONL，sed核对control0同bucket变sign；`git diff --check`通过。未修改训练/审计或运行新TPU测试。
+- 已知风险/待办：已出现当前hash改变局部选择的反例，不能再声称投影不影响筛选；不意味着所有已训练结果无效，但与完整梯度原算法不等价。短期保留明确披露适配实现的结果，若修复selector后改变选择必须按新版本重训受影响Grad实验，不可混用新旧seeds；不要通过放宽门限隐藏实质分歧。
+
+## 2026-09-18 — 确认Grad source171弱正alignment压缩反号数值
+
+- 改动范围：无代码改动；解释用户NPZ非零五项输出，仅更新日志。
+- 修改文件：仅`develop.md`。
+- 数值：source171 exact0.009322910/current-0.004088310/control0 0.007437718/control1 0.036742404；current误差-0.013411220。原始为弱正cosine，不应称强有益更新，反号却超过诊断score eps1e-8而非仅机器零；source175 exact.119391338/current.099639923，179 -.109934618/-.117973532，190 .040342538/.044781300，191 -.039682606/-.056665275，其他四项不反号。
+- 机制与解释：Grad为top-k并非额外正分阈值；本批27零分使171从正分进入负分后丢弃，165零分补位，1/8选择变化是局部实测而非总体12.5%误选率。control0同bucket去耦合sign保持171正号且误差-.001885192；control1虽正号却过估.027419494，符号正确不代表数值保真。已提供反例足以否定投影完全不改变选择，无需为此反复扩终点样本。
+- 结论：不能据此量化终性能/旧结果是否相对原文偏高低；冻结结果可作为明确披露的压缩适配基线，不宣称严格复现或全训练无影响。修复投影必须作为新selector版本验证并重训需要对比的新结果，不默认复用旧Grad seed0，也不能自动证明Learn历史筛选无影响。
+- 验证命令与结果：核算用户给定五项分数与反号误差、对照误差；`git diff --check`通过。未修改训练/审计实现、未运行新测试。
+- 已知风险/待办：现有implementation mirror误差仍待定位；单点弱正并不代表真实有益/有害性能，不能把保留率或cosine大小当因果证据。
+
+## 2026-09-18 — 待用户批准的论文对齐selector修复范围
+
+- 改动范围：无代码改动；用户明确要求先报告修复计划再批准；只读核对两篇本地PDF相关完整公式页、gradient_features/scoring/curriculum/alignment_main与GRPO loss，仅更新日志。
+- 修改文件：仅`develop.md`。
+- 原文核对：LearnAlign Eq7包含KL coefficient与逐response token平均，Eq8 V_i V_j projected cosine含j=i rowmean；当前feature score_config强制beta0。GradAlign 4.3/Algorithm1为1/k sum A grad logpi(response)、validation先raw mean后cos、每轮重采样，不要求当前feature hash；4.5实验selector不含KL。当前GRPO默认sequence-mean-token-mean与Grad sequence logprob sum不同，是算法梯度定义差异而非仅参数差异。
+- 推荐批准范围：新独立selector objectives拆Learn(包含冻结beta对应reference logps KL与token mean)/Grad(无KL sequence token sum)；Grad在LoRA tree空间分块精确reference平均/candidate点积与范数，TPU只返回标量scores，不存全池raw/CPU大矩阵；Learn按原文random projection实施固定seed分块Rademacher正负一矩阵1/sqrt(D)，避免密集P×D整体分配，保留D4096与当前4rollout backwards。论文未唯一规定该随机矩阵分布，仍披露本实现；不把两stream单bucket CountSketch写作原论文唯一实现或JL保证。
+- 其他必要范围：排查mixed outcomes但raw0的有效completion mask/每completion梯度/mean cancellation，不人工给zero加epsilon或剔除；记录projection/selector/objective version、seed、可训练空间、KL与归一化及非零统计；对应审计与新tests支持方法特定目标/新旧对照，不靠放宽阈值变PASS。保护原eval_accuracy schema和frozen基线框架。
+- 不改变：现有真实GRPO dense update及mismatch链路、模型/LoRA冻结配置、4×4/LR/KL/691/eval1319，q4/selection interval10/validation30与selector rollouts；Learn一次warmup后静态subset、Grad固定参考身份每轮fresh responses，评分rowmean/cosine和top-k不改。不自动更换validation问题、加正分阈值或nearzero死区。
+- 预计文件：新增独立selector objectives/projection/exact alignment模块；仅接入alignment_baselines/gradient_features.py、curriculum.py、alignment_main.py，新增tests并更新audit脚本/version和develop。不得修改robust_trainer、RLTrainingConfig、原冻结CLI或DTV/vanilla实现。
+- 验证命令与结果：读取PDF技能并用bundled pypdf完整核对Learn页5–6、Grad页3–6；rg/sed核对实际default normalization/KL/ref接口，`git diff --check`通过；未修改实现/生成新代码/运行服务器实验。
+- 已知风险/待办：Grad tree精确cos数学消除hash误差但浮点仍有误差，额外reference raw treefloat32约0.187GiB不代表总HBM，需先长序列smoke验证；Learn dense block random projection可能增加计算/编译开销，先profile，性能不可接受需另请批准fallback，不承诺固定速度或old seeds复用。两method目标/投影改变后旧结果应作为旧版本保存，正式新版本需重训，不改其他冻结methods；审批尚未收到。
+
+## 2026-09-18 — 澄清投影与OOM历史及beta0对零梯度的条件影响
+
+- 改动范围：无代码改动；按用户要求继续分析，不将正负号修复要求视为本轮实现授权，仅更新日志。
+- 修改文件：仅`develop.md`。
+- 参数约束：真实训练4×4/LR1e-6/KL.08/691、selector G/q/30reference/interval10/4096与既定seed/noise均以冻结实验为准，不改为论文参数或擅自增大D；Learn是否补原文selector KL为目标定义修复，必须用户另批准，不静默实施。Grad selector beta0符合原文主算法，不因真实trainer beta.08就统一加KL。上一轮建议精确Grad属于待批准范围，仍保持HBM分块并需实测。
+- 历史证据：175779f在a8ac7f0 HBM修复之前已包含当前同hash bucket/sign实现；Python抽取project_gradient_tree比较175779f与HEAD函数完全一致。a8ac7f0及后续修复为Learn backwards分块/调度，不是新加投影；其返出feature压缩可节省全池存储，但不能说为seed5 OOM才加入。相关逻辑设计问题应承担，不归咎用户参数。
+- Learn影响：共享project_gradient_tree意味着耦合哈希同样改变Learn projected cosine/score；64批非零rho.991744、top16一致仅局部有利证据，不保证2764全池或历史其他seed。fix为每个原坐标sign与bucket去耦合且固定seed，不对最终score取abs/翻号；sign只由bucket决定的设计应修复，两stream伪随机哈希是最小工程修复但不是论文全部投影实现保真证明。
+- 零梯度分析：g_loss=g_PG+beta*g_KL；beta0仅去掉第二项，不能使所有非零A的PG梯度自动为0。A=(1,-1)、两response Jacobian相同h时prompt mean( h-h)/2=0，若KL梯度非零beta>0可使总梯度非零；若PG本就非零beta0不导致零，若KL本也零加beta亦无效。beta0系数与测得KL数值0不是同概念。现有raw0记录无法区分相消、空mask、可训练空间/数值问题，需要逐completionnorm/mean和KLgrad对照，不人工添加KL以消除zero现象。
+- 原文核对：使用PDF阅读技能，完整读Learn第5页Eq7与Grad第5页4.3–4.5，确认Learn公式KL项/Grad实验不加KL。
+- 验证命令与结果：git log/show/diff、Python投影函数文本等同性true、sed核对hardcoded beta0/ref logps None；`git diff --check`通过。未修改selector或重新运行TPU。
+- 已知风险/待办：分块dense random projection的速度/HBM尚未验证，不作为用户已确认默认改动；当前继续讨论，修复正负号、方法特定objective/精确Grad与Learn补KL的最终范围需用户批准。
+
+## 2026-09-18 — KL配置传递与待决修复项影响清单
+
+- 改动范围：无代码改动；按用户要求确认参数来源并提供分级修复及实验影响清单，仅更新日志。
+- 修改文件：仅`develop.md`。
+- 配置证据：build_grpo_config已将cfg.grpo.beta传入GRPOConfig，alignment estimator接收该config；问题在_feature_function后续beta=0覆盖，而非缺少原参数传递。Learn若恢复KL应读取输入config.beta并生成reference logps，不另写死.08或更换CLI；Grad按主算法独立不含KL目标，真实training仍用同一配置beta。
+- 分级：必须修sign与bucket耦合（两method选择可能变）及不准确JL/version记录；若论文公式对齐则Learn补配置KL和Grad selector response logprob token求和（均改变评分目标）；Grad取消压缩/精确tree cosine与Learn正规block随机矩阵是可独立决策的实现路径，不把两者等同sign最小修复；mixed-adv raw0先诊断，不先加KL/epsilon/dropzero；审计CPU mirror归约误差先核对匹配同版本/同objective与零分块统计，不任意放宽门限。
+- 实验影响：算法/目标/投影改动都可能改变subset与训练顺序，固定训练参数不保证旧结果复用，正式新版本需独立训练；仅追加metadata或无副作用diagnostics不使旧指标自动失效。任何项对最终accuracy上升/下降无实测保证，不捏造幅度。
+- 不修/不变：冻结真实trainer、4×4/LR/beta/691/eval、q/selectorrollouts/interval/ref问题身份与既定mismatch保持；LoRA梯度空间为公平冻结训练框架的明确工程适配，不改为全模型训练。KL原文出处已在前轮核对，本轮只读代码配置链。
+- 验证命令与结果：rg/sed核对train.build_grpo_config与alignment estimator/config，`git diff --check`通过。未实现任何修复或修改CLI、运行测试。
+- 已知风险/待办：等待用户按编号批准范围，不能把分析建议视为已授权修改；dense投影/精确树计算具体速度HBM需benchmark，不能承诺资源开销。
+
+## 2026-09-18 — 提供已核对十个mismatch运行model目录清理命令
+
+- 改动范围：无代码改动；按用户明确清理授权提供服务器执行命令，仅更新日志，未执行删除。
+- 修改文件：仅`develop.md`。
+- 范围：附件中已列出十个learnalign/gradalign mismatch0.2运行的精确model子目录，不包含clean、其他运行、HF缓存、checkpoint/results/selection。命令固定repo根路径与完整运行名，预检查最终actor/691/model_params存在、model非符号链接，并要求输入DELETE_MODELS确认后执行；检查正在运行的alignment_main进程则中止。
+- 验证命令与结果：目标运行名来自服务器du附件，全部最终LoRA此前显示存在；`git diff --check`通过。未在本机或服务器执行清理，未确认服务器此刻运行状态。
+- 已知风险/待办：删除合并导出为不可直接撤销操作，重建需原始base版本+LoRA+配置；预计释放约19G不是实测清理结果，执行前自行确认进程状态、备份需求，执行后df确认。clean需要单独核对目标，不以通配符扩大范围。
+
+## 2026-09-18 — selector beta0历史及诊断6/7资源边界
+
+- 改动范围：无代码改动；继续分析，未修改训练、selector、审计实现，仅更新日志。
+- 修改文件：仅`develop.md`。
+- 历史证据：初始175779f版本已经在共享_feature_function覆盖beta=0并构造ref_per_token_logps=None，早于seed5 HBM修复。可以确认共享selector采用纯策略梯度目标并省去reference logps计算；不能从历史代码断言未记录的设计动机。此目标符合Grad主算法，但Learn原文KL项未被实现，属于需要明确披露/另行批准修复的目标差异，真实trainer仍读冻结beta配置。
+- 诊断6计划：独立只读冻结actor、不做optimizer update；先CPU从exact_gram对角线及prompt records定位mixed-adv/raw0，再对8–16个问题单次fresh rollout保存tokens/mask/reward/advantage，逐completion norm、prompt平均norm及相消比；Learn单独比较PG与配置beta对应KL梯度，不给Grad强加KL。旧审计未保存tokens，不能声称重新rollout恢复历史逐response原因。
+- 诊断7计划：先CPU重算现有NPZ的全量/非零分数符号、排序、top-k/ties和版本信息；必要时仅小批TPU同tokens/同参数比较production与相同float32归约顺序mirror。匹配归约只能解释数值镜像门限，不能消除已观测的Grad筛选符号反转。
+- 资源管理：维持当前Learn全8回答计算advantage、backward分为两个4回答子批，每批最多4prompt×4回答，不再启用legacy32 backward或保留整个候选池raw梯度/密集P×D投影。串行同步并及时释放临时引用，不与正式训练争用同worker；KL reference前向额外显存与新编译峰值需实测，16completion边界不是HBM必过保证。按实际device/编译内存报告预留10–20%容量余量，仅为工程预算目标。
+- 耗时：CPU小NPZ诊断通常很轻；TPU需要新编译/rollout及额外梯度计算，预计分钟至几十分钟规模但未经实测，不承诺准确墙钟或生产训练减速。单次诊断不代表给全部691步追加开销。
+- 验证命令与结果：git show核对最初beta/ref配置，sed/rg核对现有projection与4rollout分块配置；未运行TPU或改变任何算法。
+- 已知风险/待办：需用户批准后再新增独立诊断文件；现有审计零梯度只证明LoRA空间目标下为零，不自动证明mask/抵消原因。修复目标或投影可能改变正式筛选与结果，不能仅凭小样本测试宣布全部旧seed等价。
+
+## 2026-09-18 — 收敛待批准修复清单，移除诊断6/7
+
+- 改动范围：无代码改动；用户要求仅列修复项，不再开展advantage零梯度或审计镜像一致性诊断，仅更新日志。
+- 修改文件：仅`develop.md`。
+- 待批准范围：方法特定selector objective（Learn读取传入beta并计算reference logps；Grad保持无KL且按response token sum）；修复压缩bucket/sign耦合；明确Grad保留独立符号压缩为最小适配，或取消压缩使用原始LoRA树cosine为更贴近原文的替代路线。Learn继续投影时独立符号hash是最小修复，不声称等同原文随机矩阵；分块随机矩阵为另行决策且需资源评估的替代路线。
+- 资源约束：保留Learn8rollout优势全组计算、两次4rollout反向及当前4prompt边界，新增KL前向/精确树评分不保留全池raw梯度、不分配全尺寸P×D矩阵；HBM安全不能仅凭分块结构承诺，修复后小规模长序列测试仍必要，不属于已取消的额外诊断6/7。
+- 记录与测试：更新method-specific目标/projection/version metadata与不准确JL描述，保留eval与selection结构；仅相应单元测试和最小TPU smoke/HBM验证，不新增大规模审计文件或扩大审计数据。当前q/rollouts/interval/参考问题身份、真实trainer冻结参数、mismatch链路和其他methods均不变。
+- 验证命令与结果：rg核对gradient_features、scoring、curriculum、alignment_main相关函数；git diff --check通过。未实现任何修复，未新增诊断脚本或运行训练。
+- 已知风险/待办：目标或投影修复可能改变入选集合与顺序，修复前后结果需版本隔离；待用户批准具体实施路线。
+
+## 2026-09-18 — 实施六项selector v2最小修复与独立TPU/HBM预检
+
+- 改动范围：用户批准实施六项最小修复。仅alignment baselines新增/修改目标、投影、资源调度、metadata及测试；未实施原始Grad完整树cosine或Learn密集随机矩阵替代路线，未开展advantage零梯度/CPU镜像额外诊断。
+- 修改文件：`my_example/alignment_baselines/selector_objectives.py`（新增）、`projection_hash.py`（新增）、`gradient_features.py`、`curriculum.py`、`my_example/alignment_main.py`、`my_example/audit_alignment_projection.py`（历史v1审计版本保护）、`my_example/test_alignment_selector_hbm.py`（新增）、`my_example/test_alignment_selector_v2.sh`（新增）、`tests/my_example/alignment_selector_objectives_test.py`（新增）、`ALIGNMENT_SELECTOR_V2_HANDOFF.md`（新增）、`develop.md`。
+- 目标修复：Learn采用配置beta的逐response masked-token-mean(-A logpi + beta*k3 KL)，负梯度系数与原文Eq7 A+beta(ref/pi-1)一致，reference logps stop-gradient；Grad采用无KL的-A sum logpi response surrogate，不再复用token-mean GRPO selector。候选与reference统一负ascent(loss)梯度，因此双边cosine方向符号不变。真实GRPO update仍走原dense reward/配置KL/clip。
+- 投影修复：bucket hash坐标/leaf seed不变，符号使用leaf seed+0xD1B54A35的另一mix流，不再由bucket奇偶确定；保持固定experiment seed和4096维、逐leaf segment_sum，没有全尺寸P×D或全池raw梯度分配。描述为deterministic signed feature hash，不声称独立hash/JL保证；Grad compressed cosine仍是原始LoRA cosine近似。
+- HBM调度：Learn全8rollout先计算binary reward/noise/advantage，再按4rollout反向形成percompletion gradients、prompt mean、投影及子批平均，默认一次最多16completion；每reference微批至多4completion且每次block_until_ready，完成后才运行actor AD，避免异步前向重叠。生产numrollout>4路径亦强制bounded schedule；禁用legacy32 equivalence dispatch，nonfinite features直接报错而非静默top-k。
+- 记录：run_metadata selector_definition与curriculum summary记录alignment_selector_v2、signed_feature_hash_v2、方法beta/token reduction/objective、负梯度方向与LoRA空间，原eval_accuracy pre/post schema及逐response记录保留。历史审计实现属于v1，当前版本运行时明确拒绝不匹配，而非生成错误新旧比较；原git revision仍可用于历史审计。
+- 保持冻结：原config.py、train.py、RLTrainingConfig、robust_trainer及其他vanilla/DTV/DTV-Loo和formal启动脚本未改；训练4×4/LR1e-6/config beta/691/eval1319、selector q4/4096/8或4rollout、Learn300warmup计预算、Grad30固定reference与interval10、mismatch链路均不变。
+- 预检：新sh串行运行29项unit tests、双method×clean/noisy小数据10update smoke（仅测试减少data/warmup/eval）、验证meta/selection及pre/post各五项eval字段，再用seed5/noisy独立进程跑双method满长度HBM。HBM进程保留两步disposable真实update的train executable/optimizer状态，先实际rollout建立generation cache，再synthetic full configured prompt256/completion768、非零advantage、clean reference及2prompt尾批；不改旧cp、不导出大model、不存raw梯度。报告passed、compiler estimates（若可用）、device stats及headroom_verified；有完整peak/limit计数时默认要求10%余量，没有计数不声称测得余量。
+- 原文验证：PDF技能核对Learn页5–6 Eq7/8与Grad页3–6 onpolicy response PG/mean raw reference/cosine/no-KL；冻结LoRA空间及hash投影仍作为明确工程适配披露，不宣称无取舍严格复现。
+- 本地验证命令与结果：bundled Python `-m unittest discover -s tests/my_example -p 'alignment_*test.py'`：29项，27通过、2实际JAX项因本机缺JAX/Flax跳过；`-m py_compile`所有本次Python文件通过；`bash -n`新测试sh及原两个baseline sh通过；`git diff --check`通过。未在本机执行TPU、端到端训练或HBM测试；未提交或推送，提供用户执行命令。
+- 已知风险/待办：补KL新增reference计算与编译峰值、真实v2耗时需服务器实测；two-update stress不等于完整75warmup/later allocator轨迹，也不保证691步绝无OOM。计数不可用时仅证明此次执行通过，不能声称10%测量margin。四smoke合并model约8GB需磁盘预算。目标/投影均可能改变selected subset，应重新跑两个methods全部5seed，不与v1混为新算法结果。等待服务器unit/4smoke/2HBM全部通过后再启动正式矩阵。

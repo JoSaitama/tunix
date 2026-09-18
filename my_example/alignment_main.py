@@ -22,6 +22,7 @@ from .alignment_baselines.curriculum import (
 )
 from .alignment_baselines.data_utils import batch_examples, unbatch
 from .alignment_baselines.gradient_features import PromptGradientEstimator
+from .alignment_baselines.selector_objectives import selector_metadata
 from .auth import ensure_kaggle_login, maybe_init_wandb
 from .config import config_from_args
 from .data import batch_dataset, get_dataset
@@ -61,7 +62,7 @@ def _write_run_metadata(path: Path, *, alignment, cfg, max_steps: int) -> None:
     selector_noise = reward_rank_noise_config_from_env()
     adaptations = [
         "selection gradients are computed only in the actor LoRA space",
-        "full gradients use a deterministic sparse-JL feature hash",
+        "LoRA gradients use a signed feature hash with separate bucket/sign streams; no JL guarantee claimed",
         (
             "selector base rewards use binary exact correctness; selected "
             "training prompts receive deterministic within-group rank reversal"
@@ -69,6 +70,10 @@ def _write_run_metadata(path: Path, *, alignment, cfg, max_steps: int) -> None:
         "GradAlign held-out validation selector rewards remain clean",
         "actual updates retain the frozen dense reward and optional rank mismatch",
     ]
+    if alignment.method == "gradalign":
+        adaptations.append(
+            "GradAlign cosine is approximated in compressed LoRA space, not full raw-gradient space"
+        )
     if alignment.method == "learnalign":
         selector_backward_rollouts = min(
             4,
@@ -86,6 +91,13 @@ def _write_run_metadata(path: Path, *, alignment, cfg, max_steps: int) -> None:
         "experiment_seed": experiment_seed(),
         "seed_summary": seed_summary(),
         "effective_max_steps": max_steps,
+        "selector_definition": {
+            **selector_metadata(alignment.method, cfg.grpo.beta),
+            "projection_dim": alignment.projection_dim,
+            "projection_seed": experiment_seed() or 0,
+            "reference_forward_micro_batch_size": min(4, alignment.selection_micro_batch_size),
+            "backward_rollout_subbatch_size": 4,
+        },
         "reward_rank_mismatch": {
             "fraction": selector_noise.fraction,
             "seed": selector_noise.seed,
@@ -262,6 +274,7 @@ def main(argv: list[str] | None = None) -> None:
         projection_seed=experiment_seed() or 0,
         selection_micro_batch_size=alignment.selection_micro_batch_size,
         noise_config=selector_noise_config,
+        method=alignment.method,
         grouped_feature_estimation=(alignment.method == "learnalign"),
         grouped_rollout_subbatch_size=4,
         equivalence_report_path=(

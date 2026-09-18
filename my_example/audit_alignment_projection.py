@@ -285,6 +285,15 @@ def run(args, forwarded):
     # Set seeds before importing data/model code. Read source run, write elsewhere.
     run_dir = Path(args.run_dir).expanduser().resolve()
     metadata = json.loads((run_dir / "selection/run_metadata.json").read_text())
+    # This historical audit's raw-gradient objective/hash mirror is v1. Do not
+    # silently compare v1 raw gradients against the repaired v2 selector.
+    from .alignment_baselines.selector_objectives import SELECTOR_VERSION
+    if SELECTOR_VERSION != "alignment_selector_v1":
+        raise RuntimeError(
+            "This audit implements selector/hash v1 and is incompatible with the "
+            "repaired v2 code. Use the original git revision for historical audits; "
+            "use test_alignment_selector_v2.sh for v2 validation."
+        )
     alignment = metadata["alignment"]
     method = args.method or alignment["method"]
     if method != alignment["method"]:

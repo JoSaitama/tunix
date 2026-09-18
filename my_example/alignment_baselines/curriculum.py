@@ -187,7 +187,8 @@ class LearnAlignCurriculum(_BaseCurriculum):
                 ),
                 "selector_mismatch_scope": "all_training_candidates",
                 "training_reward": "frozen_dense_reward_with_optional_rank_mismatch",
-                "projection": "deterministic_sparse_jl_feature_hash",
+                "projection": "deterministic_signed_feature_hash",
+                **getattr(self.estimator, "definition", {}),
                 "gradient_feature_prompt_batch_size": self.train_batch_size,
                 "gradient_feature_rollout_batch_size": (
                     gradient_rollout_batch_size
@@ -450,7 +451,8 @@ class GradAlignCurriculum(_BaseCurriculum):
                     "training_reward": (
                         "frozen_dense_reward_with_optional_rank_mismatch"
                     ),
-                    "projection": "deterministic_sparse_jl_feature_hash",
+                    "projection": "deterministic_signed_feature_hash",
+                    **getattr(self.estimator, "definition", {}),
                     "rounds": summaries,
                 }
             )
