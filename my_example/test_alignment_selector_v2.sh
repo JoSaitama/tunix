@@ -27,7 +27,8 @@ for ALIGN_TEST_NOISE in 0 0.2; do
     ALIGN_TEST_RUN="$ALIGN_TEST_DIR/${ALIGN_TEST_METHOD}_mismatch${ALIGN_TEST_NOISE}"
     mkdir -p "$ALIGN_TEST_RUN"
     # Only shorten the dataset/warmup/evaluation for smoke tests. Keep selector
-    # rollouts=8/4, q=4, D=4096, Grad ref=30/interval=10 and real update=4x4.
+    # rollouts=8/4, Learn q=2 / Grad q=4, D=4096, Grad ref=30/interval=10
+    # and real update=4x4.
     TUNIX_MY_RESULT_DIR="$ALIGN_TEST_RUN/results" \
     bash my_example/run_alignment_baseline.sh "$ALIGN_TEST_METHOD" \
       --max-train-examples 80 --train-fraction 0.5 \
@@ -53,6 +54,9 @@ assert definition["selector_beta"] == (metadata["frozen_update_configuration"]["
 assert summary["selector_version"] == definition["selector_version"]
 assert summary["selector_beta"] == definition["selector_beta"]
 assert metadata["effective_max_steps"] == 10
+expected_q = 2 if method == "learnalign" else 4
+assert metadata["alignment"]["selection_ratio"] == expected_q
+assert summary["selection_ratio"] == expected_q
 assert (directory / f"{method}_selection.jsonl").stat().st_size > 0
 eval_files = list((directory.parent / "results").glob("*eval_accuracy*meta.json"))
 assert len(eval_files) == 1, eval_files

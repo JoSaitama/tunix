@@ -40,10 +40,35 @@ gradients together does not change their cosine or LearnAlign pairwise scores.
    completions. Per-completion gradients are differentiated before prompt averaging.
    Only compact features are transferred to CPU. Reference forward uses at most
    four completions per microbatch and finishes before actor backward.
-5. q=4, LearnAlign warmup=300, selector rollouts=8/4, GradAlign validation=30 and
-   interval=10 are unchanged in formal runs. Binary selector vs dense true-update
+5. Selection ratios are now method-specific: LearnAlign q=2 (approximately 50%
+   of the full training pool, rounded down to a multiple of the batch size),
+   GradAlign q=4 (25% of each round's candidate pool). LearnAlign warmup=300,
+   selector rollouts=8/4, GradAlign validation=30 and interval=10 are unchanged.
+   Binary selector vs dense true-update
    rewards, clean GradAlign reference and deterministic prompt-scoped mismatch
    remain disclosed adaptations. No extra label access was added by this repair.
+
+### Independent selection controls
+
+Both the Python entry point and the suite accept `--learnalign-selection-ratio 2`
+and `--gradalign-selection-ratio 4`. The suite requires these before its `--`
+extra-argument separator, and rejects a shared `--selection-ratio` override.
+The single-method entry point retains that legacy override for old smoke/verification
+commands; it affects only the method being launched. Resolved q is recorded in
+`run_metadata.json` under `alignment.selection_ratio` and in the method summary.
+
+Preview the exact seed/method/q routing without training or creating run directories:
+
+```bash
+bash my_example/run_alignment_baseline_suite.sh --seeds 5 0 13 21 42 \
+  --mismatch 0.2 --learnalign-selection-ratio 2 --gradalign-selection-ratio 4 --dry-run
+```
+
+Then remove `--dry-run` to train. Use `--mismatch 0` on the separate clean node.
+For 2764 training problems LearnAlign selects 1380; GradAlign's ordinary round
+selects 40 of 160 candidates for 10 updates. The final one-update round selects
+4 of 16. LearnAlign's 50% setting approximates the original paper's GSM8K
+best-reported 4000/7473 (~53.5%) data-size point, not a proven optimum here.
 
 ## Implementation map
 

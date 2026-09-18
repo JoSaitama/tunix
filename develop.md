@@ -12176,3 +12176,44 @@ This file tracks engineering changes made in this repository.
 - 原文验证：PDF技能核对Learn页5–6 Eq7/8与Grad页3–6 onpolicy response PG/mean raw reference/cosine/no-KL；冻结LoRA空间及hash投影仍作为明确工程适配披露，不宣称无取舍严格复现。
 - 本地验证命令与结果：bundled Python `-m unittest discover -s tests/my_example -p 'alignment_*test.py'`：29项，27通过、2实际JAX项因本机缺JAX/Flax跳过；`-m py_compile`所有本次Python文件通过；`bash -n`新测试sh及原两个baseline sh通过；`git diff --check`通过。未在本机执行TPU、端到端训练或HBM测试；未提交或推送，提供用户执行命令。
 - 已知风险/待办：补KL新增reference计算与编译峰值、真实v2耗时需服务器实测；two-update stress不等于完整75warmup/later allocator轨迹，也不保证691步绝无OOM。计数不可用时仅证明此次执行通过，不能声称10%测量margin。四smoke合并model约8GB需磁盘预算。目标/投影均可能改变selected subset，应重新跑两个methods全部5seed，不与v1混为新算法结果。等待服务器unit/4smoke/2HBM全部通过后再启动正式矩阵。
+
+## 2026-09-18 — 接收服务器v2预检通过，提供备份后清理及重跑顺序
+
+- 改动范围：无代码改动；用户报告ALL TESTS PASSED，要求清理已远端备份的旧结果及测试产物、按5/0/13/21/42重跑clean与20% mismatch双methods，仅更新日志。
+- 修改文件：仅`develop.md`。
+- 证据：读取附件68603108-e8e0-4a75-a9e6-c8af00df60ea完整Learn HBM JSON：passed=true，headroom_verified=true，selector v2/bucket-sign v2，seed5/noise.2，Learn beta.08/token mean，LoRA64，prompt256/completion768，8rollout/16completion backward。编译16completion program estimate33.86098GiB、尾批20.9208GiB；device buffer peak统计约4–5GiB不能当作涵盖全部XLA临时空间的完整峰值，不能把report约95% buffer headroom表述为真实整体余量。Grad通过来自用户终端PASS与ALL TESTS PASSED，未获取完整Grad JSON。
+- 清理范围：服务器命令仅筛选learnalign/gradalign+已指定5seed+noise0/.2+完整日期运行目录，读metadata明确跳过v2、无metadata/无法解码/链接/未知目录；唯一测试目录selector_v2_test.vQ6OAS先保留两个HBM JSON到validation_records后允许删除。固定repo/logs边界、在运行的同用户train/suite/test进程则停止、预览目标并要求/dev/tty确认已可读远端备份，才逐个删除。未实际删除任何本机或服务器文件；不触及HF cache、其他算法、整个logs、launch/套件状态或projection_audits。
+- 重跑：现有suite按参数顺序支持5 0 13 21 42且每seed Learn后Grad，无需改脚本或冻结参数。优先在两个不同节点分别noise.2/0，各10runs，勿同一worker并发。每磁盘单套model约19–20GB另cp/log，建议30GB起余量；同盘累计两套20runs需约50GB或分批已备份后清理，不能按单套30GB预算。
+- 验证命令与结果：sed核对附件与suite参数循环逻辑、git status确认当前clean；git diff --check通过。未启动训练、连接服务器/核查远端备份，启动建议基于用户预检PASS。
+- 已知风险/待办：远端备份可读性/完整性由用户执行前确认；v2 full691仍需观察Learn75边界。两节点需同一git revision/环境，各自确认可用磁盘；v1结果不与v2混作同一版本。
+
+## 2026-09-18 — 核对原文筛选比例与最佳测试点
+
+- 改动范围：无代码改动；用户要求正式重跑前依据原文确定两方法保留率，仅更新日志，未改变默认q或启动训练。
+- 修改文件：仅`develop.md`，保留已有未提交日志。
+- 原文证据：PDF阅读技能完整提取LearnAlign PDF第16页附录G/Table11，GSM8K/Qwen2.5-1.5B-Instruct测试规模100–6000及FULL7473；最高报告accuracy78.7对应top4000，即保留53.526%、过滤46.474%，top2000为78.3、FULL为77.0。top-p=.95是生成采样参数，不是保留率。此前两方法统一25%不能描述为LearnAlign原文最佳设置。
+- Grad证据：PDF第15页附录A/Table5数学、噪声、MMLU等q4保留25%，Countdown q20保留5%；第10页消融为cosine/inner-product、validation规模等，未报告保留率搜索证明q4最优，应称原文使用设置。
+- 本地验证：pypdf提取上述页及Grad第8–10页；读取alignment_baselines/config.py与curriculum.py，当前共同integer q4，Learn top-count向下对齐batch4。若后续选q2，2764池保留1380约49.93%，只是原文53.5%的邻近工程适配，不是严格同比例；此轮未实现或推荐将全套公共q2同时传给Grad。
+- 已知风险/待办：原文模型/候选池/噪声不同，53.5%不能保证本实验最优；用户若要求精确保留率或两方法独立默认值，需要下一轮明确实施，冻结真实update与评测参数不需改变。本次原文数值核查不涉及TPU/HBM新测试。
+
+## 2026-09-18 — 确认方法独立比例及Grad候选池语义
+
+- 改动范围：无代码改动；用户选择Learn保留50%(q2)、Grad保留25%(q4)，本轮解释当前实现，未更改配置或启动命令。
+- 修改文件：仅`develop.md`。
+- 验证命令与结果：读取curriculum.py的Grad __iter__，正常selection interval10×train batch4=40入选，candidate40×q4=160，每次按source_cursor从完整训练池循环取下一段160，筛选40支撑随后10updates；并非每轮全2764取25%。末轮691 budget剩1update，16候选选4。Learn q2对应2764//2再向下对齐batch4=1380，约49.93%。git diff --check通过。
+- 已知风险/待办：当前生产默认仍共用q4，用户选择尚未落地；后续需方法独立路由q2/q4，不能套件统一覆盖q2。候选轮次与training update需区分，25%是当轮candidate pool保留率而非全训练集保留率。
+
+## 2026-09-18 — 解释Grad完整训练池候选覆盖
+
+- 改动范围：无代码改动；澄清每10updates轮换160候选与全训练池覆盖，仅更新日志。
+- 修改文件：仅`develop.md`。
+- 验证依据与结果：基于已核对curriculum.py的source_cursor逐段取样及模len回绕逻辑；2764问题池每正常轮160候选，18轮足以覆盖全池，第18轮跨末尾回绕。691updates×4训练prompts×q4=11056候选访问，恰为2764×4；末轮候选16选4。覆盖仅指被评估，top-k未保证每个prompt曾进入真实训练。
+- 已知风险/待办：重复问题的评分随模型及新rollout变化，某些问题可多次入选、其他问题可能始终未入选；这不是每轮随机从全池抽样。训练代码与参数未改。
+
+## 2026-09-18 — 解耦Learn/Grad筛选q及训练套件启动
+
+- 改动范围：仅独立alignment baselines参数路由与脚本，Learn默认q2、Grad默认q4；未更改原训练config/CLI、robust_trainer、目标函数、梯度/HBM调度、mismatch、4×4真实update、LR/KL、691预算及pre/post评测。
+- 修改文件：`my_example/alignment_baselines/config.py`、`my_example/run_alignment_baseline.sh`、`my_example/run_alignment_baseline_suite.sh`、`my_example/test_alignment_selector_v2.sh`、`tests/my_example/alignment_config_test.py`、`ALIGNMENT_SELECTOR_V2_HANDOFF.md`、`develop.md`。保留已有未提交develop.md日志。
+- 实现：Python解析独立--learnalign-selection-ratio/--gradalign-selection-ratio为当前method有效selection_ratio；dataclass直接构造也按method默认，metadata原字段自动记录有效q。单方法保留旧--selection-ratio显式覆盖兼容旧验证命令。suite独立q flags须在--之前，每seed按methods顺序派发，拒绝公共/放错位置的q extras以防双method被一起覆盖；--dry-run只打印含seed/noise/q命令，不建立run目录/不训练。兼容macOS Bash3空EXTRA_ARGS与set-u。
+- 测试：新增8项默认/独立覆盖/legacy/无效q/套件seed顺序和路由/共享q拒绝/透传测试；smoke新增metadata及summary有效q断言。bundled Python unittest discover alignment_*test.py：37项，35通过，2实际JAX因本机缺JAX跳过；bash -n三个修改sh通过；clean五seed dry-run打印10条正确Learnq2/Gradq4命令；git diff --check通过。
+- 已知风险/待办：未在本机运行TPU或新端到端smoke，q不改变反向静态batch/rollout shapes，之前HBM调度测试仍相关但不是全训练OOM保证。Learn真实子集变化688→1380（49.93%），不能混用旧q4 Learn结果；Grad q4不变。用户按显式git文件清单提交推送，服务器pull后host tests/dry-run再nohup分节点clean/noisy矩阵，不运行并发同worker。

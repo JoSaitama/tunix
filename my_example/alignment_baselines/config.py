@@ -11,11 +11,13 @@ import argparse
 from dataclasses import asdict, dataclass
 from typing import Sequence
 
+DEFAULT_SELECTION_RATIOS = {"learnalign": 2, "gradalign": 4}
+
 
 @dataclass(frozen=True)
 class AlignmentBaselineConfig:
     method: str
-    selection_ratio: int = 4
+    selection_ratio: int | None = None
     projection_dim: int = 4096
     selection_micro_batch_size: int = 4
     learnalign_warmup_prompts: int = 300
@@ -26,6 +28,12 @@ class AlignmentBaselineConfig:
     gradalign_validation_rollouts: int = 4
     gradalign_selection_interval: int = 10
     artifact_dir: str = "./runs_xuesong/alignment_baselines"
+
+    def __post_init__(self) -> None:
+        if self.selection_ratio is None:
+            object.__setattr__(
+                self, "selection_ratio", DEFAULT_SELECTION_RATIOS.get(self.method, 4)
+            )
 
     def validate(self, *, train_batch_size: int) -> None:
         if self.method not in {"learnalign", "gradalign"}:
@@ -76,7 +84,16 @@ def parse_alignment_args(
         required=True,
         choices=("learnalign", "gradalign"),
     )
-    parser.add_argument("--selection-ratio", type=int, default=4)
+    # Legacy override affects only the selected method in this one invocation.
+    parser.add_argument("--selection-ratio", type=int, default=None)
+    parser.add_argument(
+        "--learnalign-selection-ratio", type=int,
+        default=DEFAULT_SELECTION_RATIOS["learnalign"],
+    )
+    parser.add_argument(
+        "--gradalign-selection-ratio", type=int,
+        default=DEFAULT_SELECTION_RATIOS["gradalign"],
+    )
     parser.add_argument("--projection-dim", type=int, default=4096)
     parser.add_argument("--selection-micro-batch-size", type=int, default=4)
     parser.add_argument("--learnalign-warmup-prompts", type=int, default=300)
@@ -95,10 +112,13 @@ def parse_alignment_args(
         default="./runs_xuesong/alignment_baselines",
     )
     args, remaining = parser.parse_known_args(argv)
+    selection_ratio = args.selection_ratio
+    if selection_ratio is None:
+        selection_ratio = getattr(args, f"{args.alignment_method}_selection_ratio")
     return (
         AlignmentBaselineConfig(
             method=args.alignment_method,
-            selection_ratio=args.selection_ratio,
+            selection_ratio=selection_ratio,
             projection_dim=args.projection_dim,
             selection_micro_batch_size=args.selection_micro_batch_size,
             learnalign_warmup_prompts=args.learnalign_warmup_prompts,

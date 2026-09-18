@@ -12,6 +12,7 @@ fi
 
 if [ "$#" -lt 1 ]; then
   echo "usage: $0 learnalign|gradalign [alignment/frozen GRPO args...]" >&2
+  echo "Independent q defaults: --learnalign-selection-ratio 2; --gradalign-selection-ratio 4" >&2
   exit 2
 fi
 

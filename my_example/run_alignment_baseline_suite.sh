@@ -10,12 +10,17 @@ usage:
     --seeds 0 5 13 21 42 \
     --mismatch 0|0.2 \
     [--methods learnalign gradalign] \
+    [--learnalign-selection-ratio 2] \
+    [--gradalign-selection-ratio 4] \
+    [--dry-run] \
     [-- extra alignment_main.py arguments...]
 
 The selector starts from binary exact correctness.  Under --mismatch, the same
 deterministic prompt-group rank reversal is applied to LearnAlign candidates
 and GradAlign candidates; GradAlign's held-out validation direction stays clean.
 Actual GRPO updates use the existing dense-reward rank reversal.
+LearnAlign keeps 1/2 of its full training pool; GradAlign keeps 1/4 of each
+round's candidate pool. --dry-run prints commands without starting any runs.
 EOF
 }
 
@@ -23,6 +28,9 @@ SEEDS=()
 METHODS=(learnalign gradalign)
 MISMATCH=""
 EXTRA_ARGS=()
+LEARNALIGN_Q=2
+GRADALIGN_Q=4
+DRY_RUN=0
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -50,6 +58,21 @@ while [ "$#" -gt 0 ]; do
       MISMATCH="$2"
       shift 2
       ;;
+    --learnalign-selection-ratio|--gradalign-selection-ratio)
+      if [ "$#" -lt 2 ] || ! [[ "$2" =~ ^[0-9]+$ ]] || [ "$2" -le 1 ]; then
+        echo "error: $1 requires an integer greater than one" >&2
+        exit 2
+      fi
+      case "$1" in
+        --learnalign-selection-ratio) LEARNALIGN_Q="$2" ;;
+        --gradalign-selection-ratio) GRADALIGN_Q="$2" ;;
+      esac
+      shift 2
+      ;;
+    --dry-run)
+      DRY_RUN=1
+      shift
+      ;;
     --)
       shift
       EXTRA_ARGS=("$@")
@@ -58,6 +81,15 @@ while [ "$#" -gt 0 ]; do
     *)
       echo "error: unknown argument '$1'" >&2
       usage >&2
+      exit 2
+      ;;
+  esac
+done
+
+for arg in ${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"}; do
+  case "$arg" in
+    --selection-ratio|--selection-ratio=*|--learnalign-selection-ratio|--learnalign-selection-ratio=*|--gradalign-selection-ratio|--gradalign-selection-ratio=*)
+      echo "error: pass method-specific selection ratios before --; a shared q is not allowed in the suite" >&2
       exit 2
       ;;
   esac
@@ -82,20 +114,35 @@ done
 
 SUITE_TS="$(date +%Y%m%d_%H%M%S)"
 SUITE_DIR="${ROOT_DIR}/logs/alignment_suite_mismatch${MISMATCH}_${SUITE_TS}"
-mkdir -p "${SUITE_DIR}"
 STATUS_FILE="${SUITE_DIR}/status.tsv"
-printf 'method\tseed\tmismatch\tstatus\texit_code\n' > "${STATUS_FILE}"
+if [ "$DRY_RUN" -eq 0 ]; then
+  mkdir -p "${SUITE_DIR}"
+  printf 'method\tseed\tmismatch\tstatus\texit_code\n' > "${STATUS_FILE}"
+fi
 
 for seed in "${SEEDS[@]}"; do
   for method in "${METHODS[@]}"; do
-    echo "Starting ${method}: seed=${seed}, mismatch=${MISMATCH}"
+    case "$method" in
+      learnalign) METHOD_Q="$LEARNALIGN_Q" ;;
+      gradalign) METHOD_Q="$GRADALIGN_Q" ;;
+    esac
+    if [ "$DRY_RUN" -eq 1 ]; then
+      printf '%q ' env "TUNIX_EXPERIMENT_SEED=${seed}" \
+        "TUNIX_REWARD_RANK_NOISE_SEED=${seed}" \
+        "TUNIX_REWARD_RANK_NOISE_FRACTION=${MISMATCH}" \
+        "${ROOT_DIR}/my_example/run_alignment_baseline.sh" \
+        "$method" ${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"} "--${method}-selection-ratio" "$METHOD_Q"
+      printf '\n'
+      continue
+    fi
+    echo "Starting ${method}: seed=${seed}, mismatch=${MISMATCH}, q=${METHOD_Q} (retain 1/q)"
     printf '%s\t%s\t%s\tstarted\t-\n' \
       "${method}" "${seed}" "${MISMATCH}" >> "${STATUS_FILE}"
     if TUNIX_EXPERIMENT_SEED="${seed}" \
       TUNIX_REWARD_RANK_NOISE_SEED="${seed}" \
       TUNIX_REWARD_RANK_NOISE_FRACTION="${MISMATCH}" \
       "${ROOT_DIR}/my_example/run_alignment_baseline.sh" \
-        "${method}" "${EXTRA_ARGS[@]}"; then
+        "${method}" ${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"} "--${method}-selection-ratio" "${METHOD_Q}"; then
       printf '%s\t%s\t%s\tcompleted\t0\n' \
         "${method}" "${seed}" "${MISMATCH}" >> "${STATUS_FILE}"
     else
@@ -107,4 +154,6 @@ for seed in "${SEEDS[@]}"; do
   done
 done
 
-echo "All runs completed. Status: ${STATUS_FILE}"
+if [ "$DRY_RUN" -eq 0 ]; then
+  echo "All runs completed. Status: ${STATUS_FILE}"
+fi
