@@ -11756,3 +11756,199 @@ This file tracks engineering changes made in this repository.
 - 修改文件：`my_example/alignment_baselines/gradient_features.py`、`equivalence.py`、`README.md`、`my_example/alignment_main.py`、`my_example/smoke_learnalign_memory_fix.sh`及`develop.md`。LearnAlign的rollout生成、binary/Mismatch reward、8-rollout advantage、projection seed、score、top-25%与真实训练不变；GradAlign不受影响。
 - 验证结果与顺序：Codex bundled Python运行alignment equivalence/config/scoring/curriculum/mismatch-flow共18项测试全部通过；目标Python文件`py_compile`、两个shell脚本`bash -n`及`git diff --check`通过。服务器必须先重跑32-prompt同rollout selected-set A/B；只有Jaccard为`1.0`才可考虑复用旧LearnAlign seed0。随后独立运行默认最大长度memory smoke确认不再OOM。
 - 已知风险/待办：分批仍会改变TPU/XLA的batch形状，因此A/B结果不能提前保证。若该路径仍改变selected set，不再继续放宽验收或拆小批次；改为完整`4×8` selector-only rematerialization或用统一内存适配重跑全部LearnAlign seeds。
+
+## 2026-09-15 — LearnAlign completion-gradient分批服务器验收结论
+
+- 改动范围：本轮仅审计服务器A/B与HBM smoke结果，无新的算法或训练代码改动；同步更新`develop.md`。
+- A/B结果：完整`4×8` legacy与`4×4 + 4×4` completion-gradient分批在32 prompts上的selected Jaccard为`0.7778`，top-8中index 0被index 5替换；score Spearman为`0.9842`，最小row cosine为`0.6269`。因此不能把旧legacy LearnAlign seed0与新分批路径的其他seeds混合作为同一个5-seed结果。
+- HBM结果：seed5、Mismatch-20%、8 selector rollouts的最大长度smoke完成两个training steps、model save、artifact export和最终summary断言，输出`PASS: 4x4 rollout-subbatch completion-gradient path completed`；未再出现104.96 GiB HBM OOM。
+- 实验决策：新路径已可作为统一的LearnAlign实现运行全5 seeds。可先运行seeds 5/13/21/42，然后仅补跑LearnAlign seed0；GradAlign未使用该分批路径，其旧seed0保持有效，无需重跑。
+- 已知风险/待办：唯一仍可尝试保留旧seed0的技术路线是保留完整`4×8`shape并对selector引入rematerialization/新的XLA内存调度，但其HBM是否足够、A/B是否一致都未知，而且会引入新一轮开发与TPU验证。在已知补跑seed0约需6小时的情况下，不建议冒这个风险；不应通过seed特殊分支、强制复用旧selected set或修改tie-breaking来规避重跑。
+
+## 2026-09-15 — Clean alignment baseline剩余seeds启动范围确认
+
+- 改动范围：本轮无训练代码改动，仅更新`develop.md`并明确clean实验重跑范围。
+- 结论：旧`4×8` legacy路径完成的clean LearnAlign seed0不应与新内存分批路径的其他seeds混合，后续需单独补跑；GradAlign未使用LearnAlign feature分批路径，已完成的clean GradAlign seed0可保留。
+- 启动范围：新suite只运行clean的seeds 5/13/21/42及methods LearnAlign/GradAlign；等该suite结束后，另行只补跑clean LearnAlign seed0。
+- 已知风险/待办：停止旧suite前需确认clean GradAlign seed0已完成training、model save、post-train evaluation与status写入；仅看到progress bar到100%不足以证明所有artifact已完整。
+
+## 2026-09-15 — LearnAlign/GradAlign论文算法与当前实现审计
+
+- 改动范围：无代码改动；只阅读两篇原文PDF、GradAlign官方仓库公开源码及当前alignment入口、curriculum、scoring、gradient features、数据/奖励链路，并同步更新本日志。
+- 修改文件：仅`develop.md`；冻结训练框架和新增baseline算法均未修改。
+- 审计结论：LearnAlign保留warmup、8-rollout binary success的`p(1-p)`、双边learnability加权cosine及全池Eq.8 row mean静态top-N；GradAlign保留每轮on-policy重新估计参考梯度、candidate与平均参考梯度cosine、top-M/q与周期训练。标准数据为2764 training prompts、308 held-out；GradAlign固定使用held-out前30个prompts，源数据先按42+experiment seed shuffle，非官方1319-test数据，也没有按难度或结果挑选。
+- 标准流程：LearnAlign300-prompt warmup占75/691 updates，筛选688/2764 prompts后循环训练剩余616 updates；GradAlign每普通轮160候选选40、训练10 updates，共70轮，candidate/reference各4 selector rollouts。真实update仍为4 prompts×4 answers及原dense reward/KL配置。
+- 必须披露的适配：LoRA子空间梯度、4096维确定性哈希投影、真实dense reward而非原binary训练、LearnAlign selector强制KL=0（原文Eq.7含KL项）、warmup计入总预算、GradAlign参考集/候选池/rollout规模及20% rank-reversal污染而非原文50%随机binary奖励噪声。不能表述为原文实验设置的严格逐项复现或保证所有差异仅为极小数值误差。
+- Mismatch审计：binary reward的组内rank reversal保持组均值和`p(1-p)`，但改变answer对应advantage与梯度；GradAlign参考保持clean，候选及真实training按相同prompt/seed hash污染。clean记录用于审计，不直接覆盖被污染selector reward。
+- 验证命令与结果：bundled Python执行`python -m unittest tests.my_example.alignment_scoring_test tests.my_example.alignment_config_test tests.my_example.alignment_curriculum_test tests.my_example.alignment_mismatch_flow_test tests.my_example.alignment_equivalence_test`，18项测试通过；静态核对上述源文件与论文公式。未在本地执行TPU/full-seed训练；这些测试不是全参数梯度与投影梯度筛选一致性的证明。
+- 已知风险/待办：4-rollout参考梯度方差、LoRA/哈希投影对排序的影响、LearnAlign selector KL省略需在论文适配细节披露；官方GradAlign梯度loss也使用response token mean，不能仅因论文写序列log probability就判定当前token mean独有偏离。新LearnAlign内存分批与旧路径selected-set A/B已失败，应沿用全seeds统一新实现与重跑旧LearnAlign seed0的既定决定。
+
+## 2026-09-15 — Alignment运行开销、validation刷新与top-K/q参数说明
+
+- 改动范围：无代码改动；静态评估两方法计算量、核对GradAlign原文§4.4/Algorithm 1/Appendix A Table 5及当前配置/curriculum，仅更新`develop.md`。
+- 修改文件：仅`develop.md`；未修改selector参数、训练预算或现有methods。
+- 计算结论：标准691 updates下，LearnAlign一次全池生成2764×8=22112条selector answers；GradAlign70轮共11056 candidate-prompt exposures，各4 answers共44224条，参考30×4×70=8400条，合计52624条，额外selector规模为LearnAlign的2.38倍。加入共同真实训练11056条answers后，生成数量代理为63680/33168≈1.92倍；不包含共同pre/post/周期eval，也不是严格墙钟或FLOP比。
+- 刷新结论：当前validation问题固定为同seed held-out前30个，运行期间不重新抽问题；每10个真实GRPO updates（起点0/10/.../690）重新生成参考answers并重算平均梯度。论文Table 5的Selection Interval (U steps)=10指update steps，不是每10个selection rounds更新validation题目。
+- 参数结论：`--selection-ratio 4`表示q=4、保留1/q=25%；top-K筛选数量由此派生，不是另一个独立selector CLI参数。LearnAlign全池top-K向下对齐batch4为688；GradAlign普通轮160选40，末轮16选4。生成`--top-k 64`是token decoding限制，与data selection top-K无关，eval greedy top-k=1亦独立。
+- 验证命令与结果：静态阅读alignment config/curriculum、generation config、run script及原文Table 5；整数计数与循环轮数交叉核对通过，`git diff --check`通过。未执行新的TPU训练或性能profiling。
+- 已知风险/待办：接近2倍墙钟仅由计算规模解释为合理预期，不证明所有时间都由算法必要开销造成；长短answers、vmap反向/投影同步、首次JIT编译及eval会改变真实比例。当前缺乏分阶段计时，不能给出优化空间或各项耗时的精确百分比。
+
+## 2026-09-15 — 25% prompt selection与5%/10% completion filtering可比性评估
+
+- 改动范围：无代码改动；核对fixed-filter比例、alignment配置与取样语义，仅更新`develop.md`。
+- 修改文件：仅`develop.md`；未改变正在运行的q=4矩阵或冻结配置。
+- 审计结论：random/reward的5%/10%是当前训练completions的排除比例；alignment的25%是prompt candidate selection的保留比例。LearnAlign静态688/2764缩小后续题目覆盖并重复训练，存在过强选择风险；GradAlign每轮160选40且仍进行10个完整4×4 updates，75%仅针对额外候选池，不代表永久删除全训练集75%或训练量减少75%。
+- 评估结论：q=4不能仅因采用默认值就认定为当前dense-reward GSM8K的最优预算，也不能仅凭75%就判定结果无效/不公平。论文须披露selection单位、候选/保留规模、691updates、独立prompt覆盖及额外计算；更低保留率可能提高纯度，也可能损失覆盖，需实验而非预设方向。
+- 参数限制：当前`selection_ratio`为大于1的整数，q=2只支持50%保留；90%/95%保留对应q≈1.111/1.053，无法通过现有CLI直接设置，不能误把`--selection-ratio 0.9`当作90%保留。若获授权实现细粒度keep fraction，需要独立baseline配置/候选整除规则和预算测试，而不改冻结methods。
+- 验证命令与结果：`rg`静态核对`run_reward_rank_noise_suite.sh`、`fixed_filter_trainer.py`、alignment config/curriculum及此前流程统计；`git diff --check`通过。未执行新训练、未声称任何keep fraction的效果已验证。
+- 已知风险/待办：主表对比不同筛选预算的算法不能被解释为同过滤率controlled comparison；如需控制预算归因，可另做prompt-level同预算random或小规模retention敏感性实验，但不应盲目重跑全部已冻结methods或中途切换正在运行的矩阵。
+
+## 2026-09-15 — 核实LearnAlign 0.95含义与两方法原文筛选预算
+
+- 改动范围：无代码改动；用PDF skill核对上传LearnAlign原文§5.1/Table 1/Appendix G Table 11及GradAlign Appendix A Table 5，仅更新`develop.md`。
+- 修改文件：仅`develop.md`；未调整q、保留率或正在运行的实验。
+- 原文结论：GradAlign多数设置q=4、每轮候选保留25%，Countdown例外q=20、保留5%。LearnAlign正文0.95为evaluation top-p，不是95%训练数据保留率；GSM8K主实验top-N为100/500/1000/2000，其中2000/7473≈26.8%，与当前25%接近；Appendix Table 11还比较3000/4000/5000/6000，最高表中结果为4000/7473≈53.5%。另一个0.95是LIMR耗时比较倍率，不是LearnAlign keep fraction。
+- 决策结论：不能以“恢复LearnAlign原文95%保留”为理由调整当前实现；25%有接近原文主实验规模的依据但不是算法固定值或当前Gemma/dense-reward/noisy任务已验证最优值。若调整，应定义为额外预算适配/敏感性实验。
+- 验证命令与结果：对已提取原文全文`rg -n '0\\.95|0\\.05'`及相应完整表格/上下文核对，`git diff --check`通过；未执行训练。
+- 已知风险/待办：原文subset比例并不保证当前更小候选池和不同模型/奖励下的性能；避免把token-level top-p与prompt-level top-N/q混为一谈。
+
+## 2026-09-16 — 核实LearnAlign静态top-N与GradAlign固定参考问题/动态梯度
+
+- 改动范围：无代码改动；使用PDF skill复核LearnAlign Figure 2/§4.4及GradAlign §4.4/Algorithm 1，与当前curriculum和入口逐项对照，仅更新`develop.md`。
+- 修改文件：仅`develop.md`；未修改训练逻辑或配置。
+- LearnAlign结论：原文描述warmup模型估计全池learnability/projected gradients、一次top-N选择、随后在selected subset上post-training，没有规定训练期间周期重新计算/更新top-N。当前warmup75步后选688prompts，循环取样完成剩余616updates，符合这种静态selection模式；不是无限训练，也不复用selector answers，真实训练每次重新生成answers/rewards/advantages。
+- GradAlign结论：原文Algorithm 1把参考问题集Pv作为固定输入，每轮对其中问题重新采样rollouts并重算平均参考梯度；没有基于模型难度/成功率重新抽参考问题的步骤。当前held-out前30个prompts固定，每10个updates更新其answers、binary rewards、advantages和梯度，同时重选candidate training prompts，符合该更新模式。
+- 验证命令与结果：阅读两原文相关方法段落、`curriculum.py`静态selector与round循环、`alignment_main.py`固定reference切片，`git diff --check`通过；未执行新训练。
+- 已知风险/待办：LearnAlign静态筛选可能产生后期评分陈旧，GradAlign固定小参考集可能出现全对/全错导致有效梯度减少，但这属于方法/估计限制，不能直接判定为遗漏原文动态换题步骤。动态更新LearnAlign top-N或动态重选GradAlign reference应视为另行授权的新变体，不能无披露地混入已冻结baseline。
+
+## 2026-09-16 — 解释固定LearnAlign问题子集如何支持多步RL训练
+
+- 改动范围：无代码改动；使用PDF skill核对原文2000-step selected-subset实验描述，与当前cyclic curriculum及GRPO rollout/update流程对照，仅更新`develop.md`。
+- 修改文件：仅`develop.md`；训练、selector及配置未修改。
+- 结论：top-N限定可采样问题身份，不限制更新次数；重复访问selected prompts时用当前模型重新生成answers、重算rewards/advantages并更新模型，可以进行多轮访问直到指定step budget。原文2000steps为更新预算，不是要求2000个不同问题或周期重新选top-N。
+- 当前数量：688selected prompts在剩余616updates中贡献616×4=2464次prompt访问，平均每题约3.58次；真实training每题访问生成4answers，不复用selector阶段8answers。一般GRPO同一rollout内部多次优化可以复用回答，当前num_iterations=1；不能泛称所有GRPO每个optimizer子步都必定重新生成。
+- 验证命令与结果：静态读取原文实验段落、`curriculum.py`有限循环及`grpo_learner.py`rollout/update流程；`git diff --check`通过；未执行训练。
+- 已知风险/待办：多次访问可能偶然生成相同答案，重新采样不保证文本不同；重复训练题目与重新计算selection scores是两种独立操作。
+
+## 2026-09-16 — 区分论文说明、作者实现未知项与GradAlign动态性
+
+- 改动范围：无代码改动；使用PDF skill复核LearnAlign公开四步流程及GradAlign Introduction/§3.1/§4.4，对照当前selector代码，仅更新`develop.md`。
+- 修改文件：仅`develop.md`；冻结实现、候选预算及刷新频率不变。
+- 表述修正：LearnAlign warmup后一次全池top-N是公开算法说明支持的实现选择；论文未描述周期刷新，不能进一步保证未核验的作者训练脚本绝无未披露刷新。当前属于依据论文说明的实现加已披露适配，不是作者源代码级等价复现。
+- GradAlign动态性：原文明确针对RL非平稳性周期重算validation梯度、重评candidate训练问题，Pr/Sr随round定义；固定Pv并不使算法静态。当前每10updates更换候选训练问题、重采样双方answers和重选training subset，参考题目固定但梯度方向随模型变化。
+- 原因与推断：LearnAlign减少重复全池梯度估计的开销、GradAlign固定参考保持目标分布稳定，是合理工程/方法解释，不应冒充作者明确论证的唯一原因；重选reference可成为变体而不是论文禁止的操作。
+- 验证命令与结果：静态核对论文相关段落和`curriculum.py`一次ranking/round循环；`git diff --check`通过；未执行训练。
+- 已知风险/待办：当前GradAlign候选轮换为seed-shuffled pool上的确定性游标循环，是我们实例化候选池的方式，不应称为原文指定的唯一sampling策略；固定小reference仍可能出现有效梯度不足，动态性不保证最优性。
+
+## 2026-09-16 — 澄清LearnAlign selected池大小与单step batch大小
+
+- 改动范围：无代码改动；核对正式alignment启动脚本的batch4/generations4及`cyclic_batches`取样循环，仅更新`develop.md`。
+- 修改文件：仅`develop.md`；未修改训练或数据取样。
+- 结论：688是selected prompt pool总大小，不是单step batch；每个日志training step读取4prompts，每题生成4answers，共16completions。`cyclic_batches`每批仅取range(batch_size)的4个元素，游标前进4，688/4=172steps才遍历一轮，之后回到池开头。
+- 示例核对：warmup结束后全局step76取selected顺序1–4，step77取5–8，step247取685–688，step248回到1–4；616个selected训练steps对应3个完整遍历及100批，达到总691steps后结束。此顺序指当前selected列表位置，不是原数据集source index。
+- 验证命令与结果：静态读取`run_alignment_baseline.sh`、`train.py`、alignment curriculum/data_utils；`git diff --check`通过；未执行训练。
+- 已知风险/待办：prompt batch、展开后的completion batch与TPU内部microbatch切分是不同概念；解释batch4时需明确单位为prompts，不能把池688当作batch或把16answers当作16个不同问题。
+
+## 2026-09-17 — 汇总LearnAlign/GradAlign论文复现取舍与TPU实现边界
+
+- 改动范围：无代码改动；使用PDF skill核对两篇原文方法与参数，对照当前alignment实现，仅更新`develop.md`。
+- 修改文件：仅`develop.md`；未修改任何冻结训练、selector、投影或启动配置。
+- 算法保留：LearnAlign warmup后一次全池learnability p(1-p)加梯度余弦一致性排名、静态top-N训练；GradAlign固定参考问题集但每10updates重新rollout并更新参考/候选梯度、按cosine选top-1/q。当前q=4，LearnAlign选688/2764；GradAlign通常160候选选40，每题真实训练仍生成4answers。
+- 适配披露：统一Gemma-3-1b-it/LoRA、4prompts×4answers、LR1e-6、KL0.08、691updates；LearnAlign300prompt warmup计入预算，selector8rollouts；GradAlign参考30、双方selector4rollouts而非原文通常16（噪声参考更高）。selector仅policy梯度、KL系数0，LearnAlign不同于原文含KL梯度公式。selector使用binary correctness，真实训练保持原dense reward；20%稳定prompt-hash组内rank reversal不同于GradAlign原文50%问题随机奖励噪声。
+- TPU程度：使用JAX/Flax NNX自动微分、jit/vmap和原TPU训练/rollout链路，计算真实LoRA梯度后压缩4096维；CPU只接收投影特征做排序/记录，不承担模型反向传播。单worker4设备mesh沿用原框架，未实现作者多主机/PyTorch部署。LearnAlign内存分块保持8个answers共同算advantage，但数值/选择并非已证明与旧实现等价；旧LearnAlign seed0需要新路径重跑，GradAlign旧seed0未因该修复改变。
+- 新核查风险：`project_gradient_tree`的bucket=mixed%4096、sign取mixed最低位，符号完全由bucket奇偶决定，同桶坐标符号不独立；因此只能准确称为当前确定性哈希压缩，不能声称标准独立符号JL/CountSketch保距保证。该问题对筛选和性能影响尚未量化，本次未修复，需独立投影保真验证后定稿论文实现描述。
+- 验证命令与结果：bundled Python运行`python -m unittest tests.my_example.alignment_scoring_test tests.my_example.alignment_config_test tests.my_example.alignment_curriculum_test tests.my_example.alignment_mismatch_flow_test tests.my_example.alignment_equivalence_test`，18项通过；静态核对原文和配置，并对4096维bucket/sign奇偶关系进行算术核查；`git diff --check`通过。
+- 已知风险/待办：单元测试不证明投影保真或完整TPU五seed矩阵完成；统一update预算不等于统一selector算力预算；LearnAlign原文无作者代码级等价保证，两个baseline应表述为保留核心评分规则的JAX/TPU适配实现，不是原实验设置的严格复现。
+
+## 2026-09-17 — 评估哈希投影符号耦合影响与免完整重训审计方案
+
+- 改动范围：无代码改动；只读核对gradient_features、scoring、curriculum和现有artifact字段，查阅feature hashing原始论文，仅更新`develop.md`。
+- 修改文件：仅`develop.md`；未改变在跑实验的投影、筛选或训练配置。
+- 确认影响：4096维时当前符号只依赖bucket奇偶，是对无符号bucket-sum特征的固定逐维翻转；点积/范数/余弦均与无符号bucket-sum相同。跨坐标collision项不会由独立符号在期望中消除，可能扭曲LoRA梯度相似度、排序和selected prompts；不直接替换真实GRPO训练梯度，也不影响DTV等原方法。误差方向/大小依赖真实梯度，不能从维度4096或当前performance推断可忽略。
+- 免完整重训方案：在同一冻结checkpoint、同一批生成tokens/rewards/advantages及同一原始LoRA梯度上，对比精确LoRA内积/余弦、当前hash和bucket/sign去耦合的signed sketch（多个hash seeds）。先用随机32–64个train prompts测geometry，再扩128–160个做评分/selection审计；GradAlign一轮完整160候选+30参考可以直接审计该轮top40，LearnAlign子集只能作为局部评分/几何诊断，不证明原2764全池top688相同。全程不更新模型、不重复rollout改变对照条件、不增大TPU梯度microbatch以规避HBM问题。
+- 可用性边界：当前JSONL没有原始梯度/4096维features/tokens，不能仅凭summary、边界gap或旧分块A/B证明hash保真。已有final/step500checkpoint可作事后审计，但若无step75 checkpoint和历史tokens，则不能声称恢复LearnAlign历史selector状态或证明所有历史selection不变。
+- 报告指标：原空间与sketch余弦绝对误差/符号一致率（近零分开）、实际method score Spearman、top-k交集占比与Jaccard、cutoff margin、selected污染比例，重复多个小批/可用checkpoints。阈值只能作为事前诊断标准而非通用论文保证；high rank agreement不证明训练performance不变。
+- 验证命令与结果：静态读取`project_gradient_tree`、selector scoring和JSONL writer；原文Feature Hashing for Large Scale Multitask Learning Definition1/Lemma2确认signed hashing的无偏点积论证；`git diff --check`通过。无服务器checkpoint/梯度可访问，未实际执行TPU审计，未给出实际误差结论。
+- 已知风险/待办：若审计误差小，可披露当前hash adaptation及审计范围并保留已有结果，不能称严格等价；若明显改变排名，应修正实现后重跑受影响新baseline或降级为明确标注的近似变体/附录结果，不能只更名JL掩盖差异。本次未新增验证脚本，后续需独立read-only审计文件而非改训练入口。
+
+## 2026-09-17 — 用公式与toy梯度解释bucket奇偶符号的固定性及排序影响
+
+- 改动范围：无代码改动；仅更新`develop.md`，未修改训练或投影实现。
+- 修改文件：仅`develop.md`。
+- 固定性：当前projection_seed为experiment_seed；同一seed、维度和梯度tree结构下坐标hash/bucket/sign在所有prompts和steps固定。4096为偶数使mixed%4096与mixed同奇偶，故sign=(-1)^bucket；不是每个step重新抽正负号，也不是由梯度数值正负决定。不同实验seed可改变bucket映射，但不能消除sign耦合。
+- 数学核对：当前特征phi_b(g)=(-1)^b sum_{i:h(i)=b}g_i，点积中bucket符号平方为1，额外collision项sum_{i!=j,h(i)=h(j)}g_i f_j仍保留。因此同bucket求和可能改变cosine甚至符号及ranking，不直接修改真实training梯度。原始负坐标仍有负值，不能误述为把梯度取绝对值。
+- Toy结果：同桶g=(1,0)、f=(0,1) cosine0→1；g=(2,-1)、f=(-1,2) cosine-0.8→1。两桶映射h=(0,0,1)、phi(x)=(x1+x2,-x3)，参考r=(1,0,1)，A=(1,-1,1)、B=(0,1,1)原cosineA0.8165>B0.5，当前压缩A0.7071<B1，展示top1可改变。全部为构造性反例，非本实验实际误差估计。
+- 验证命令与结果：bundled Python纯算术核对toy cosine，结果如上；静态核对projection_seed传入和bucket/sign代码；查阅scikit-learn feature hashing官方说明独立符号的作用；`git diff --check`通过。
+- 已知风险/待办：独立signed hash只提供在适当随机性假设下的内积期望性质，不保证单个压缩结果或cosine精确；实际4096维真实梯度误差仍需同梯度审计，toy反例不证明已有实验全部失效。
+
+## 2026-09-17 — 区分初始梯度压缩与HBM修复并评估结果使用边界
+
+- 改动范围：无代码改动；仅更新`develop.md`，按用户要求不修改任何实现。
+- 修改文件：仅`develop.md`。
+- 历史核对：`git show 175779f:my_example/alignment_baselines/gradient_features.py`已包含4096维bucket/sign投影及当前符号耦合；该提交早于`a8ac7f0 Fix LearnAlign selector HBM overflow`。因此压缩不是OOM修复才引入，早期即用于紧凑相似度计算、避免存储全池全维梯度和稠密投影矩阵；HBM修复主要改变LearnAlign反向分批/调度，未更改projection维度和hash规则。
+- 修改评估：若目标是带独立符号的hash sketch，应解耦坐标sign和bucket，保持4096维、已有分批、reward/selection预算与真实trainer不变；核心几行，连同单元测试、审计及metadata说明属于局部修改。仍有一般压缩误差，正确signed hash不等于原始梯度严格保真；TPU速度/HBM实际变化需测量，不能无证据保证。
+- 结果边界：当前训练和eval是真实当前实现的结果，不因该问题自动作废，但尚不足以作为忠实LearnAlign/GradAlign复现证据。审计前保持所有seed同版本；审计影响小则披露近似及范围，影响大需重跑受影响两新baseline或明确降级近似变体/附录结果。不能无披露把新旧hash结果混合；原DTV等不受此投影问题影响。
+- 验证命令与结果：只读`git log`、`git show 175779f:...`、`git show --stat a8ac7f0`及相关开发记录；`git diff --check`通过。未运行新的梯度审计/训练，实际排名差异和performance影响仍未知。
+- 已知风险/待办：小范围代码修复不代表既有实验结果只需小范围替换；两个methods共享投影函数，真正改变投影可能同时影响二者，是否需补跑取决于可用验证证据及论文声明，不得声称GradAlign不受新投影修改影响。
+
+## 2026-09-17 — 用截图启动时间估算Mismatch-20%方法墙钟
+
+- 改动范围：无代码改动；按用户截图时间戳及suite串行顺序估算，仅更新`develop.md`；投影审计按用户意愿延后至seed42两方法结束并查看结果之后，本次不创建自动监控。
+- 修改文件：仅`develop.md`。
+- 耗时数据：LearnAlign seed0/5/13/21分别为6:15:01、6:22:26、6:35:19、6:10:39（启动至下一GradAlign启动）；GradAlign seed5/13/21分别为12:05:06、11:52:18、12:01:25（启动至下一seed LearnAlign启动）。GradAlign seed0到重启suite seed5的27:06:00包含中断/人工恢复区间，不作为连续运行估计纳入均值。
+- 均值：LearnAlign四次平均6:20:51；当前修复后seed5/13/21平均6:22:48；GradAlign三次平均11:59:36。GradAlign约为LearnAlign四次平均的1.89倍，或当前路径均值的1.88倍。
+- 预测：seed42 LearnAlign从20260917_065923开始，按当前路径均值下一GradAlign预计同目录时区2026-09-17 13:22左右启动，二者预计2026-09-18 01:22左右结束；为有条件外推，不证明进程当前状态或成功结束。
+- 验证命令与结果：Python datetime计算截图相邻启动时间差与均值；只读核对`run_alignment_baseline_suite.sh`按seed外层、method内层串行且失败退出；`git diff --check`通过。
+- 已知风险/待办：上述为含pre/post评测、selector、保存/导出的整次run启动间隔，非纯optimizer训练时长；服务器目录时间戳时区未确认，不能直接当北京时间；截图未提供GradAlign seed42启动或各run exit_code，最终完成/精确墙钟应以suite status与日志为准。LearnAlign旧seed0不同内存路径，正式效率报告应优先同版本样本。
+
+## 2026-09-17 — 从上传LearnAlign selection记录初步评估投影审计敏感点
+
+- 改动范围：无代码改动；只读解析上传`pasted-text.txt`的2764条LearnAlign候选记录，核对scoring/curriculum，仅更新`develop.md`。
+- 修改文件：仅`develop.md`；未新增脚本、未修改训练或开展TPU审计。
+- 统计：全池535正分、256负分、1973零分；入选688含全部535正分及153零分，无负分。153零分恰好为source顺序最早的153条零分记录，source_index最大210；selected min与dropped max同为0，边界gap0。零分填充占selected22.24%，其中96条V=0（全对40、全错56），57条V>0。
+- 非零learnability检查：1625条V>0，其中834条score恰为0（51.32%）；零score不证明原始/压缩gradient为零，也可能来自正交，需TB nonzero_gradient_fraction或features norms进一步区分。JSONL p、V公式和binary数值合法性均一致，组内binary总数保留错误0。
+- 污染统计：pool hash-selected597/2764=21.60%，selected118/688=17.15%；effective分别333/2764=12.05%、99/688=14.39%。这些是selector rollout的描述统计，不代表训练时每次reward mismatch有效率，也不证明投影保真或成功排除全部污染。
+- 风险结论：若只改变现有正分内部排名且score符号/zero状态不变，入选身份可保持，因为正分全部入选；但selected列表按score排序，训练访问顺序仍可能改变。当前cutoff为零并列，最值得审计score sign/zero变化，不能把高Spearman当作selector等价证明；没有原始梯度不能估计真实误差百分比，也不能把全部153零分名额视为已发生的投影损失。
+- 验证命令与结果：bundled Python逐条JSON解析/计数、p与p(1-p)一致性和stable zero tie检查通过；静态核对summary字段和selected顺序；`git diff --check`通过。
+- 已知风险/待办：仅有一个LearnAlign selection文件，未知具体seed与版本，不能外推GradAlign或所有seeds；需用户提供匹配summary及可用TB nonzero-gradient指标。先完成现有实验并查看结果，再做独立同梯度审计，按用户既定安排执行。
+
+## 2026-09-17 — 澄清非零learnability允许零alignment score
+
+- 改动范围：无代码改动；仅更新`develop.md`，核对用户提供summary与`learnalign_scores`。
+- 修改文件：仅`develop.md`。
+- 公式结论：a_i=(1/N)sum_j V_i V_j cos(phi_i,phi_j)，等价于z_i dot mean(z)，z_i=V_i normalize(phi_i)，包含j=i。V_i>0不要求a_i非零；正负pairwise alignment可抵消，使z_i与平均方向正交，即使每个feature非零也可以得到精确零分。
+- Toy核对：四个unit gradients为(1,0)、(-1,0)、(0,1)、(0,1)，全部V=0.25，则mean(z)=(0,0.125)，前两个score0、后两个score0.03125。自相似正项被反向梯度负项抵消，不需要投影错误才能产生零分。
+- 表述修正：先前834个V>0且score0是待区分的观察，不是bug或hash误差证据；不能只凭零分数量判定projection影响。用户summary确认8-rollout估计、4×4反向两次平均、预算/保留数，但只含配置无feature norm/实际cosine分布，无法区分零feature、正交/抵消或投影改变。
+- 验证命令与结果：静态核对`scoring.py`与summary字段，手工验证toy weighted dot公式；`git diff --check`通过。未执行TPU梯度审计。
+- 已知风险/待办：score0合法并不证明当前hash保真，两件事应分开；沿用先看完整训练结果后进行独立梯度审计的安排。
+
+## 2026-09-17 — 澄清压缩评分符号与原始梯度alignment符号
+
+- 改动范围：无代码改动；仅更新`develop.md`。
+- 修改文件：仅`develop.md`。
+- 结论：当前scores是在当前压缩空间按公式正确计算，但压缩collision项可能改变原始LoRA空间内积/余弦及LearnAlign加权平均score的正负号；不能未经同梯度审计声称原空间符号保真，也不能断言所有或多少已有符号错误。问题不是bucket符号随机把score翻转，而是坐标合并改变几何关系。
+- 对上传selection解释：535正分、256负分、1973零分是当前压缩空间的真实分类，当前全部正分入选的行为成立；原空间重新评分后的各类数量未知。此前toy负cosine→正cosine证明可能性，不量化实际实验影响。
+- 验证命令与结果：依据已核对投影/评分公式与toy算术；`git diff --check`通过。未新增训练或梯度审计。
+- 已知风险/待办：符号一致率与top-k overlap是后续关键指标，不能由当前性能、summary配置或零分合法性推断；按用户既定安排等待完整训练结果后验证。
+
+## 2026-09-17 — 设计独立投影保真审计代码与复杂度边界
+
+- 改动范围：无代码改动；只读检查alignment模型恢复、feature estimation和旧分块验证脚本，仅更新`develop.md`。用户尚未授权实现审计文件。
+- 修改文件：仅`develop.md`；未新建验证代码或修改训练入口。
+- 设计：新增独立audit Python入口（加载冻结checkpoint、生成一次selector answers、保持reward/noise/全组advantage、估计同一批LoRA原始梯度）、shell启动包装及轻量toy单元测试；复用已有模型/dataset/noise/scoring辅助函数，不调用trainer.train、不写原run目录、不覆盖checkpoint、不改变正常selector默认路径。旧feature_equivalence脚本比较分块路径且会训练，不适用本次投影审计。
+- 比较：同一原始LoRA梯度分别计算精确Gram/cosine、当前4096 hash和去耦合signed hash多seed；分开报告geometry、method score符号（近零单列）、rank、top-k membership/order、V=0/zero-feature与zero-score抵消。先核对审计当前hash结果与现有estimator对应路径的一致性，避免AD输出图改变造成的数值差异混入投影误差。
+- 规模：随机32–64 train prompts先做geometry smoke，保持LearnAlign8-rollouts及4×4两次backward（全8算advantage）；完成后LearnAlign128子池评分仅作局部诊断，不能证明全2764 selector一致。GradAlign完整160 candidates+30固定reference、一轮top40可审计完整该轮选择，双方rollout4，760answers。同一checkpoint比较不重新生成第二套answers，无691updates或全1319eval。
+- 资源与复杂度：中等复杂度，不是修改几行sign即可验证；主要工作是checkpoint/LoRA恢复、同tokens feature extraction及原梯度收集和内存控制。原梯度留CPU可分批落盘/分块计算Gram，不在TPU堆全池N×P或构建稠密投影矩阵；raw-gradient输出可能改变JIT/HBM，先4prompt小测试及实际参数量内存估算，不能保证零OOM风险或精确墙钟。
+- 验证命令与结果：静态读取`alignment_main.py`restore、`gradient_features.py`estimate、`verify_learnalign_feature_equivalence.sh`，`git diff --check`通过；无新审计运行。
+- 已知风险/待办：final/step500仅作事后审计，不能恢复无保存的历史step75 tokens/selection状态；不能用末期小样本结论保证全历史训练轨迹等价。精确参照为当前目标/LoRA子空间梯度而非原文所有参数或KL目标，不把两者混称。
+
+## 2026-09-17 — 新增独立冻结checkpoint梯度投影审计（不改训练实现）
+
+- 改动范围：新增两个独立审计文件；原alignment_main、gradient_features、scoring、trainer、配置和所有训练启动脚本均未修改。按要求同步更新`develop.md`，保留此前未提交的讨论记录。
+- 修改文件：新增`my_example/audit_alignment_projection.py`、`my_example/audit_alignment_projection.sh`；更新`develop.md`。
+- 功能：读取source run metadata与指定/默认final actor LoRA Orbax checkpoint，恢复冻结权重；复用TFDS split、generation、binary/noise/advantage辅助函数，LearnAlign保持8-rollout全组advantage+两次4×4 completion-gradient，GradAlign通常candidate/reference各4。只计算梯度/评分，绝不调用trainer.train或optimizer update、不保存模型、不写source run。输出目录必须独立且新建；SHA256核对LoRA权重前后不变。
+- 精确参照：审计独立AD函数复制现有completion gradient顺序，返回原始LoRA prompt梯度及当前TPU投影；同tokens再调用既有4-rollout feature函数校验AD提取，CPU镜像当前hash另作校验。梯度以磁盘memmap收集，分块计算精确Gram/cosine/两方法score，不在TPU堆全池梯度或构建P×4096稠密矩阵；新增去耦合sign-stream控制（默认2种），不声称其理论独立性/JL保证。
+- 检查项：原/压缩cosine误差及非近零符号一致率、method score符号与Spearman、top-k overlap/Jaccard/顺序、原空间cutoff gap、selected mismatch比例、zero raw/zero feature与V>0 score0分类。默认sample PASS需提取及镜像最大相对行误差≤1e-3、权重不变、有足够非近零scores、评分和pairwise cosine符号一致率≥0.95、score Spearman≥0.95、top-k overlap≥0.95、p95 cosine绝对误差≤0.1；可调诊断阈值非定理保证。退化/未过返回2，报告仍保存；不能据小样本PASS声明全部历史selection/performance等价。
+- 输出与资源：`logs/projection_audits/audit_TIMESTAMP.XXXXXX/report`含audit_report.json、prompt_audit.jsonl、scores_and_cosines.npz，外层stdout.log；默认raw临时总容量预算8GiB（含组合副本），完成报告后仅删除本审计新建的candidate/reference/combined_raw.npy，`--keep-raw`保留。异常时scratch可保留供排查，不触碰训练checkpoint。首批原梯度输出的TPU HBM风险仍需服务器smoke验证。
+- 验证命令与结果：bundled Python `python -m my_example.audit_alignment_projection --self-test` PASS；CPU随机样本验证分块Gram、LearnAlign/GradAlign精确score与已有scoring一致、current/control hash与逐坐标实现一致，PASS；`py_compile`、`bash -n`、`git diff --check`通过；已有alignment scoring/config/curriculum/mismatch/equivalence共18项测试全部通过。未在本地执行TPU/checkpoint恢复和完整审计，不声称服务器检查已通过。
+- 使用计划/风险：待seed42两方法结束并查看结果后先LearnAlign32/64候选smoke，再128；GradAlign先小batch再完整160候选+30参考。读取的模型为事后checkpoint而非历史warmup状态；LearnAlign子池top-k只是局部诊断。仅支持现有TFDS Gemma/LoRA路径，metadata未记录的model/LoRA/data选项沿用冻结默认，非默认运行需显式传入对应原配置。源checkpoint不存在时需指定实际actor/.../model_params路径，不支持将merged model目录冒充LoRA checkpoint。
