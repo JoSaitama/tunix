@@ -8,6 +8,8 @@ ZONE="${ZONE:-us-central1-a}"
 DATASET="${EVAL_DATA_PATH:-/home/lhf_hongfu_gmail_com/tunix-hf-data/aime_eval.parquet}"
 MODEL_PATH="${MODEL_PATH:-/home/lhf_hongfu_gmail_com/models/deepseek-r1-distill-qwen-1.5b}"
 TOKENIZER_PATH="${TOKENIZER_PATH:-${MODEL_PATH}}"
+MODEL_CONFIG="deepseek_r1_distill_qwen_1p5b"
+DRY_RUN=false
 
 RUN_ROOT=""
 OUTPUT_DIR=""
@@ -36,6 +38,8 @@ VLLM_ENABLE_PREFIX_CACHING="false"
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --run-root) RUN_ROOT="$2"; shift 2 ;;
+    --model-config) MODEL_CONFIG="$2"; shift 2 ;;
+    --dry-run) DRY_RUN=true; shift ;;
     --output-dir) OUTPUT_DIR="$2"; shift 2 ;;
     --protocol-name) PROTOCOL_NAME="$2"; shift 2 ;;
     --checkpoint-step) CHECKPOINT_STEP="$2"; shift 2 ;;
@@ -66,6 +70,10 @@ if [[ -z "$RUN_ROOT" ]]; then
   echo "--run-root is required." >&2
   exit 2
 fi
+case "$MODEL_CONFIG" in
+  deepseek_r1_distill_qwen_1p5b|deepseek_r1_distill_qwen_7b|qwen2p5_1p5b|qwen2p5_math_1p5b) ;;
+  *) echo "Unsupported --model-config: $MODEL_CONFIG" >&2; exit 2 ;;
+esac
 if [[ -z "$PROTOCOL_NAME" ]]; then
   echo "--protocol-name must be non-empty." >&2
   exit 2
@@ -93,6 +101,7 @@ EXPECTED_PROBLEMS="${LIMIT:-30}"
 EXPECTED_SAMPLES=$((EXPECTED_PROBLEMS * NUM_SAMPLES))
 
 LOG_DIR="${OUTPUT_DIR}/logs"
+if [[ "$DRY_RUN" != true ]]; then
 mkdir -p "$LOG_DIR"
 
 cat > "${OUTPUT_DIR}/eval_config.json" <<EOF
@@ -105,6 +114,7 @@ cat > "${OUTPUT_DIR}/eval_config.json" <<EOF
   "eval_seed": ${EVAL_SEED},
   "dataset": "${DATASET}",
   "model_path": "${MODEL_PATH}",
+  "model_config": "${MODEL_CONFIG}",
   "tokenizer_path": "${TOKENIZER_PATH}",
   "num_problems": ${EXPECTED_PROBLEMS},
   "num_samples": ${NUM_SAMPLES},
@@ -126,6 +136,7 @@ cat > "${OUTPUT_DIR}/eval_config.json" <<EOF
   "vllm_enable_prefix_caching": ${VLLM_ENABLE_PREFIX_CACHING}
 }
 EOF
+fi
 
 EVAL_ARGS=(
   --run_root "$RUN_ROOT"
@@ -138,7 +149,7 @@ EVAL_ARGS=(
   --output_dir "$OUTPUT_DIR"
   --model_version "$MODEL_PATH"
   --tokenizer_path "$TOKENIZER_PATH"
-  --model_config deepseek_r1_distill_qwen_1p5b
+  --model_config "$MODEL_CONFIG"
   --mesh_shape 4,1
   --mesh_axes fsdp,tp
   --sampler_type vllm
@@ -176,6 +187,10 @@ fi
 printf -v EVAL_COMMAND '%q ' "${VENV}/bin/python" \
   "${REPO}/examples/deepscaler/eval_final_checkpoint_metrics.py" \
   "${EVAL_ARGS[@]}"
+if [[ "$DRY_RUN" == true ]]; then
+  printf '%s\n' "$EVAL_COMMAND"
+  exit 0
+fi
 WORKER_COMMAND="cd $(printf '%q' "$REPO") && export PYTHONPATH=$(printf '%q' "$REPO") TUNIX_INIT_JAX_DISTRIBUTED=1 PYTHONUNBUFFERED=1; timeout --signal=TERM --kill-after=60s 86400s ${EVAL_COMMAND}"
 WORKER_LOG_DIR="${LOG_DIR}/workers"
 mkdir -p "$WORKER_LOG_DIR"

@@ -83,6 +83,10 @@ def _get_all_models_test_parameters():
           testcase_name="deepseek-r1-distill-qwen-1.5b",
           model_name="deepseek-r1-distill-qwen-1.5b",
       ),
+      dict(
+          testcase_name="deepseek-r1-distill-qwen-7b",
+          model_name="deepseek-r1-distill-qwen-7b",
+      ),
       dict(testcase_name="qwen3-0.6b", model_name="qwen3-0.6b"),
       dict(testcase_name="qwen3-1.7b", model_name="qwen3-1.7b"),
       dict(testcase_name="qwen3-4b", model_name="qwen3-4b"),

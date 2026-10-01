@@ -602,6 +602,45 @@ class ConfigTest(parameterized.TestCase):
         hp3.config["reference_model_config"]["model_name"], "gemma3-4b"
     )
 
+  def test_deepseek_7b_production_schema_and_role_inheritance(self):
+    base = pathlib.Path(config.__file__).with_name("base_agentic_config.yaml")
+    hp = config.initialize([
+        "grpo_main",
+        str(base),
+        "model_config.model_name=deepseek_r1_distill_qwen_7b",
+        "model_config.model_id=deepseek-ai/DeepSeek-R1-Distill-Qwen-7B",
+        "model_config.model_download_path=/models/deepseek-7b",
+        "tokenizer_config.tokenizer_path=/models/deepseek-7b",
+        "model_config.lora_config={}",
+        "actor_model_config.lora_config={}",
+        "reference_model_config.lora_config={}",
+        "rollout_model_config.lora_config={}",
+        "actor_model_config.mesh.shape=(4,1)",
+        "actor_model_config.mesh.axis_names=('fsdp','tp')",
+        "reference_model_config.mesh=null",
+        "reference_model_config.same_mesh_as=actor",
+        "rollout_model_config.mesh.shape=(4,1)",
+        "rollout_model_config.mesh.axis_names=('fsdp','tp')",
+        "batch_size=16",
+        "rl_training_config.mini_batch_size=16",
+        "rl_training_config.train_micro_batch_size=1",
+        "rl_training_config.actor_optimizer_config.decay_steps=314",
+        "vllm_config.max_num_seqs=16",
+        "agentic_grpo_config.max_concurrency=16",
+    ])
+    for role in ("actor", "reference", "rollout"):
+      role_config = hp.config[f"{role}_model_config"]
+      self.assertEqual(role_config["model_name"], "deepseek_r1_distill_qwen_7b")
+      self.assertEqual(
+          role_config["model_id"], "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B"
+      )
+      self.assertEqual(role_config["model_download_path"], "/models/deepseek-7b")
+      self.assertEmpty(role_config["lora_config"])
+    self.assertIsNone(hp.config["reference_model_config"]["mesh"])
+    self.assertEqual(hp.config["reference_model_config"]["same_mesh_as"], "actor")
+    self.assertEqual(hp.config["actor_model_config"]["mesh"]["shape"], "(4,1)")
+    self.assertEqual(hp.config["rollout_model_config"]["mesh"]["shape"], "(4,1)")
+
   @parameterized.named_parameters(
       dict(
           testcase_name="grpo_enabled",

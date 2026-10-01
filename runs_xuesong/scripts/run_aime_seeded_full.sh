@@ -41,7 +41,12 @@ case "$METHOD" in
 esac
 
 RUN_TS="${TUNIX_RUN_TIMESTAMP:-$(date -u +%Y%m%d_%H%M%S)}"
-RUN_NAME="grpo_aime_${METHOD_SLUG}${FILTER_SUFFIX}_seed${SEED}_${DATA_MODE}_${RUN_TS}"
+RUN_NAME_PREFIX="${AIME_RUN_NAME_PREFIX:-grpo_aime}"
+[[ "$RUN_NAME_PREFIX" =~ ^[a-zA-Z0-9_-]+$ ]] || {
+  echo "AIME_RUN_NAME_PREFIX must contain only letters, digits, underscores or hyphens" >&2
+  exit 2
+}
+RUN_NAME="${RUN_NAME_PREFIX}_${METHOD_SLUG}${FILTER_SUFFIX}_seed${SEED}_${DATA_MODE}_${RUN_TS}"
 export RUN_NAME
 export RUN_ROOT="${REPO}/runs_xuesong/runs/${RUN_NAME}"
 export LOG_ROOT="${REPO}/runs_xuesong/logs/${RUN_NAME}"

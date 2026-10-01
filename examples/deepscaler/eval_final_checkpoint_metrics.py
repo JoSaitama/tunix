@@ -46,6 +46,9 @@ MODEL_CONFIGS = {
     "deepseek_r1_distill_qwen_1p5b": (
         qwen2_model_lib.ModelConfig.deepseek_r1_distill_qwen_1p5b
     ),
+    "deepseek_r1_distill_qwen_7b": (
+        qwen2_model_lib.ModelConfig.deepseek_r1_distill_qwen_7b
+    ),
     "qwen2p5_1p5b": qwen2_model_lib.ModelConfig.qwen2p5_1p5b,
     "qwen2p5_math_1p5b": qwen2_model_lib.ModelConfig.qwen2p5_math_1p5b,
 }

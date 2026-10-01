@@ -144,6 +144,22 @@ class ModelConfig:
     )
 
   @classmethod
+  def deepseek_r1_distill_qwen_7b(cls):
+    # DeepSeek's RoPE setting differs from the original Qwen2.5-7B.
+    return cls(
+        num_layers=28,
+        vocab_size=152064,
+        embed_dim=3584,
+        hidden_dim=18944,
+        num_heads=28,
+        head_dim=128,
+        num_kv_heads=4,
+        norm_eps=1e-06,
+        rope_theta=10000,
+        use_tied_embedding=False,
+    )
+
+  @classmethod
   def qwen2p5_1p5b(cls):  # qwen2.5-1.5B
     return cls(
         num_layers=28,
