@@ -3,6 +3,11 @@
 Development branch: `codex/aime-deepseek-7b`, based on `c168b7f4` from
 `for_GRPO_vLLM_aime`. The pre-existing uncommitted `develop.md` notes are retained.
 
+Server deployment uses the independent directory
+`/home/jason_chia925_gmail_com/Project_7B/tunix` on both workers. Keep the original
+`Project/tunix` checkout unchanged. Set `REPO` and `VENV` explicitly to the new
+paths; the launchers retain their original defaults for existing 1.5B runs.
+
 The shared GRPO, policy-only DTV scoring, LOO selection, masked Policy+KL
 updates, dataset processing and reward implementation are unchanged. The
 existing 1.5B launcher commands and model configuration remain the default.
@@ -30,7 +35,10 @@ The model and tokenizer cache must be accessible at the configured paths on
 both workers. Existing 1.5B checkpoints are not 7B initializations.
 
 ```bash
-export REPO=/path/to/tunix
+export REPO=/home/jason_chia925_gmail_com/Project_7B/tunix
+export VENV="$REPO/.venv"
+export PYTHONPATH="$REPO"
+unset PYTHON_BIN
 export MODEL_PATH=/path/to/deepseek-r1-distill-qwen-7b
 export TPU_NAME=your-v5p-16-node
 export ZONE=your-zone
@@ -99,8 +107,10 @@ tests also passed. A real production-schema/role-inheritance test was added for
 the 7B profile and must run in the server environment.
 
 See [deployment and review notes](AIME_7B_DEPLOY.md) for the exact push/pull
-commands and the verified-snapshot procedure for worker 1. Pulling on worker 0
-alone does not update worker 1. The old SSH archive pipe in `start.md` predates
+commands, new per-worker shim setup and the verified-snapshot procedure for
+worker 1. Cloning/updating worker 0 alone does not update worker 1. Do not link
+the new `.venv` directly to the old shim: its import path can select old code.
+The old SSH archive pipe in `start.md` predates
 the archive-corruption diagnosis in `develop.md`; use the persistent archive
 procedure instead.
 
