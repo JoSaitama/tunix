@@ -37,9 +37,10 @@ its SSH dispatch, result collection, sample-cardinality and exit-status checks
 are unchanged.
 
 Five launcher boundary tests and the two historical remote-status tests passed
-locally. Production-schema inheritance and dependency-backed distributed tests
-remain server checks. These are source/CPU checks; 7B changes memory/compile and
-transfer costs and still requires real TPU gates.
+locally. Worker 0 subsequently passed all 66 focused CPU checks, including
+production-schema inheritance and dependency-backed distributed tests. Worker
+1's checks remain pending until deployment. These are source/CPU checks; 7B
+changes memory/compile and transfer costs and still requires real TPU gates.
 
 All shell examples and the generated remote setup body were syntax-checked.
 Temporary local fixtures also verified cloning while preserving a dirty old
@@ -51,45 +52,41 @@ dependencies or real gcloud connectivity.
 
 ## Push from the Mac
 
-The 7B implementation was already committed as `01785bc`. These commands stage
-only the revised independent-directory documentation. The pre-existing
-uncommitted `develop.md` notes are left intact outside this commit.
+The 7B implementation was committed as `01785bc`; worker 0's focused CPU gate
+passed all 66 tests at `ebf8d19`. These commands stage only the new deployment
+helper, its tests and updated instructions. The pre-existing uncommitted
+`develop.md` notes are left intact outside this commit.
 
 ```bash
 cd '/Users/jason/Documents/1. Education/9. Codex/DTV_GRPO_AIME/tunix'
 git branch --show-current
 git add \
+  runs_xuesong/scripts/deploy_aime_7b_worker.sh \
+  tests/scripts/aime_7b_deploy_test.py \
   runs_xuesong/AIME_7B.md \
   runs_xuesong/AIME_7B_DEPLOY.md
 git diff --cached --check
 git diff --cached --stat
-git commit -m "Document isolated Project_7B deployment and environments"
+git commit -m "Automate 7B worker deployment with validated TPU discovery"
 git push -u origin codex/aime-deepseek-7b
 git rev-parse HEAD
 ```
 
 ## Create a separate checkout on the directly connected server worker
 
-Use the actual TPU name and zone. No fixed physical-IP or service-account name
-is assumed. Worker 1 remains a source deployment directory, not a Git checkout.
-First inspect device owners/processes on both workers. The commands below do
-not stop processes or remove locks.
+Worker 1 remains a source deployment directory, not a Git checkout. TPU name,
+project and zone are discovered later by the deployment helper; clone and CPU
+checks do not require these variables. No fixed physical-IP or service-account
+name is assumed.
 
 ```bash
 export OLD_REPO=/home/jason_chia925_gmail_com/Project/tunix
 export REPO=/home/jason_chia925_gmail_com/Project_7B/tunix
 export VENV="$REPO/.venv"
-export TPU_NAME='<actual TPU name>'
-export ZONE='<actual zone>'
 export REMOTE_WORKER_INDEX=1
-sudo fuser -v /dev/vfio/0
-gcloud alpha compute tpus tpu-vm ssh "$TPU_NAME" \
-  --zone="$ZONE" --worker="$REMOTE_WORKER_INDEX" --internal-ip \
-  --command='hostname; sudo fuser -v /dev/vfio/0'
 ```
 
-An empty `fuser` result normally has a nonzero status. The earlier update block
-used `test -z "$(git status --porcelain)"` with `set -e`; a dirty checkout exits
+The earlier update block used `test -z "$(git status --porcelain)"` with `set -e`; a dirty checkout exits
 silently before fetch. Inspect it read only with `git -C "$OLD_REPO" status
 --short`. No stash, reset, branch switch or pull in the old checkout is needed.
 
@@ -210,113 +207,97 @@ without changing files. Cache/environment deletion is not needed for this
 diagnosed collision. The corrected dependency-backed checks still need to run
 on the server before deployment.
 
-## Deploy the exact committed source to worker 1
+## Deploy source and create the environment on worker 1
 
-Run only after the CPU checks pass. A persistent archive can be retransmitted
-from byte zero; extraction happens only after its SHA-256 matches. This avoids
-the historical `git archive | gcloud ssh ... tar` retry corruption. If a copy
-fails, this block stops before extraction; retain the files for a bounded retry
-or a resumable transfer using the actual SSH endpoint.
+The original manual blocks depended on previously exported `TPU_NAME` and
+`ZONE`; omitting that setup produced `unbound variable` before contacting the
+remote worker. Use the committed helper instead of pasting long remote shell
+blocks. It detects missing project/zone from VM metadata and selects the TPU
+whose endpoints match the current host's IPs. Explicit overrides are accepted
+but must still match this host and exactly two distinct worker endpoints. A
+wrong or ambiguous match stops before SSH.
 
-The preparation command creates only the new remote repository/cache
-directories. It does not replace the old repository, its environment or any
-existing model/data links. The new remote `.venv` is created in the next step.
+After the worker-0 CPU checks pass, run these from worker 0:
+
+```bash
+export REPO=/home/jason_chia925_gmail_com/Project_7B/tunix
+export OLD_REPO=/home/jason_chia925_gmail_com/Project/tunix
+export VENV="$REPO/.venv"
+export REMOTE_WORKER_INDEX=1
+cd "$REPO"
+# Clear unset/stale/placeholder settings and let discovery use this VM.
+unset TPU_NAME ZONE TPU_PROJECT
+bash runs_xuesong/scripts/deploy_aime_7b_worker.sh --dry-run
+```
+
+The dry run queries only VM metadata and the TPU list, saves discovery output
+under the new repository cache, and prints the exact name/zone/project and
+remote IP. It does not execute SSH or copy files. A successful dry run validates
+that the selected worker is not the current host. Continue with:
 
 ```bash
 (
   set -euo pipefail
   cd "$REPO"
-  if [[ -n "$(git status --porcelain)" ]]; then
-    git status --short
-    echo "Deployment stopped: new checkout has local changes." >&2
-    exit 1
-  fi
-  DEPLOY_SHA="$(git rev-parse HEAD)"
-  DEPLOY_DIR="${REPO}/runs_xuesong/cache/deploy/${DEPLOY_SHA}"
-  mkdir -p "$DEPLOY_DIR"
-  git archive --format=tar.gz --output="$DEPLOY_DIR/source.tar.gz" HEAD
-  git ls-files -z | xargs -0 sha256sum > "$DEPLOY_DIR/source.sha256"
-  (
-    cd "$DEPLOY_DIR"
-    sha256sum source.tar.gz > archive.sha256
-  )
-
-  printf -v PREPARE_COMMAND 'set -e\nmkdir -p %q\nmkdir -p %q' \
-    "$REPO" "$DEPLOY_DIR"
-  gcloud alpha compute tpus tpu-vm ssh "$TPU_NAME" \
-    --zone="$ZONE" --worker="$REMOTE_WORKER_INDEX" --internal-ip \
-    --command="bash -lc $(printf '%q' "$PREPARE_COMMAND")"
-
-  for artifact in source.tar.gz archive.sha256 source.sha256; do
-    gcloud alpha compute tpus tpu-vm scp \
-      "$DEPLOY_DIR/$artifact" "$TPU_NAME:$DEPLOY_DIR/$artifact" \
-      --zone="$ZONE" --worker="$REMOTE_WORKER_INDEX" --internal-ip
-  done
-
-  printf -v INSTALL_COMMAND \
-    'set -e\ncd %q\nsha256sum -c archive.sha256\ntar -xzf source.tar.gz -C %q\ncd %q\nsha256sum -c %q\nprintf "%%s\\n" %q > .deployed_git_head' \
-    "$DEPLOY_DIR" "$REPO" "$REPO" "$DEPLOY_DIR/source.sha256" "$DEPLOY_SHA"
-  gcloud alpha compute tpus tpu-vm ssh "$TPU_NAME" \
-    --zone="$ZONE" --worker="$REMOTE_WORKER_INDEX" --internal-ip \
-    --command="bash -lc $(printf '%q' "$INSTALL_COMMAND")"
+  bash runs_xuesong/scripts/deploy_aime_7b_worker.sh
+  source "$REPO/runs_xuesong/cache/deploy/$(git rev-parse HEAD)/target.env"
 )
 ```
 
-## Create the new environment on worker 1
-
-After every archive/source checksum is `OK`, use the following from worker 0.
-The dependency discovery runs on worker 1 itself because its physical
-environment path can differ from worker 0. Nothing is written to the old tree.
+The subshell above limits imported settings to that block. For later training
+or standalone remote commands, load them into the current shell explicitly:
 
 ```bash
-(
-  set -euo pipefail
-  printf -v REMOTE_HEADER 'export OLD_REPO=%q\nexport REPO=%q\nexport VENV=%q\n' \
-    "$OLD_REPO" "$REPO" "$VENV"
-  REMOTE_BODY=$(cat <<'SH'
-set -euo pipefail
-test -x "$OLD_REPO/.venv/bin/python"
-SOURCE_ENV="$(env -u PYTHONPATH JAX_PLATFORMS=cpu PYTHONDONTWRITEBYTECODE=1 \
-  "$OLD_REPO/.venv/bin/python" - <<'PY'
-from pathlib import Path
-from importlib.metadata import distribution
-
-site = Path(distribution("jax").locate_file("")).resolve()
-for candidate in (site, *site.parents):
-    if (candidate / "bin/python").is_file():
-        print(candidate)
-        break
-else:
-    raise SystemExit(f"Cannot locate dependency environment from {site}")
-PY
-)"
-env -u PYTHONPATH -u PYTHON_BIN \
-  REPO="$REPO" SOURCE_ENV="$SOURCE_ENV" TARGET_ENV="$VENV" \
-  JAX_PLATFORMS=cpu PYTHONDONTWRITEBYTECODE=1 \
-  bash "$REPO/runs_xuesong/scripts/bootstrap_jason_env.sh"
-cd "$REPO"
-env -u PYTHON_BIN PYTHONPATH="$REPO" JAX_PLATFORMS=cpu \
-  PYTHONDONTWRITEBYTECODE=1 "$VENV/bin/python" -m pytest -q \
-  tests/cli/aime_launchers_test.py tests/models/qwen2/deepseek_qwen_config_test.py \
-  tests/scripts/dual_worker_status_test.py tests/cli/grpo_main_distributed_test.py \
-  tests/cli/config_test.py tests/cli/recipes/deepscaler_eval_test.py
-SH
-  )
-  REMOTE_SETUP="${REMOTE_HEADER}${REMOTE_BODY}"
-  gcloud alpha compute tpus tpu-vm ssh "$TPU_NAME" \
-    --zone="$ZONE" --worker="$REMOTE_WORKER_INDEX" --internal-ip \
-    --command="bash -lc $(printf '%q' "$REMOTE_SETUP")"
-)
+source "$REPO/runs_xuesong/cache/deploy/$(git -C "$REPO" rev-parse HEAD)/target.env"
 ```
 
-Then run the unchanged 1.5B regression gate from the new checkout, followed by
-7B integration gates. `REPO` and `VENV` must remain the new paths when invoking
-either launcher; otherwise their backward-compatible defaults use the old
-checkout. Existing model/data files can stay at their readable common paths;
-new 7B model files can live under `$REPO/runs_xuesong/cache/models/` when they
-are provisioned on both workers. Do not copy old run/log/checkpoint directories
-as part of creating the new checkout. The two projects use the same TPU devices
-and default RPC port, so train them sequentially.
+The saved settings include `CLOUDSDK_CORE_PROJECT` so existing launchers use
+the same discovered project without changing persistent gcloud configuration.
+If metadata is unavailable, set the actual `ZONE` and `TPU_PROJECT` and retry.
+If the account cannot list nodes, the helper reports the gcloud error and
+stops; it does not guess a resource from the VM hostname.
+
+The helper preserves the old repository and performs these steps in order:
+
+1. Reject a dirty new checkout; archive the exact committed source.
+2. Check the old remote Python is usable and create only the new directories.
+3. Copy the persistent archive and checksum manifests, stopping on any error.
+4. Verify archive SHA-256 before extraction, then all source checksums and write
+   the deployed commit marker. A failed copy never reaches extraction.
+5. Create the remote shim from worker 1's own dependency environment if absent.
+   An existing shim is validated rather than replaced. Verify imports from a
+   neutral directory with `PYTHONPATH` cleared so it cannot mask an old `.pth`.
+6. Compare Python, JAX, jaxlib, libtpu and vLLM versions against worker 0, then
+   run the 66 focused CPU tests on worker 1 with `JAX_PLATFORMS=cpu`.
+
+No package install, model/data copy or training is performed. The helper has
+`--phase source` and `--phase env` for separately retrying those stages. The
+latter requires the remote commit marker to match the local current commit.
+Failed archive transfer files remain available in the new repository cache.
+
+Nine local tests passed using fake metadata/gcloud calls, covering missing
+variables, wrong/ambiguous targets, selecting the local worker, dirty source,
+transfer failure, operation ordering and generated shell syntax. They do not
+establish actual cloud connectivity or TPU fit. The real CPU evidence remains
+worker 0's 66 passing tests; worker 1 must run its checks during deployment.
+
+Before TPU smoke, inspect device owners on both workers (these commands do not
+stop processes or remove locks):
+
+```bash
+sudo fuser -v /dev/vfio/0
+gcloud alpha compute tpus tpu-vm ssh "$TPU_NAME" \
+  --project="$TPU_PROJECT" --zone="$ZONE" --worker="$REMOTE_WORKER_INDEX" --internal-ip \
+  --command='hostname; sudo fuser -v /dev/vfio/0'
+```
+
+An empty `fuser` result normally has a nonzero status. Both workers must be idle
+for real TPU gates. Then run the 1.5B regression gate from the new checkout,
+followed by 7B integration gates. Keep `REPO` and `VENV` set to the new paths;
+otherwise backward-compatible launcher defaults use the old checkout. Existing
+model/data files can remain at their readable common paths; new 7B weights can
+live under `$REPO/runs_xuesong/cache/models/` on each worker. The two projects
+share TPU devices and the default RPC port, so train them sequentially.
 
 ## Post-gate efficiency analysis
 

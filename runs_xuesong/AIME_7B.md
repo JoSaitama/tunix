@@ -110,12 +110,16 @@ See [deployment and review notes](AIME_7B_DEPLOY.md) for the exact push/pull
 commands, new per-worker shim setup and the verified-snapshot procedure for
 worker 1. Cloning/updating worker 0 alone does not update worker 1. Do not link
 the new `.venv` directly to the old shim: its import path can select old code.
+Use `deploy_aime_7b_worker.sh --dry-run` to discover and validate the current
+TPU target, then run the helper without that flag to deploy source/environment
+and check worker 1. This avoids unset `TPU_NAME`/`ZONE` and long pasted commands.
 The old SSH archive pipe in `start.md` predates
 the archive-corruption diagnosis in `develop.md`; use the persistent archive
 procedure instead.
 
-This Mac has no JAX/Flax training dependencies, so architecture routing and
-runtime regression tests must still run in the existing TPU Python environment:
+Worker 0 passed the focused command below with 66 tests at `ebf8d19`. The same
+checks must pass on worker 1 during deployment. The broader existing CPU gate
+script remains an additional pre-training check in the TPU Python environment:
 
 ```bash
 cd "$REPO"
