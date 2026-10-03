@@ -1,4 +1,8 @@
-"""DeepSeek architecture compatibility without allocating model weights."""
+"""DeepSeek architecture compatibility without allocating model weights.
+
+Use a unique filename so pytest's default import mode does not collide with
+tests/cli/config_test.py in the combined AIME CPU checks.
+"""
 
 from absl.testing import absltest
 from tunix.models import automodel

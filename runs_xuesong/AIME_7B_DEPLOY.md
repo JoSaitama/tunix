@@ -189,7 +189,7 @@ Run the focused CPU checks on this worker before deploying to worker 1:
   set -euo pipefail
   cd "$REPO"
   JAX_PLATFORMS=cpu "$REPO/.venv/bin/python" -m pytest -q \
-    tests/cli/aime_launchers_test.py tests/models/qwen2/config_test.py \
+    tests/cli/aime_launchers_test.py tests/models/qwen2/deepseek_qwen_config_test.py \
     tests/scripts/dual_worker_status_test.py tests/cli/grpo_main_distributed_test.py \
     tests/cli/config_test.py tests/cli/recipes/deepscaler_eval_test.py
 )
@@ -199,6 +199,16 @@ These checks do not allocate a real 7B model or start TPU training. Do not run
 the whole `vllm_sampler_test.py` merely to check cache reuse: its shared setup
 downloads a gated Llama checkpoint. The unchanged KV implementation and real
 weight-sync logs can be audited without introducing that download.
+
+The first server collection exposed a name collision between the new Qwen
+`config_test.py` and the existing CLI `config_test.py`: these test directories
+are not Python packages, so pytest's default import mode used the same module
+name. The new file is now `deepseek_qwen_config_test.py`. This changes only test
+collection and its documented paths. For an older checkout, adding
+`--import-mode=importlib` to its original pytest command avoids the collision
+without changing files. Cache/environment deletion is not needed for this
+diagnosed collision. The corrected dependency-backed checks still need to run
+on the server before deployment.
 
 ## Deploy the exact committed source to worker 1
 
@@ -287,7 +297,7 @@ env -u PYTHONPATH -u PYTHON_BIN \
 cd "$REPO"
 env -u PYTHON_BIN PYTHONPATH="$REPO" JAX_PLATFORMS=cpu \
   PYTHONDONTWRITEBYTECODE=1 "$VENV/bin/python" -m pytest -q \
-  tests/cli/aime_launchers_test.py tests/models/qwen2/config_test.py \
+  tests/cli/aime_launchers_test.py tests/models/qwen2/deepseek_qwen_config_test.py \
   tests/scripts/dual_worker_status_test.py tests/cli/grpo_main_distributed_test.py \
   tests/cli/config_test.py tests/cli/recipes/deepscaler_eval_test.py
 SH

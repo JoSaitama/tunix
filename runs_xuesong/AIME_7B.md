@@ -120,7 +120,7 @@ runtime regression tests must still run in the existing TPU Python environment:
 ```bash
 cd "$REPO"
 JAX_PLATFORMS=cpu "$REPO/.venv/bin/python" -m pytest -q \
-  tests/models/qwen2/config_test.py tests/cli/aime_launchers_test.py \
+  tests/models/qwen2/deepseek_qwen_config_test.py tests/cli/aime_launchers_test.py \
   tests/scripts/dual_worker_status_test.py tests/cli/grpo_main_distributed_test.py \
   tests/cli/config_test.py tests/cli/recipes/deepscaler_eval_test.py
 bash "$REPO/runs_xuesong/scripts/run_aime_cpu_gates.sh"
