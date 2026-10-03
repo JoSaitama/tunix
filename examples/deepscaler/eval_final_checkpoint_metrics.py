@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import ExitStack
 import hashlib
 import json
 import math
@@ -25,6 +26,7 @@ import os
 from pathlib import Path
 import sys
 import time
+import traceback
 from typing import Any, Sequence
 
 import jax
@@ -33,6 +35,7 @@ from flax import nnx
 import pandas as pd
 import transformers
 
+from examples.deepscaler.eval_sampler_lifecycle import managed_sampler
 from tunix.generate import mappings
 from tunix.generate import sampler as sampler_lib
 from tunix.models.qwen2 import model as qwen2_model_lib
@@ -509,11 +512,22 @@ def _sampling_diagnostics(
   }
 
 
+def _sync_eval_completion() -> None:
+  identity = (
+      f"hostname={os.uname().nodename} pid={os.getpid()} "
+      f"process_index={jax.process_index()}"
+  )
+  print(f"EVAL_TEARDOWN phase=barrier_begin {identity}", flush=True)
+  multihost_utils.sync_global_devices("aime_eval_primary_done")
+  print(f"EVAL_TEARDOWN phase=barrier_complete {identity}", flush=True)
+
+
 def run_eval(args: argparse.Namespace) -> dict[str, Any]:
   _maybe_initialize_jax_distributed()
   print(
       "EVAL_DISTRIBUTED_IDENTITY "
       f"hostname={os.uname().nodename} "
+      f"pid={os.getpid()} "
       f"process_index={jax.process_index()} "
       f"process_count={jax.process_count()}",
       flush=True,
@@ -524,12 +538,24 @@ def run_eval(args: argparse.Namespace) -> dict[str, Any]:
         "eval.",
         flush=True,
     )
-    multihost_utils.sync_global_devices("aime_eval_primary_done")
+    _sync_eval_completion()
     return {
         "process_index": jax.process_index(),
         "status": "secondary_eval_done",
     }
 
+  try:
+    with ExitStack() as resources:
+      return _run_primary_eval(args, resources)
+  finally:
+    # Release the secondary exactly once, after sampler cleanup on success
+    # or failure. A failed barrier must not be retried by main().
+    _sync_eval_completion()
+
+
+def _run_primary_eval(
+    args: argparse.Namespace, resources: ExitStack
+) -> dict[str, Any]:
   math_eval_metrics_path = Path(math_eval_metrics.__file__).resolve()
   print(
       f"Using math evaluation metrics from {math_eval_metrics_path}.",
@@ -597,7 +623,9 @@ def run_eval(args: argparse.Namespace) -> dict[str, Any]:
     )
   else:
     model, model_config = _load_base_model(args, mesh)
-  sampler = _create_sampler(args, model, model_config, tokenizer, mesh)
+  sampler = resources.enter_context(managed_sampler(
+      lambda: _create_sampler(args, model, model_config, tokenizer, mesh)
+  ))
   df = _load_dataset(args)
   dataset_validation = dict(df.attrs.get("validation", {}))
 
@@ -747,7 +775,6 @@ def run_eval(args: argparse.Namespace) -> dict[str, Any]:
       done_sentinel,
       {"checkpoint_step": checkpoint_step, "status": "primary_eval_done"},
   )
-  multihost_utils.sync_global_devices("aime_eval_primary_done")
   return summary
 
 
@@ -873,16 +900,25 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
   args = parse_args()
+  exit_code = 0
   try:
     run_eval(args)
-  except BaseException:  # Ensure a waiting secondary is released on failure.
-    if jax.distributed.is_initialized() and jax.process_index() == 0:
-      multihost_utils.sync_global_devices("aime_eval_primary_done")
-    raise
+  except BaseException:
+    if args.disable_hard_exit:
+      raise
+    # A failed sampler shutdown may leave its atexit callback blocked. After
+    # bounded child cleanup and the single completion barrier, exit nonzero
+    # directly rather than entering that same shutdown a second time.
+    traceback.print_exc()
+    exit_code = 1
   if not args.disable_hard_exit:
+    print(
+        f"EVAL_TEARDOWN phase=hard_exit pid={os.getpid()} exit_code={exit_code}",
+        flush=True,
+    )
     sys.stdout.flush()
     sys.stderr.flush()
-    os._exit(0)
+    os._exit(exit_code)
 
 
 if __name__ == "__main__":
