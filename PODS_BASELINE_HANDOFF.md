@@ -40,7 +40,14 @@ penalty; unselected rows do not contribute policy or KL gradients.
 
 ## Artifacts
 
-`logs/pods_m2_seedX_mismatchY_TIMESTAMP/` contains:
+Formal rebuttal runs use
+`logs/rebuttal_grpo_gsm8k_pods_seedX_mismatchY_YYYYMMDD_HHMMSS/`.
+This adds `rebuttal_` to the original GRPO/GSM8K dataset/method/seed/data-mode
+convention; LearnAlign/GradAlign used the shorter
+`METHOD_seedX_mismatchY_TIMESTAMP/` convention. Keep count is stored in selection
+metadata and suite names, rather than changing the method name `pods`.
+Result filenames remain `pods__grpo_TIMESTAMP__...` for exporter compatibility.
+The directory contains:
 
 - `selection/run_metadata.json`: n/m, beta, seeds, CLI and upstream revision.
 - `selection/pods_selection.jsonl`: prompt hash, preparation chunk/update step,
@@ -49,6 +56,12 @@ penalty; unselected rows do not contribute policy or KL gradients.
 - `results/*__eval_accuracy__meta.json`: unchanged pre/post accuracy,
   partial_accuracy, format_accuracy, num_correct and total schema.
 - Original stdout, TensorBoard, checkpoints, final model and exit code.
+
+Smoke tests intentionally use a separate `logs/pods_smoke.XXXXXX/` root created
+by `mktemp -d`. The six-character suffix avoids overwriting another test; it is
+not a model parameter, seed or training stage. Its `mismatch0/`, `mismatch0.2/`
+and `hbm/` children contain only the associated tests. This explicit test-root
+override does not affect formal run names or rename any previous results.
 
 Summary counts describe the current process session. Selection JSONL appends
 when explicitly resuming into the same artifact directory. A default launcher

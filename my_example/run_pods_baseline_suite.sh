@@ -32,7 +32,7 @@ awk -v x="$NOISE" 'BEGIN {exit !(x ~ /^[0-9]+([.][0-9]+)?$/ && x>=0 && x<=1)}' |
 [[ "$KEEP_COUNT" =~ ^[0-9]+$ ]] && [ "$KEEP_COUNT" -ge 2 ] || exit 2
 for seed in "${SEEDS[@]}"; do [[ "$seed" =~ ^[0-9]+$ ]] || exit 2; done
 if [ "$DRY_RUN" -eq 0 ]; then
-  SUITE_DIR="${ROOT_DIR}/logs/pods_suite_m${KEEP_COUNT}_mismatch${NOISE}_$(date +%Y%m%d_%H%M%S)"
+  SUITE_DIR="${ROOT_DIR}/logs/rebuttal_grpo_gsm8k_pods_suite_m${KEEP_COUNT}_mismatch${NOISE}_$(date +%Y%m%d_%H%M%S)"
   mkdir -p "$SUITE_DIR"
   printf 'seed\tmismatch\tkeep_count\tstatus\texit_code\n' > "${SUITE_DIR}/status.tsv"
 fi

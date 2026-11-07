@@ -34,7 +34,10 @@ done
 RUN_TS="$(date +%Y%m%d_%H%M%S)"
 SEED="${TUNIX_EXPERIMENT_SEED:-legacy}"
 NOISE="${TUNIX_REWARD_RANK_NOISE_FRACTION:-0}"
-RUN_ROOT="${TUNIX_PODS_RUN_ROOT:-${ROOT_DIR}/logs/pods_m${KEEP_COUNT}_seed${SEED}_mismatch${NOISE}_${RUN_TS}}"
+# Match the original GRPO/GSM8K method_seed_data-mode_timestamp order.
+# Smoke tests explicitly override RUN_ROOT and keep their isolated directories.
+RUN_STEM="rebuttal_grpo_gsm8k_pods_seed${SEED}_mismatch${NOISE}_${RUN_TS}"
+RUN_ROOT="${TUNIX_PODS_RUN_ROOT:-${ROOT_DIR}/logs/${RUN_STEM}}"
 METRICS_LOG_DIR="${RUN_ROOT}/tensorboard"
 CHECKPOINT_ROOT="${RUN_ROOT}/checkpoints"
 OUTPUT_DIR="${RUN_ROOT}/model"
