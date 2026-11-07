@@ -116,6 +116,38 @@ class Base:
 
 
 class AlgorithmTest(unittest.TestCase):
+    def test_hbm_fixture_handles_identical_answers_and_uses_real_template(self):
+        from my_example.test_ds_hbm import make_hbm_batch, controlled_hbm_rewards
+
+        data=make_hbm_batch()
+        self.assertEqual(data["prompts"].shape,(4,))
+        self.assertTrue(all("<start_of_turn>user" in prompt and "<answer>" in prompt
+                            for prompt in data["prompts"]))
+        values=controlled_hbm_rewards(np.repeat(data["prompts"],4),["identical"]*16)
+        np.testing.assert_array_equal(eligible_groups(values.reshape(4,4)),[True,False,True,False])
+        noise=production_noise_module()
+        corrupted=noise.apply_reward_rank_noise(values,np.repeat(data["prompts"],4),4,
+            noise.RewardRankNoiseConfig(fraction=.2,seed=5)).corrupted_rewards
+        np.testing.assert_array_equal(eligible_groups(corrupted.reshape(4,4)),[True,False,True,False])
+        with self.assertRaises(ValueError): controlled_hbm_rewards(["p"]*4,["a"]*4)
+
+    def test_hbm_report_validates_all_refill_phases_not_just_total_selected(self):
+        from my_example.test_ds_hbm import validate_hbm_selection
+
+        phases=[{"name":name,"cumulative_generation_batches":count} for name,count in zip(
+            ["real_generation_controlled_reward_update","full_length_forced_refill_update_1",
+             "full_length_forced_refill_update_2"],[2,4,6])]
+        records=[{"update_step":step,"selected":i%2==0,"eligible":i%2==0,
+                  "observed_reward_std":1. if i%2==0 else 0.,
+                  "reason":"selected" if i%2==0 else "zero_variance"}
+                 for step in range(3) for i in range(8)]
+        validate_hbm_selection(records,phases)
+        with self.assertRaises(RuntimeError): validate_hbm_selection(records[:-1],phases)
+        with self.assertRaises(RuntimeError): validate_hbm_selection(records,phases[1:])
+        invalid=[dict(row) for row in records]
+        invalid[0]["observed_reward_std"]=0.
+        with self.assertRaises(RuntimeError): validate_hbm_selection(invalid,phases)
+
     def test_binary_and_dense_rule(self):
         np.testing.assert_array_equal(eligible_groups([[0]*4,[1]*4,[0,1,0,1],[.1,.2,.1,.2]]),
                                       [False,False,True,True])
@@ -185,6 +217,17 @@ class PipelineTest(unittest.TestCase):
         summary=json.loads((Path(self.tmp.name)/"ds_summary.json").read_text())
         self.assertEqual(summary["generated_groups"],8)
         self.assertEqual(summary["selected_groups"],4)
+
+    def test_hbm_controlled_fixture_fills_in_exactly_two_rounds(self):
+        from my_example.test_ds_hbm import controlled_hbm_rewards
+
+        pattern=controlled_hbm_rewards(["p"]*16,["identical"]*16).reshape(4,4)
+        learner=self.learner()
+        result=learner._fill_training_batch(iter([batch(0,pattern),batch(4,pattern)]),4)
+        np.testing.assert_array_equal(result.prompt_ids[:,0],np.repeat([0,2,4,6],4))
+        self.assertEqual(learner._ds_rounds,2)
+        self.assertEqual(learner._ds_updates,1)
+        self.assertTrue(np.all(np.abs(result.advantages)>0))
 
     def test_refill_cap_never_queues_partial_update(self):
         learner=self.learner(cap=2)

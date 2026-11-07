@@ -335,3 +335,5 @@ RB2的打分可写作`r(x,y)=β[logπ_actor(y|x)−logπ_SFT(y|x)]`。这是评�
 已新增`GRPO_REBUTTAL_PREPARATION.md`，单独列出norm对照与固定checkpoint诊断的所需文件、是否需要重训/新增代码、预期输出、可支持及不可支持的结论。增加L-smooth独立clean objective的方向/步长条件及reference误差界，用于澄清为什么内生正内积不能无条件保证clean utility；没有投稿理论原文，不冒充已完成正式定理核查。
 
 新增baseline按DS/PCGrad/CAGrad分别梳理，norm作为额外直接对照。已开发DS独立路径；未实现其余三项。当前变更只有`train.py`的opt-in分支与新增文件，不修改通用learner、robust trainer、PODS/DTV实现、RLTrainingConfig或原CLI。
+
+DS测试进展（2026-11-07）：用户回传显示真实mismatch20 smoke和pre/post结果结构通过；最终HBM夹具因重复简单题的observed reward全组内常数而达到cap20，并非HBM OOM。已仅修测试夹具，从首阶段起明确使用受控reward覆盖有效/无效组及两轮refill，保持生产算法与上限不变；23项本地测试通过，待服务器只重试HBM。真实生成+受控reward的内存检查不代替生产reward链路的端到端验证。详见准备文档修复记录。

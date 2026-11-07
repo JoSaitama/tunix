@@ -158,7 +158,7 @@ PCGrad/CAGrad原文已有multi-task RL实验，不能称不适合RL；但是将c
 - `my_example/run_ds_baseline.sh`、`run_ds_baseline_suite.sh`：single-worker拓扑、原4×4/691步预算与评测、规范rebuttal命名。
 - `tests/my_example/dynamic_sampling_test.py`：算法、refill、对齐、production rank-noise host函数、cap/queue、CPU JAX padding、dry-run。
 - `my_example/test_ds_smoke.sh`：服务器clean/mismatch小规模完整pre/post训练与结果结构验证。
-- `my_example/test_ds_hbm.py`：服务器一次真实生成更新、两次256/768满长度强制两轮refill的压力测试。
+- `my_example/test_ds_hbm.py`：服务器一次真实生成（使用受控测试reward）及两次256/768合成满长度更新；三个阶段均强制两轮refill。它验证内存/执行路径，不代替真实reward的端到端smoke。
 
 正式输出目录：`logs/rebuttal_grpo_gsm8k_ds_seed5_mismatch0.2_YYYYMMDD_HHMMSS/`，包含selection、tensorboard、checkpoints、model、results和exit_code。selection保存metadata、每组observed rewards/eligible/selected/reason/noise标志、summary。`prepared_updates`明确是已准备batch数，不能替代完成actor updates/exit_code检查。
 
@@ -169,6 +169,14 @@ PCGrad/CAGrad原文已有multi-task RL实验，不能称不适合RL；但是将c
 本地验证：20项DS测试通过（包括真实CPU JAX/Flax gather与padding、production host noise函数、factory opt-in隔离）；bash语法、Python编译与diff空白检查通过。PODS轻量环境13项中11通过/2个框架测试跳过，alignment轻量环境37项中35通过/2个autodiff测试跳过。另一次尝试在本地不完整JAX环境运行框架回归，因缺`metrax`等训练依赖在导入阶段失败，不是已通过的完整框架回归；服务器需运行完整测试。
 
 本轮未实现norm trainer、fixed-checkpoint probe、PCGrad或CAGrad。它们的所需材料和验收已在本文写明。
+
+### HBM夹具修复记录（2026-11-07）
+
+用户回传`ds_smoke.Foym56`已到达最终HBM阶段，附件直接显示mismatch20训练、模型保存和pre/post结果结构PASS；HBM失败为`0/4 eligible groups after 20 batches`，并非OOM。原夹具循环四道未使用正式prompt模板的简单题，首阶段用真实reward；如果组内分数一直相同，DS无法得到首个有效batch，而受控reward原本要等首个update后才安装，造成夹具启动失败。不能仅从此日志认定回答全错或reward都为0。
+
+修复仅改测试：使用正式prompt模板；从第一个阶段起就在测试进程内安装受控reward，每批2个有效组/2个常数组，仍调用生产rank reversal、selector、advantage和actor update。第一阶段仍真实生成，后两阶段为合成满长度；report明确标注reward来源和阶段，不再冒称HBM验证真实correctness reward。新增严格检查三次update分别两轮refill、24生成组/12入选组、各阶段均实际拒绝常数组。本地23项测试通过，服务器HBM仍待重测。
+
+`dynamic_sampling.py`、正式reward、cap20和所有训练超参数未变。正式DS训练遇到真实数据长期无有效组仍会按原设计停止，不能把HBM受控reward搬入正式训练。重测只需运行`python -m my_example.test_ds_hbm --report-dir <新的空report路径>`，无需重新完成两个已通过的smoke模型导出。
 
 ## 7. 服务器测试与提交操作
 

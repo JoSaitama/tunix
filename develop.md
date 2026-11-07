@@ -12807,3 +12807,12 @@ This file tracks engineering changes made in this repository.
 - 命令范围：仅ziao1 worker1顺序执行seeds0/13/21/42、mismatch0.2、n4/m2，与已完成seed5同配置，不重跑seed5、不同时并行四个seed，不启动clean或DS。显式当前worker logical process0/4local chips；清理CPU测试与run-root覆盖、DS opt-in残留，保留原评测/优化器配置。
 - 安全与结果：先检测worker1无相关训练、.env可读及train/test目录存在，再nohup并保存PID/总日志；目录沿原rebuttal_grpo_gsm8k_pods_seed..._mismatch..._timestamp规范。51GB为当前可用量，不保证任意累计checkpoint策略均足够；建议训练期间观察空间。FutureWarning非当前依赖错误，勿临时升级Python改变冻结环境。
 - 验证：静态核查当前suite/单run脚本的seeds、mismatch、keep-count、退出失败停止与输出命名；git diff --check通过。本轮未运行CPU/TPU训练或改动超参数。
+
+## 2026-11-07 — 修复DS HBM夹具首阶段reward常数导致的refill失败
+
+- 改动文件：`my_example/test_ds_hbm.py`、`tests/my_example/dynamic_sampling_test.py`、`GRPO_REBUTTAL_PREPARATION.md`、`rebuttal.md`、本日志。只改测试与说明；生产`dynamic_sampling.py`、reward_rank_noise、train factory/launcher、cap20、RLTrainingConfig与冻结超参数均未修改。
+- 回传证据：用户`ds_smoke.Foym56/mismatch0.2`真实训练、模型导出、eval JSON结构PASS，后续HBM在第一次actor update前报`0/4 eligible groups after 20 batches`。不是OOM、不是export失败；skipped_samples缺tag正常，因为DS是组准备层过滤。原HBM四道raw简单题循环，组内reward一直无差异；受控reward仅在第一update后安装，无法解除第一batch准备阶段的夹具启动失败。不能未经reward记录认定全错或reward全0。
+- 修复：新`make_hbm_batch`用正式prompt模板；`controlled_hbm_rewards`在整个测试的三个阶段从开始安装（仅mock上下文、不会进入生产）。每候选batch两组std>0/两组常数，首阶段真实生成、后两阶段合成256/768满长度，均经过生产rank reversal/selector/advantage/refill/actor更新。report准确标注real-generation-controlled-reward，不将HBM通过误当生产correctness reward验证。
+- 加强验收：`validate_hbm_selection`要求三阶段名字/累计rounds2,4,6、24生成组/12入选组、每update八生成/四入选/四常数拒绝以及selected正std，防止只查最终更新数漏掉refill覆盖。保留cap失败安全行为，不通过增大上限或放行无信号组掩盖问题。
+- 验证命令与结果：`JAX_PLATFORMS=cpu /tmp/dtv-rebuttal-venv/bin/python -m unittest discover -s tests/my_example -p 'dynamic_sampling*test.py'`23项全部通过；新增相同答案、真实prompt模板、污染后方差规则、HBM精确两轮fill和报告负例测试。py_compile、git diff --check通过。
+- 风险/待办：本机无TPU，修复后HBM内存余量未验证；已通过的完整smoke无需为此测试改动重跑，可在空闲worker单独重试HBM并使用新report目录。正式DS仍可能在真实候选长期无有效组时触发cap，未更改该科学/安全边界；不影响PODS既有seed结果或运行中的任务。

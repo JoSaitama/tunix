@@ -1,9 +1,11 @@
-"""Idle-worker DS preflight: real generation/update plus forced refill stress.
+"""Idle-worker DS preflight: real generation plus controlled-reward HBM stress.
 
-Synthetic generation/rewards exist ONLY in this disposable test, never in the
-production DS selector. All stress candidate batches retain the frozen 4x4
-shape, max prompt256/response768. Two stress updates force at least two refill
-rounds, testing rejected and selected groups at full token length.
+Controlled rewards exist ONLY in this disposable test, including its real
+generation phase. They guarantee a non-degenerate selector input independently
+of sampled answer correctness/format. Production reward behavior is tested by
+the separate clean/mismatch end-to-end smokes, NOT certified by this HBM test.
+Two later updates additionally use synthetic full-length tokens. Every update
+forces two refill rounds at fixed 4x4 shape, max prompt256/response768.
 """
 from __future__ import annotations
 
@@ -15,6 +17,56 @@ from types import SimpleNamespace
 from unittest import mock
 
 import numpy as np
+
+
+def make_hbm_batch():
+    """Use the real prompt template but do not depend on reward diversity."""
+    from .prompts import SYSTEM_PROMPT, TEMPLATE
+
+    return {
+        "prompts": np.array([TEMPLATE.format(system_prompt=SYSTEM_PROMPT,
+                            question=f"What is {i}+1?") for i in range(4)]),
+        "answer": np.array([str(i+1) for i in range(4)]),
+    }
+
+
+def controlled_hbm_rewards(prompts, completions, **unused):
+    """Exactly two eligible groups per fixed-size candidate batch, test-only.
+
+    Even identical generated answers must not stall a memory stress fixture.
+    Production rank reversal still runs AFTER this reward function and keeps
+    the variance of each group invariant.
+    """
+    if len(prompts) != 16 or len(completions) != 16:
+        raise ValueError("DS HBM fixture expects four prompts x four completions")
+    return np.array([[0., .5, 3., 4.], [0., 0., 0., 0.],
+                     [0., .5, 3., 4.], [1., 1., 1., 1.]]).reshape(-1)
+
+
+def validate_hbm_selection(records, phases):
+    """Certify that all three updates exercised selected AND rejected groups."""
+    expected_names = ["real_generation_controlled_reward_update",
+                      "full_length_forced_refill_update_1",
+                      "full_length_forced_refill_update_2"]
+    if [phase["name"] for phase in phases] != expected_names:
+        raise RuntimeError("DS HBM phase labels do not match the executed test")
+    if [phase["cumulative_generation_batches"] for phase in phases] != [2, 4, 6]:
+        raise RuntimeError("DS HBM expected exactly two candidate batches per actor update")
+    if len(records) != 24 or sum(row["selected"] for row in records) != 12:
+        raise RuntimeError("DS HBM expected 24 generated / 12 selected prompt groups")
+    by_update = {}
+    for row in records:
+        by_update.setdefault(row["update_step"], []).append(row)
+    if len(by_update) != 3:
+        raise RuntimeError("DS HBM expected records from three separate updates")
+    for rows in by_update.values():
+        if len(rows) != 8 or sum(row["selected"] for row in rows) != 4:
+            raise RuntimeError("DS HBM expected eight generated / four selected groups per update")
+        if sum(row["reason"] == "zero_variance" for row in rows) != 4:
+            raise RuntimeError("DS HBM did not exercise rejection of constant-reward groups")
+        if any(not row["eligible"] or row["observed_reward_std"] <= 0
+               for row in rows if row["selected"]):
+            raise RuntimeError("DS HBM selected a degenerate group")
 
 
 def main():
@@ -29,7 +81,8 @@ def main():
     output = Path(args.report_dir).resolve()
     output.mkdir(parents=True, exist_ok=False)
     report = {"passed":False, "phases":[], "headroom_verified":False,
-              "scope":"one real rollout/update; two full-length synthetic forced-refill updates",
+              "scope":"real generation with controlled rewards; two full-length synthetic forced-refill updates",
+              "reward_source":"controlled_hbm_rewards in ALL phases; not production correctness rewards",
               "caveat":"observed peak memory does not guarantee all future execution peaks"}
 
     def save():
@@ -74,8 +127,7 @@ def main():
         # Stop after three real actor updates, but keep the frozen 691-step LR
         # schedule. This changes only this disposable test's stop condition.
         cluster.cluster_config.training_config.max_steps=3
-        batch={"prompts":np.array([f"What is {i}+1?" for i in range(4)]),
-               "answer":np.array([str(i+1) for i in range(4)])}
+        batch=make_hbm_batch()
         class Batches:
             def __iter__(self):
                 yield batch
@@ -92,10 +144,6 @@ def main():
             return SimpleNamespace(tokens=jnp.asarray(tokens),text=["stress"]*size,
                 left_padded_prompt_tokens=jnp.full((size,256),int(valid[0]),dtype=jnp.int32))
 
-        def rewards(prompts,completions,**unused):
-            # Only two of four groups qualify: each update MUST refill twice.
-            return np.array([[0,.5,3,4],[0,0,0,0],[0,.5,3,4],[1,1,1,1]]).reshape(-1)
-
         def update(*a,**k):
             result=original_update(*a,**k)
             jax.effects_barrier()
@@ -106,7 +154,7 @@ def main():
                 stats.append({"device":str(device),"stats":values})
                 if values and values.get("bytes_limit") and "peak_bytes_in_use" in values:
                     headrooms.append(1-values["peak_bytes_in_use"]/values["bytes_limit"])
-            report["phases"].append({"name":"real_generation_and_actor_update" if not stress["active"]
+            report["phases"].append({"name":"real_generation_controlled_reward_update" if not stress["active"]
                 else f"full_length_forced_refill_update_{stress['updates']}",
                 "devices":stats,"headroom":headrooms,
                 "cumulative_generation_batches":trainer._ds_rounds})
@@ -117,25 +165,22 @@ def main():
                 raise RuntimeError("DS HBM headroom below the requested safety margin")
             stress["updates"]+=1
             stress["active"]=True
-            trainer.reward_fns=[rewards]
             return result
 
         report["configuration"]={"prompts":4,"num_generations":4,"selected_groups_per_update":4,
-            "prompt_length":256,"stress_completion_length":768,"beta":cfg.grpo.beta}
-        with mock.patch.object(cluster,"generate",side_effect=generate), \
+            "prompt_length":256,"stress_completion_length":768,"beta":cfg.grpo.beta,
+            "controlled_rewards_in_all_phases":True,"candidate_batches_per_update":2}
+        # Install deterministic rewards BEFORE the first rollout. Installing
+        # them only after its update creates a bootstrap failure on constant rewards:
+        # DS cannot prepare that first update in the first place.
+        with mock.patch.object(trainer,"reward_fns",[controlled_hbm_rewards]), \
+             mock.patch.object(cluster,"generate",side_effect=generate), \
              mock.patch.object(cluster,"update_actor",side_effect=update), mesh:
             trainer.train(Batches())
         if cluster.actor_trainer.train_steps!=3 or len(report["phases"])!=3:
             raise RuntimeError("expected three actor updates")
         records=[json.loads(line) for line in (output/"selection/ds_selection.jsonl").read_text().splitlines()]
-        if sum(row["selected"] for row in records)!=12:
-            raise RuntimeError("expected four complete selected groups per update")
-        for phase in report["phases"][1:]:
-            if not phase["name"].startswith("full_length_forced_refill"):
-                raise RuntimeError("missing forced refill stress")
-        # Last two prepared updates each exercised exactly two candidate batches.
-        if report["phases"][2]["cumulative_generation_batches"]-report["phases"][0]["cumulative_generation_batches"]!=4:
-            raise RuntimeError("stress did not exercise two refill rounds per update")
+        validate_hbm_selection(records,report["phases"])
         report["headroom_verified"]=True
         report["passed"]=True
         save()
