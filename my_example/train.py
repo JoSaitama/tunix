@@ -178,6 +178,14 @@ def build_trainer(rl_cluster, grpo: GrpoGenerationConfig) -> GRPOLearner:
             f"seed={noise_config.seed}",
         )
 
+    pods_keep_count = os.environ.get("TUNIX_PODS_KEEP_COUNT", "").strip()
+    if pods_keep_count:
+        from .pods import pods_learner_class
+
+        learner_cls = pods_learner_class(learner_cls)
+        learner_kwargs["pods_keep_count"] = int(pods_keep_count)
+        learner_kwargs["pods_artifact_dir"] = os.environ.get("TUNIX_PODS_ARTIFACT_DIR")
+
     return learner_cls(
         rl_cluster=rl_cluster,
         reward_fns=[
