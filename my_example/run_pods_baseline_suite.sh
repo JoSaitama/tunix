@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+export TPU_PROCESS_BOUNDS=1,1,1
+export TPU_CHIPS_PER_PROCESS_BOUNDS=2,2,1
+export TPU_VISIBLE_CHIPS=0,1,2,3
+export CLOUD_TPU_TASK_ID=0
 SEEDS=()
 NOISE=""
 KEEP_COUNT=2
@@ -33,7 +37,9 @@ if [ "$DRY_RUN" -eq 0 ]; then
   printf 'seed\tmismatch\tkeep_count\tstatus\texit_code\n' > "${SUITE_DIR}/status.tsv"
 fi
 for seed in "${SEEDS[@]}"; do
-  COMMAND=(env "TUNIX_EXPERIMENT_SEED=$seed" "TUNIX_REWARD_RANK_NOISE_SEED=$seed"
+  COMMAND=(env TPU_PROCESS_BOUNDS=1,1,1 TPU_CHIPS_PER_PROCESS_BOUNDS=2,2,1
+    TPU_VISIBLE_CHIPS=0,1,2,3 CLOUD_TPU_TASK_ID=0
+    "TUNIX_EXPERIMENT_SEED=$seed" "TUNIX_REWARD_RANK_NOISE_SEED=$seed"
     "TUNIX_REWARD_RANK_NOISE_FRACTION=$NOISE" bash "${ROOT_DIR}/my_example/run_pods_baseline.sh"
     --pods-keep-count "$KEEP_COUNT")
   COMMAND+=( ${EXTRA[@]+"${EXTRA[@]}"} )

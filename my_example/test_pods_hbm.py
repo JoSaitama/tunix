@@ -21,6 +21,14 @@ def main():
     parser.add_argument("--keep-count", type=int, default=2)
     parser.add_argument("--min-headroom-fraction", type=float, default=.05)
     args = parser.parse_args()
+    # Also isolate direct `python -m` invocations, before importing JAX/Flax.
+    # Physical worker1 is logical process0 when it runs independently.
+    os.environ.update({
+        "TPU_PROCESS_BOUNDS": "1,1,1",
+        "TPU_CHIPS_PER_PROCESS_BOUNDS": "2,2,1",
+        "TPU_VISIBLE_CHIPS": "0,1,2,3",
+        "CLOUD_TPU_TASK_ID": "0",
+    })
     if not 0 <= args.min_headroom_fraction < 1:
         parser.error("headroom fraction must lie in [0,1)")
     from .pods import validate_keep_count
@@ -50,6 +58,11 @@ def main():
             x.platform != "tpu" for x in jax.local_devices()
         ):
             raise ValueError("HBM stress requires one process / four local TPU devices")
+        report["topology"] = {
+            "process_count": jax.process_count(), "process_index": jax.process_index(),
+            "device_count": jax.device_count(), "local_device_count": jax.local_device_count(),
+            "devices": [str(x) for x in jax.local_devices()],
+        }
         cfg = config_from_args([
             "--num-generations", "4", "--train-micro-batch-size", "4",
             "--learning-rate", "1e-6", "--max-prompt-length", "256",

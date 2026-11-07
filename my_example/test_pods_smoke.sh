@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Run only on an idle host with the single-worker TPU env configured.
+# Run only on an idle worker. Topology is isolated below before any TPU process.
 # Frozen sequence limits (256/768), four prompts, four generated / two retained.
 set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -9,6 +9,10 @@ if [ -f my_example/.env ]; then
   source my_example/.env
   set +a
 fi
+export TPU_PROCESS_BOUNDS=1,1,1
+export TPU_CHIPS_PER_PROCESS_BOUNDS=2,2,1
+export TPU_VISIBLE_CHIPS=0,1,2,3
+export CLOUD_TPU_TASK_ID=0
 env JAX_PLATFORMS=cpu python -m unittest discover -s tests/my_example -p 'pods*test.py'
 mkdir -p logs
 TEST_ROOT="$(mktemp -d "${ROOT_DIR}/logs/pods_smoke.XXXXXX")"

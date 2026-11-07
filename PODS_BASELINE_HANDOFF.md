@@ -95,7 +95,16 @@ bash my_example/run_pods_baseline_suite.sh --seeds 5 0 13 21 42 --mismatch 0.2 -
 bash my_example/run_pods_baseline_suite.sh --seeds 5 0 13 21 42 --mismatch 0 --pods-keep-count 2
 ```
 
-Keep single-worker topology variables in the launch environment. The suite
+All three shell entrypoints now force the four single-worker topology variables
+after loading local environment files (where applicable). Direct invocation of
+the Python HBM test also sets them before importing JAX. Thus both physical
+worker0 and worker1 independently use their own four local chips; logical
+`CLOUD_TPU_TASK_ID=0` does not route worker1 to physical worker0. The HBM report
+records process/device counts. No SSH, multi-worker launcher or distributed
+initialization is used. These settings apply only to the new process and do not
+alter an already running job on the other worker.
+
+The suite
 stops at the first failed run and writes status.tsv. m=3 is a 75%-retention
 alternative and m=4 is a no-selection control; choose the main configuration
 before inspecting test accuracy. Do not change n=4 just to match the author's

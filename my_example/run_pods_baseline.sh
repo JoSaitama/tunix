@@ -7,6 +7,11 @@ if [ -f "${ROOT_DIR}/my_example/.env" ]; then
   source "${ROOT_DIR}/my_example/.env"
   set +a
 fi
+# Isolate this host on a dual-worker v5p-16; IDs are local to this worker.
+export TPU_PROCESS_BOUNDS=1,1,1
+export TPU_CHIPS_PER_PROCESS_BOUNDS=2,2,1
+export TPU_VISIBLE_CHIPS=0,1,2,3
+export CLOUD_TPU_TASK_ID=0
 KEEP_COUNT="${TUNIX_PODS_KEEP_COUNT:-2}"
 DRY_RUN=0
 ARGS=()
@@ -56,7 +61,8 @@ COMMAND=(python -m my_example.main
   --mesh-counts 4,1)
 COMMAND+=( ${ARGS[@]+"${ARGS[@]}"} )
 if [ "$DRY_RUN" -eq 1 ]; then
-  printf '%q ' env "TUNIX_PODS_KEEP_COUNT=${KEEP_COUNT}" \
+  printf '%q ' env TPU_PROCESS_BOUNDS=1,1,1 TPU_CHIPS_PER_PROCESS_BOUNDS=2,2,1 \
+    TPU_VISIBLE_CHIPS=0,1,2,3 CLOUD_TPU_TASK_ID=0 "TUNIX_PODS_KEEP_COUNT=${KEEP_COUNT}" \
     "TUNIX_PODS_ARTIFACT_DIR=${RUN_ROOT}/selection" "${COMMAND[@]}"
   printf '\n'
   exit 0
