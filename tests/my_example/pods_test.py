@@ -70,6 +70,18 @@ class FakeBase:
 
 
 class PODSAlgorithmTest(unittest.TestCase):
+    def test_hbm_batch_has_array_leaves_for_learner_repeat(self):
+        from my_example.test_pods_hbm import make_hbm_batch
+
+        batch = make_hbm_batch()
+        for value in batch.values():
+            self.assertIsInstance(value, np.ndarray)
+            self.assertEqual(value.shape, (4,))
+        repeated = {key: np.repeat(value, 4, axis=0) for key, value in batch.items()}
+        self.assertEqual(repeated["prompts"].shape, (16,))
+        for i in range(4):
+            self.assertEqual(len(set(repeated["prompts"][i*4:(i+1)*4])), 1)
+
     def test_exhaustive_optimum_and_unique_indices(self):
         rng = np.random.default_rng(7)
         for n in range(2, 9):

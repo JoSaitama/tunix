@@ -11,6 +11,19 @@ import numpy as np
 @unittest.skipUnless(importlib.util.find_spec("jax") and importlib.util.find_spec("flax"),
                      "requires the training JAX/Flax environment")
 class PODSJAXTest(unittest.TestCase):
+    def test_hbm_input_uses_actual_learner_repeat_and_merge(self):
+        import jax
+        from tunix.rl import utils as rl_utils
+        from my_example.test_pods_hbm import make_hbm_batch
+
+        batch = make_hbm_batch()
+        repeated = jax.tree.map(lambda x: np.repeat(x, 4, axis=0), batch)
+        merged = rl_utils.merge_micro_batches([repeated])
+        self.assertEqual(len(merged["prompts"]), len(batch["prompts"]) * 4)
+        self.assertEqual(merged["answer"].shape, (16,))
+        for i in range(4):
+            self.assertEqual(len(set(merged["prompts"][i*4:(i+1)*4])), 1)
+
     def test_real_struct_and_real_micro_batch_utilities(self):
         import jax.numpy as jnp
         from tunix.rl import rl_cluster

@@ -15,6 +15,19 @@ from unittest import mock
 import numpy as np
 
 
+def make_hbm_batch():
+    """Use array leaves, like Grain batches consumed by RLLearner.
+
+    JAX treats Python lists as pytree containers. A list of four strings would
+    become four array leaves of length four under the learner's repeat map,
+    rather than one flat array of sixteen prompts.
+    """
+    return {
+        "prompts": np.asarray([f"What is {i}+1?" for i in range(4)]),
+        "answer": np.asarray([str(i+1) for i in range(4)]),
+    }
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--report-dir", required=True)
@@ -89,8 +102,7 @@ def main():
             "TUNIX_PODS_ARTIFACT_DIR": str(output / "selection"),
         }):
             trainer = build_trainer(cluster, cfg.grpo)
-        batch = {"prompts": [f"What is {i}+1?" for i in range(4)],
-                 "answer": [str(i+1) for i in range(4)]}
+        batch = make_hbm_batch()
         valid = np.array([i for i in range(10, 100) if i not in eos and i != cluster.rollout.pad_id()])
 
         def synthetic(*, prompts, **unused):
@@ -138,6 +150,8 @@ def main():
         if cluster.actor_trainer.train_steps != 3:
             raise RuntimeError("expected three optimizer updates")
         records = [json.loads(x) for x in (output / "selection/pods_selection.jsonl").read_text().splitlines()]
+        if len(records) != 12 or len(report["phases"]) != 3:
+            raise RuntimeError("expected 4 real and 8 synthetic prompt records across three phases")
         if not all(any(abs(v) > 0 for v in r["selected_advantages"]) for r in records[4:]):
             raise RuntimeError("synthetic stress failed to exercise nonzero policy advantages")
         report["headroom_verified"] = all(len(x["headroom"]) == 4 for x in report["phases"])

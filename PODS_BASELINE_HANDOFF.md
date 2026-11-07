@@ -93,6 +93,23 @@ performs a real rollout/update to initialize generation caches and optimizer
 state, then performs two full-length synthetic updates with nonzero advantages.
 It never loads old training checkpoints and does not export a full final model.
 Synthetic generation/reward patches exist only in the test process.
+The HBM input uses NumPy array leaves, matching Grain batches; Python lists
+must not be used here because JAX's pytree repeat traverses their elements.
+
+If the two real smokes already passed and only HBM failed, rerun just HBM in a
+new directory (load the same local credentials without printing their values):
+
+```bash
+set -a
+source my_example/.env
+set +a
+export TUNIX_EXPERIMENT_SEED=5
+export TUNIX_REWARD_RANK_NOISE_SEED=5
+export TUNIX_REWARD_RANK_NOISE_FRACTION=0.2
+PODS_HBM_REPORT="$(mktemp -d "$PWD/logs/pods_hbm_retry.XXXXXX")/report"
+env -u JAX_PLATFORMS -u JAX_PLATFORM_NAME python -m my_example.test_pods_hbm \
+  --report-dir "$PODS_HBM_REPORT" --keep-count 2
+```
 
 The HBM report records each local device's memory counters when exposed. If
 peak/limit counters exist it requires at least 5% headroom; otherwise execution
