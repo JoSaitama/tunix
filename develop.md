@@ -12217,3 +12217,593 @@ This file tracks engineering changes made in this repository.
 - 实现：Python解析独立--learnalign-selection-ratio/--gradalign-selection-ratio为当前method有效selection_ratio；dataclass直接构造也按method默认，metadata原字段自动记录有效q。单方法保留旧--selection-ratio显式覆盖兼容旧验证命令。suite独立q flags须在--之前，每seed按methods顺序派发，拒绝公共/放错位置的q extras以防双method被一起覆盖；--dry-run只打印含seed/noise/q命令，不建立run目录/不训练。兼容macOS Bash3空EXTRA_ARGS与set-u。
 - 测试：新增8项默认/独立覆盖/legacy/无效q/套件seed顺序和路由/共享q拒绝/透传测试；smoke新增metadata及summary有效q断言。bundled Python unittest discover alignment_*test.py：37项，35通过，2实际JAX因本机缺JAX跳过；bash -n三个修改sh通过；clean五seed dry-run打印10条正确Learnq2/Gradq4命令；git diff --check通过。
 - 已知风险/待办：未在本机运行TPU或新端到端smoke，q不改变反向静态batch/rollout shapes，之前HBM调度测试仍相关但不是全训练OOM保证。Learn真实子集变化688→1380（49.93%），不能混用旧q4 Learn结果；Grad q4不变。用户按显式git文件清单提交推送，服务器pull后host tests/dry-run再nohup分节点clean/noisy矩阵，不运行并发同worker。
+
+## 2026-09-18 — 诊断直接unit命令触发多worker TPU初始化等待
+
+- 改动范围：无代码改动；用户在另一v5p16 node直接执行unit discover，无单worker TPU env，出现初始化超过60秒warning及E，仅更新日志。
+- 修改文件：仅`develop.md`。
+- 验证依据与结果：rg/sed确认alignment_selector_objectives_test.py最后两项import JAX并调用jax.devices("cpu")，虽在CPU上做数学验证，backend枚举仍可触发TPU默认初始化；完整test_alignment_selector_v2.sh已导出四个单worker bounds/visible/task变量，上一轮单独host unit示例遗漏了防初始化env。建议Ctrl-C停止当前前台测试，然后仅本次进程env JAX_PLATFORMS=cpu执行unit，不export永久CPU变量；训练/HBM继续四个单worker TPU变量。E仅表示至少一项测试error，未取得完整traceback，不能断言永久deadlock。
+- 已知风险/待办：未连接服务器或kill进程，待用户提供CPU-only unit最终summary；CPU-only不是HBM验证，也不改变后续TPU训练默认设备。
+
+## 2026-09-18 — 根据进程附件定位卡住的单元测试
+
+- 改动范围：无代码改动；读取用户进程清单提供精确停止目标，仅更新日志。
+- 修改文件：仅`develop.md`。
+- 证据与结果：附件e4df7cea进程列表位于a9c72b46-w-0，唯一可见测试PID2121240、父2117963、pts/1，命令python -m unittest discover -s tests/my_example -p alignment_*test.py。其余大部分为VSCode/SSH/systemd/dbus及gcsfuse挂载，不应清除；列表未见alignment_main或suite在运行，grep匹配自身不是套件进程。
+- 建议：新terminal同节点先hostname及ps PID确认命令未变化，再TERM精确测试PID，仍存活时复核后KILL；不要pkill全部python/jason/node或重启服务器。结束后新测试仅本进程JAX_PLATFORMS=cpu。
+- 已知风险/待办：PID清单是历史快照，执行前必须确认避免PID复用；前一条测试输出来自b69a87ca，当前附件是a9c72b46，两节点不要混用PID。未实际连接服务器或停止任何进程。
+
+## 2026-09-18 — 解释CPU数学单元测试与TPU验证边界
+
+- 改动范围：无代码改动；回应CPU-only测试为何不会改变训练、初始化等待原因及TPU替代命令，仅更新日志。
+- 修改文件：仅`develop.md`。
+- 证据与结果：已核对实际JAX两个unit项使用jax.default_device(jax.devices("cpu")[0])，原设计就是CPU数学验证；JAX_PLATFORMS=cpu仅限制本次进程backend初始化避免多worker TPU探测，不是从TPU训练退到CPU。其他unit使用NumPy/mock/subprocess dry-run；它们不能验证TPU编译、分片、HBM或真实rollout。完整v2脚本另有TPU smoke/HBM且已设置单worker四环境变量。
+- 原因边界：缺少单worker bounds的v5p16双worker运行结合超过60秒warning与持续等待，强烈指向默认拓扑初始化/等待peer；没有完整E traceback不能排除其他初始化错误，也不把症状描述为已证实OOM或selector故障。可先停旧进程，用四变量运行小TPU枚举/运算确认单worker1process4localdevices，再进行完整TPU测试。
+- 已知风险/待办：本进程CPU env不应永久export到训练；单worker参数应按曾成功配置使用；unit默认CPU上下文，即便TPUbackend可用其两项仍非TPU数学验证。未启动任何测试或修改测试代码。
+
+## 2026-09-18 — 接收服务器37项CPU单元测试通过
+
+- 改动范围：无代码改动；用户报告a9c72b46-w-0执行env JAX_PLATFORMS=cpu unittest discover全部37项OK、1.601s，无skip，仅记录验证结果。
+- 修改文件：仅`develop.md`。
+- 验证命令与结果：用户服务器`env JAX_PLATFORMS=cpu python -m unittest discover -s tests/my_example -p 'alignment_*test.py'`：37项全部通过，包含实际JAX CPU数学检查；本地git diff --check通过。
+- 下一步与风险：suite --dry-run核对5/0/13/21/42共10条Learnq2/Gradq4路由，然后按已有TPU单worker nohup分节点启动noise.2/0；CPU-only env只作用此前一次命令，不影响训练。先前TPU HBM PASS与当前unit PASS不是完整691步绝无OOM保证，仍观察Learn warmup75后的selection阶段。未替用户启动或提交推送。
+
+## 2026-09-18 — 接收q解耦dry-run正确并提供正式nohup启动
+
+- 改动范围：无代码改动；用户贴出服务器37项unit OK及10条dry-run命令，确认路由并说明旧TPU初始化等待，仅更新日志。
+- 修改文件：仅`develop.md`。
+- 验证结果：用户输出5/0/13/21/42每seed先Learnq2后Gradq4，seed与rank-noise seed一致且所有fraction=.2，路径均a9服务器Project_8k repo，符合预期。dry-run不初始化TPU、不代表实际训练通过；之前HBM PASS仍为有限stress证据。
+- 启动建议：检查旧unittest/alignment_main/suite进程停止、df磁盘预算，nohup显式四个已成功单worker TPU变量；清除持久JAX_PLATFORMS及JAX_PLATFORM_NAME避免人为CPU强制，以及旧AB/report result目录env；保留既定训练参数。保存PID/日志并tail观察启动。clean另节点用noise0，不同worker并发。本轮未实际启动或杀进程。
+- 已知风险/待办：此前警告强烈指向缺bounds而等待另一worker，E完整traceback缺失不声称确定唯一原因；不承诺691步全程无OOM，尤其观察Learn75筛选阶段。此条仅日志无需为了启动再次修改训练代码。
+
+## 2026-09-20 — 澄清GradAlign validation set来源与成功率
+
+- 改动范围：无代码改动；核对GradAlign原文第4–10页和当前GSM8K实现，仅更新日志。
+- 修改文件：仅`develop.md`。
+- 原文结论：GradAlign假设一个小型、可信且能代表目标任务的独立validation set Pv；原文不同实验使用目标域validation split、AMC22、Countdown-only或SuperGPQA/TheoremQA组合，不规定按当前model成功率筛选validation prompts。每轮保持validation问题身份，重新rollout并重算平均validation gradient；成功率只通过binary reward/advantage影响梯度贡献，不用于选择validation身份。
+- 当前实现：原始GSM8K train split先按seed(42+experiment seed)确定性shuffle，前90%即2764条作为training_examples，尾10%即308条作为heldout_examples；Grad取heldout前30条作固定validation identities。因此是同源GSM8K训练split的随机化、互斥heldout proxy，不是从2764个实际training candidates内再抽30条，也没有按pass rate/成功率筛选。validation selector reward保持clean；每10updates对相同30条重新生成answers/计算gradient。
+- 验证命令与结果：读取data.py、seeding.py、alignment_main.py、curriculum.py对应路径；PDF技能提取GradAlign论文第4–10及15页完整相关段落/算法/实验设置。git diff --check通过。
+- 已知风险/待办：当前heldout-GSM8K设计满足同任务独立probe但弱于原文某些明确目标域validation构造，论文中应表述为deterministically shuffled held-out GSM8K subset，而非curated high-success set或training candidates的一部分。没有完整策略保证30条都产生非零梯度；全对/全错组可能在某轮贡献近零。
+
+## 2026-09-21 — 分析当前LearnAlign优于GradAlign的合理性与复现边界
+
+- 改动范围：无代码改动；用户报告当前JAX/Gemma五seed趋势中LearnAlign优于GradAlign，核对两篇原文方法/实验条件并评估原因，仅更新日志。
+- 修改文件：仅`develop.md`。
+- 方法结论：LearnAlign不是仅凭成功率筛选，而是V=p(1-p)乘以训练池内pairwise gradient cosine后取row mean；V提供显式中等难度/非零学习潜力门控。GradAlign把candidate gradient与clean heldout validation平均梯度做cosine，没有独立V，但GRPO组内advantage使全对/全错组隐式产生零或近零梯度。Grad论文的优势依赖validation probe代表目标方向、梯度估计稳定以及其noise/domain-shift/low-utility设置，不是普适支配定理。
+- 当前适配差异：Gemma/JAX本身不构成算法劣势证据，主要变化是Gemma-3-1B-IT/LoRA及当前奖励；Grad当前candidate/validation均4rollouts、30 validation、4096 signed-hash LoRA梯度、20% within-group rank reversal、q4局部动态筛选，而原文典型Grad估计16rollouts、noise设置64、validation可至200、真实训练128rollouts、50% Bernoulli reward decoupling、Qwen math/base模型。Learn当前估计8rollouts更接近其GSM8K原文8，q2近似原文最佳报告53.5%。在binary p=.5时4rollouts至少混合一次的概率为1-2*(.5^4)=.875，8rollouts为.9921875；Grad validation方向更容易受零组/采样噪声影响。
+- 公平性边界：当前两个方法真实updates/4x4/LR/KL/eval一致，但selector信息预算、q和原文适配程度不同；Learn全局静态top50%，Grad每轮局部top25%。结果可以作为按各原文推荐/邻近设置的baseline比较，不能单独归因CUDA vs JAX或宣称Grad算法普遍较弱。Grad论文表格只证明其报告场景中优于其Align复现。
+- 建议诊断：在不先改算法的前提下，以5seed post-train mean±std及paired difference为主；结合Grad每轮validation_success_rate、candidate score分布/零分比例、mismatch selected/effective fraction、不同轮selected overlap，判断是target gradient稀疏/噪声还是确实选择无效。若要做机制归因，最小额外消融是Grad validation/candidate estimation rollouts，不应把框架差异作为首要解释。
+- 验证：PDF技能提取LearnAlign第4–6/16页与GradAlign第4–10/15页完整相关方法、实验、消融及参数内容；结合已核对的当前代码配置分析；git diff --check通过。未读取用户尚未提供的五seed具体数值，因而不判断统计显著性。
+
+## 2026-09-21 — 澄清真实训练与selector rollout及当前混合折中
+
+- 改动范围：无代码改动；回应Learn8/Grad4是否违反冻结4-rollout配置，仅核对当前实现并评估公平性。
+- 修改文件：仅`develop.md`。
+- 结论：冻结的真实GRPO update对两个方法始终是每prompt4 completions；LearnAlign estimation_rollouts=8、Grad candidate=4/validation=4仅属于额外selector数据生成，不改变真实update batch。Learn8遵循其GSM8K原文估计设置，Grad4则是算力/时长适配而非原文最忠实值；当前组合不能描述为selector预算完全对称。
+- 资源量：Learn静态筛选一次约2764×8=22112 selector rollouts。Grad 691updates/interval10共70轮，候选访问11056×4=44224，加30×4×70=8400 validation rollouts，共约52624，当前已约Learn的2.38倍；若Grad candidate/validation均16约210496，是Learn的9.52倍且远超冻结真实训练成本比例。原文真实训练每problem128rollouts使selector开销相对可控，当前真实update仅4导致照搬16/64比例失衡。
+- 方法忠实度：Grad原文明确kr<kv；当前4/4没有体现该关系。较小且更合理的折中是保持真实train4与candidate4、仅将validation4→8，提高目标方向稳定性且selector rollout总量约61024（比当前增加8400、约16%）；Learn保持8。若追求严格计算预算对称可两者selector都4，但会使Learn偏离原文且仍无法解决Grad动态重复筛选的总成本差。
+- 验证：rg/sed确认config与curriculum实际8/4/4、每轮重新计算validation/candidates；git diff --check通过。未改参数、未启动训练。若采用Grad validation8需代码/启动参数变更并重跑全部Grad seeds，不能与4-rollout结果混合。
+- 已知风险/待办：以上建议是复现忠实度与成本折中，不是已验证最优超参；用户需决定继续使用当前资源约束版，还是在最终矩阵前调整validation rollouts。论文必须披露selector rollout设置。
+
+## 2026-09-21 — 截止期约束下冻结Grad 4/4并撤回重跑建议
+
+- 改动范围：无代码改动；用户明确剩余时间不允许重跑GradAlign，承认此前未在冻结配置时充分前置说明4/4相对原文的取舍，冻结当前结果，仅更新日志。
+- 修改文件：仅`develop.md`。
+- 决策：不把Grad validation rollouts改为8，不重跑已完成/运行中的Grad seeds，不改任何训练脚本或参数。当前candidate4/validation4是资源约束适配，算法仍执行固定heldout identities、每10updates重新rollout/重算target gradient、candidate cosine top25%；不是伪GradAlign，但不能表述为原论文16/64-rollout严格复现。
+- 公平性说明：所有真实GRPO updates均4 rollouts。Learn selector8为原文且静态一次；Grad selector4/4虽单轮较少但动态约70轮，总selector rollouts约52624，仍为Learn22112的2.38倍。可称compute-constrained adaptation，不应声称selector per-prompt budget相同。Grad理论只要求多rollout方向估计，4导致方差提高而非公式改变。
+- 时长澄清：validation4→8只新增约8400 selector rollouts，为当前selector生成量约16%，未必把总墙钟12h变18h；TPU编译/同步与生成长度会非线性，未经实测不能给准确墙钟。无论估值，截止期与5seed矩阵优先，事后因结果较弱调参并重跑也会引入选择偏差。
+- 论文披露建议：写明candidate/validation各4、30 heldout GSM8K、interval10、q4、4096维LoRA signed-hash，以及Learn8/q2；把比较限定为matched frozen training budget下的adapted baselines。Grad未胜Learn可报告为当前同分布、低rollout regime结果，不做CUDA/JAX因果结论。
+- 验证：本轮仅决策/表述，无测试或训练；git diff --check通过。
+
+## 2026-09-21 — 估算Grad validation rollout 4→8墙钟
+
+- 改动范围：无代码改动；按用户实测Learn约6h、当前Grad约12h和已核对selector调用量做资源估算，仅更新日志。
+- 修改文件：仅`develop.md`。
+- 计算：当前Grad selector约candidate44224+validation8400=52624 rollouts；validation翻倍仅新增8400，总计61024，selector生成量倍率1.1596。真实691updates、candidate筛选、pre/post eval、保存均不变，因此总墙钟倍率应低于纯selector上限1.16附近，而动态同步/生成长度使线性估计有误差。
+- 估计：以当前12h/seed为基准，中心约13.5–14h，实用区间13–15h；18h意味着总墙钟+50%，除非出现新编译、异常长生成、重试或资源争用，否则不由validation rollout翻倍本身支持。5seed串行约67.5–70h中心，保守65–75h，相比当前约60h多约7.5–15h。
+- 风险：Learn6h不能直接线性外推Grad，因为Grad动态70轮、同步/反向/validation重复而Learn静态一次；估算不是实测。当前bounded4-rollout子批调度若validation8仍分两批4，理论峰值shape不增但持久时间增长；任何改动仍需重跑Grad并不得混用4/4结果。本轮不建议因估算自动改参数。
+
+## 2026-09-21 — 评估双worker并行与Grad rollout参数解耦
+
+- 改动范围：无代码改动；用户询问两个v5p16节点的空闲worker1利用、Grad train/candidate/validation rollout参数及解耦复杂度，仅核对实现与估算。
+- 修改文件：仅`develop.md`。
+- 参数结论：三者已独立：真实GRPO `--num-generations 4`；Grad candidate `--gradalign-candidate-rollouts 4`；Grad validation `--gradalign-validation-rollouts 4`。validation改8无需代码，只在单method Grad suite的`--`后透传flag；若希望suite顶层专用flag仅是小型UX修改（约脚本/测试十余行），算法不需要解耦。
+- worker结论：v5p16两个worker各有本地4chips，可在worker1用单进程bounds/visible0..3/task0独立训练，不与worker0组成JAX多进程。两个空闲worker1将5个Grad seeds按3+2分配，按13–15h/seed墙钟约39–45h中心约42h；若四个worker最终都可用，可2+1+1+1，最长约26–30h。每个worker磁盘、venv、HF cache、repo/log通常独立，不能假定worker0设置自动出现。
+- 同步建议边界：代码优先worker1独立git clone/pull同commit；venv用相同freeze/requirements重建而非直接复制整个venv（绝对路径/本地二进制风险）；安全传递.env/HF token并chmod600，不在命令输出暴露；核对TFDS data/model cache/磁盘，CPU unit及单worker JAX 1process/4devices smoke后启动。输出留在各worker本地需分别收集，或明确使用无目录冲突的共享盘。
+- 启动语义：Grad-only示意为suite `--methods gradalign ... -- --gradalign-validation-rollouts 8`；extra会被alignment parser消费，不影响冻结GRPO parser。若双methods一起跑该flag虽Learn不使用但metadata会含配置，建议Grad-only避免歧义。本轮不提供实际SSH hostname命令，因为节点名/zone/worker互通方式尚未核实，也不改代码或训练。
+- 验证：读取config.py、run_alignment_baseline.sh与suite参数透传，确认现有独立flags；git diff --check通过。未登录TPU、未测试worker1网络/环境或启动任务。
+
+## 2026-09-21 — 设计ziao1 worker0到worker1的无logs同步流程
+
+- 改动范围：无代码改动；依据用户提供的gcloud TPU VM SSH命令、同绝对路径及目标OS Login用户差异，给出安全同步步骤，仅更新日志。
+- 修改文件：仅`develop.md`。
+- 方案：worker0从`/home/jason_chia925_gmail_com/Project_8k`打包整个`tunix`，仅排除`tunix/logs`及可再生Python缓存；保留.git、.venv_jax081、data、my_example/.env及代码。用`gcloud alpha compute tpus tpu-vm scp --worker=1`传到目标/tmp，校验sha256，再由目标当前`sa_109...`用户用tar `--no-same-owner`解包到同一绝对父目录并创建空logs。
+- 所有权结论：路径名`/home/jason_chia925_gmail_com`不要求登录用户名相同；worker1该目录当前由sa用户拥有，因此解包后自然由sa拥有且可训练。不要chown到worker0用户名，目标可能不存在该OS账号。相同绝对venv路径提高可移植性，但仍需`pip check`/CPU unit；若系统Python或wheel ABI不同则重建venv而非修权限。
+- 安全边界：目标`tunix`已存在时预检应停止，不能自动覆盖/删除；临时archive使用唯一tag、mode600、校验后仅删除两个明确/tmp文件。`.env`含HF token，传输后chmod600且禁止输出内容；HF cache位于repo外不会随包复制，首次运行可能重新下载模型。各worker本地logs/磁盘独立，后续分别收集。
+- 验证：仅本地git diff --check通过；未执行gcloud、打包、复制、解压或远程命令，节点磁盘和目标是否已有Project_8k需用户预检。
+
+## 2026-09-21 — 接收ziao1 worker1同步及TPU环境验证通过
+
+- 改动范围：无代码改动；用户报告worker1目录/venv/unit/TPU检查结果，判断是否需重建环境，仅更新日志。
+- 修改文件：仅`develop.md`。
+- 结果：worker1以sa_109...登录，已存在同绝对路径`/home/jason_chia925_gmail_com/Project_8k/tunix/.venv_jax081`并能source；37项unit全部OK(1.638s)；单进程TPU检查process_count1/index0/device_count4/local4且coords完整。因此复制venv在当前相同绝对路径和系统镜像上可运行，无需重建。
+- 下一步验证：在worker1检查`command -v python`/sys.executable/sys.prefix确实指向该venv，`python -m pip check`必须明确No broken requirements，记录Python/JAX/JAXLIB版本；检查`my_example/.env`存在、非空、mode600且HF_TOKEN键非空但绝不输出token；检查data和磁盘。可与worker0分别对排序后的pip freeze做SHA256对比，hash相同则依赖一致。
+- 边界：`.venv_jax081`是Python环境，`my_example/.env`是秘密环境变量文件，两者不同。HF缓存位于实际sa用户HOME而非repo/venv，首次模型加载仍可能下载；38GB当前可用需按每run约2GB模型导出/其他日志管理。Ubuntu restart required与本次验证无关，不应在运行任务时重启。
+- 验证：依据用户终端输出；本地git diff --check通过。未登录worker1、未查看pip check被截掉的具体输出、未启动训练。
+
+## 2026-09-21 — 确认ziao1 worker1 venv与.env完整
+
+- 改动范围：无代码改动；接收worker1最终环境检查输出并判定可用，仅更新日志。
+- 修改文件：仅`develop.md`。
+- 验证结果：worker1解释器/sys.prefix均指向同绝对路径`.venv_jax081`，Python3.11.13、JAX/JAXLIB0.8.1，pip check为No broken requirements。pip freeze排序SHA256为`dc512238fe4a8a4c9b64ae6d35c335b8875b2c45c6f91cb8c17be67d0ab9a44f`且用户确认与worker0相同。`my_example/.env`存在非空、HF_TOKEN键非空、owner/group为当前sa用户、mode600；未暴露token。
+- 结论：venv与secret配置正常，无需重建、chown或再次同步；结合此前37unit OK和1process/4devices TPU检查，worker1可进入模型缓存/数据检查及smoke或正式训练阶段。
+- 已知风险/待办：依赖hash一致不包含repo commit、数据文件和HF cache；正式启动前仍核对git HEAD、data、磁盘及无重复进程。首次模型下载属正常，不能把环境通过等同于完整训练绝无OOM。
+- 验证：本轮依据用户终端输出；本地git diff --check通过，未远程执行命令或启动任务。
+
+## 2026-09-21 — 诊断ziao2 worker1的gcloud SSH停滞
+
+- 改动范围：无代码改动；用户从ziao2 worker0执行gcloud alpha TPU VM ssh worker1停在Attempting to connect，提供分层只读诊断，仅更新日志。
+- 修改文件：仅`develop.md`。
+- 初步定位：gcloud已解析TPU及worker编号，停滞发生在SSH网络连接/握手/认证阶段，与GradAlign、venv和TPU JAX初始化无关。潜在原因依次为默认外部路径不通而内部IP可达、worker1/sshd或guest agent未响应、OS Login/SSH key传播或host-key问题、节点health异常/高负载。
+- 安全流程：Ctrl-C停止卡住gcloud；describe查看state/health/networkEndpoints，dry-run查看底层ssh；优先同VPC`--internal-ip --command=hostname`并加ConnectTimeout15/ConnectionAttempts1；失败用`-- -vvv`收集最后握手阶段。可取worker1内部IP只读测试TCP22。不要直接pkill所有ssh/gcloud，不要重启/stop/delete整个ziao2，因为worker0可能有clean训练。
+- 判断：TCP22 timeout/refused指向worker1网络/sshd，Permission denied/publickey指向OS Login/key，host identification changed指向known_hosts，命令成功则改用internal-ip完成同步。`--force-key-file-overwrite`只在日志明确本地key损坏时用，不作为第一步。
+- 验证：查阅Google Cloud官方TPU VM SSH命令文档确认`--worker`、`--internal-ip`、`--dry-run`、`--ssh-flag`及`-- SSH_ARGS`语法；本地git diff --check通过。未连接云端或更改节点状态。
+
+## 2026-09-21 — 定位ziao2 worker1公网TCP22超时
+
+- 改动范围：无代码改动；根据用户describe/dry-run/SSH输出进一步定位连接问题，仅更新日志。
+- 修改文件：仅`develop.md`。
+- 证据：TPU state READY，两个endpoints内部IP为10.128.0.27/10.128.0.26，worker1公网IP34.58.2.45；dry-run明确底层ssh目标为`jason...@34.58.2.45`。实际从ziao2 worker0连接该公网IP port22多次Connection timed out，说明失败在TCP建立前，尚未进入host key、OS Login或publickey认证。
+- 下一步：在ziao2 worker0运行相同gcloud命令加`--internal-ip --dry-run`确认worker1内部IP映射，再用internal-ip+command+15秒超时连接。同VPC内优先内部路径；成功后所有ssh/scp均带internal-ip。若内部也timeout，取dry-run IP做TCP22探测；从Mac可尝试IAP作为独立路径诊断。
+- 判断边界：外部timeout最可能为external SSH ingress/firewall/routing，不代表worker1系统或TPU故障；state READY也不保证sshd健康。internal TCP open而认证失败才进入key/OS Login处理。不要使用force-key、删除known_hosts或重启整个TPU解决当前TCP timeout，更不能影响正在训练的worker0。
+- 验证：仅分析用户终端输出，本地git diff --check通过；未远程执行、未修改云资源。
+
+## 2026-09-21 — ziao1 worker1无git条件下启动Grad五seed方案
+
+- 改动范围：无代码改动；用户确认worker1无git命令、可用磁盘36GB并准备启动GradAlign，仅提供启动/监控命令并记录假设。
+- 修改文件：仅`develop.md`。
+- 环境结论：git CLI缺失不影响已同步工作树运行；前序archive SHA、venv依赖hash、37unit、pip check、1process/4TPU和.env均已通过。不能在worker1用git HEAD再核查，但无需为训练安装git。36GB通常足够Grad-only 5runs约10GB模型导出加checkpoint/log/cache，仍需监控磁盘。
+- 启动假设：根据历史节点分配，ziao1运行mismatch0.2；采用用户刚讨论的新Grad设置candidate4、validation8、q4，seeds顺序5/0/13/21/42，真实GRPO rollouts仍4。suite仅运行gradalign，避免Learn重复；若节点实际应跑clean需在启动前将noise改0，不能运行后混淆。
+- 操作边界：启动前pgrep确认无alignment任务，unset CPU强制和旧AB/result env，nohup显式单worker四变量，保存PID/日志。未替用户远程执行或启动；运行后必须从首行确认method/seed/mismatch并在selection metadata确认candidate4/validation8。
+- 已知风险/待办：单worker串行5seed预计约65–75h；若第二空闲worker准备好，3+2拆分可降至约39–45h，但不要重复seed。36GB不是硬保证，模型cache及每run导出需df监控，完成并备份后可按既定流程清理model。
+- 验证：本地git diff --check通过；未运行TPU训练。
+- 验证：仅算术与现有代码路径推断，git diff --check通过；未运行TPU benchmark。
+
+## 2026-09-21 — ziao2 worker1内网与IAP SSH均超时的归因
+
+- 改动范围：无代码改动；根据worker0内网SSH与Mac IAP SSH的新输出进一步定位worker1不可达问题，仅更新日志。
+- 修改文件：仅`develop.md`。
+- 证据：`--internal-ip --dry-run`将worker1正确映射为`10.128.0.26`且使用sa账号；worker0到该地址TCP22持续timeout。Mac经IAP已完成key传播并建立代理流程，但在`SSH banner exchange`阶段timeout，说明仍未从目标worker1的sshd收到协议banner。公网、同VPC内网、IAP三条路径均失败，已基本排除本地SSH key、用户名、known_hosts和单一公网路由问题。
+- 初步判断：优先级为worker1 VM/OS或sshd无响应，其次为针对worker1的防火墙/网络策略阻断TCP22，再次为worker1系统严重负载或启动不完整。IAP需放行`35.235.240.0/20 -> tcp:22`，但该项无法单独解释worker0内网TCP22也超时；因此不能只创建IAP规则后就认定修复。
+- 后续只读诊断：从worker0分别探测worker1的22与8470端口，并用worker0自身作对照；查看项目网络、防火墙与TPU worker日志。若8470可达而22不可达，更像sshd/SSH ingress；两者都不可达更像worker1或其网络接口异常。避免在worker0训练期间stop/start或reset整台v5p-16。
+- 恢复边界：若只读诊断确认worker1不可用，安全选项是暂用其他空闲worker；只有确认worker0无任务且结果已备份后，才考虑对整个TPU资源stop/start/reset，因为相关操作可能同时中断两个workers。
+- 验证：查阅Google Cloud官方IAP TCP forwarding、TPU资源管理与TPU VM排障文档；本地`git diff --check`通过。未远程执行、未更改防火墙或节点状态。
+
+## 2026-09-21 — 确认ziao2 worker1整体网络端点不可达
+
+- 改动范围：无代码改动；根据用户完成的最小只读端口与worker0健康检查作最终归因，仅更新日志。
+- 修改文件：仅`develop.md`。
+- 证据：从同一TPU节点的worker0探测worker1内部IP`10.128.0.26`，TCP22与TCP8470均timeout/closed；worker0自身sshd正常监听IPv4/IPv6端口22，主机已运行23天，当前仍承载训练。worker1过去可用同一条gcloud命令直接登录，因而静态SSH命令、用户名或长期缺失的通用防火墙规则不是首要解释。
+- 判断：worker1更可能是VM/网络接口/底层host失联或严重卡死；TPU控制面`READY`可能是节点级/滞后状态，不能证明每个worker OS与endpoint健康。两端口同时不可达也不符合单纯sshd故障。
+- 操作边界：已完成探测为只读且每端口最多5秒，不改变训练、TPU状态或网络配置；停止继续从worker0诊断。worker0训练完成并备份前，禁止对ziao2执行stop/start/reset/delete，因为这些资源级操作可能同时终止两个workers。当前使用其他健康worker承载新增实验，待worker0完成后再维护ziao2。
+- 额外风险：worker0根分区仅余11GB（89%使用），与worker1失联无直接因果，但当前训练需要只读监控剩余空间，避免生成模型/checkpoint耗尽磁盘；监控不得清理活跃run。
+- 验证：仅依据用户终端输出；本地`git diff --check`通过，未远程执行或修改云资源。
+
+## 2026-09-21 — 排除worker1 TCP22“被其他进程占用”为主要原因
+
+- 改动范围：无代码改动；解释TCP连接现象与端口占用的区别，仅更新日志。
+- 修改文件：仅`develop.md`。
+- 判断：若其他进程已占用并监听22端口，TCP连接通常能够建立，随后返回非SSH内容、立即断开或SSH banner异常；若sshd因端口冲突未能监听且网络/主机正常，客户端通常很快收到Connection refused。当前公网、内网和IAP均表现为timeout/banner timeout，且内部8470也timeout，更符合数据包被丢弃、worker1网络/VM无响应或防火墙DROP，而不是端口被占用。
+- 边界：无法登录worker1时不能直接运行`ss -ltnp`确认监听者，但现有三路径及双端口证据已足以把端口冲突降为极低概率；不建议为此触碰正在训练的worker0或重启整个节点。
+- 验证：本地`git diff --check`通过；未远程执行命令或修改云资源。
+
+## 2026-09-21 — 估算GSM8K DTV-Loo单seed运行时长
+
+- 改动范围：无代码改动；读取用户提供的`group_loo_policy` seed0完整stdout与run目录时间戳截图，区分训练循环和完整墙钟，仅更新日志。
+- 修改文件：仅`develop.md`。
+- 日志证据：seed0的691-step Actor Training由tqdm记录为`4:34:22`；pre-train 1319样本评测为`12:19`，post-train评测为`14:28`，三项合计最低`5:01:09`，尚未包含模型初始化/JIT、数据准备、模型合并保存和结果导出。
+- 时间戳估计：在连续suite假设下，seed5 LOO到下一baseline为5:39:30，seed21为5:34:22，seed13为5:22:18，三次均值约5:32:03。因此当前配置下DTV-Loo完整单seed可按约5.5小时、排期保守按6小时估算。
+- 边界：seed0目录起点20:37:08到下一run 07:29:17为10:52:09，但与日志最低时长相差近6小时，显然可能包含队列/人工空闲，不能作为纯运行时间。精确完整墙钟需用run根目录`exit_code`或最终结果文件mtime减目录名中的启动时间。
+- 验证：本地`git diff --check`通过；未运行训练或修改实验代码。
+
+## 2026-09-21 — 评估ziao2 worker1的替代登录与启动路径
+
+- 改动范围：无代码改动；核对Cloud TPU官方管理/SSH能力并评估在不影响worker0训练前提下的恢复方式，仅更新日志。
+- 修改文件：仅`develop.md`。
+- 结论：worker1的公网SSH、同VPC内网SSH、IAP SSH以及内部22/8470均不可达后，浏览器SSH、SCP、ProxyJump/worker0中转和`--command`都不会形成新的独立执行通道；它们最终仍依赖worker1 VM的TCP22。除非worker1上事先部署了可用的调度agent/cron（当前没有证据），无法远程启动训练。
+- 官方能力边界：`gcloud compute tpus tpu-vm`对连接支持`--worker`，但生命周期命令仅提供node级start/stop，没有官方单worker restart。串行控制台日志可用于诊断，但不是启动训练的替代交互通道。
+- 安全方案：worker0训练期间保持ziao2不变，改用另一健康worker或新建独立TPU资源；worker0完成并备份后，再对整个ziao2执行stop/start并复测worker1。若无法等待，可向Google Cloud Support请求后端修复，但不承诺不影响node。
+- 验证：查阅Google Cloud官方TPU VM命令索引、SSH、架构、监控与排障文档；本地`git diff --check`通过。未修改云资源或启动任务。
+
+## 2026-09-21 — 解释ziao2单worker失联而worker0继续训练
+
+- 改动范围：无代码改动；说明v5p-16多host架构、列出局部故障原因和无侵入控制面核查方法，仅更新日志。
+- 修改文件：仅`develop.md`。
+- 架构判断：v5p-16由两个TPU hosts组成，每个worker是一台独立Linux VM并连接4颗TPU芯片；两者分别拥有guest OS、boot disk、NIC、sshd和用户进程。当前训练以单process/4devices约束在worker0，不需要worker1参与collective，因此worker1 VM或网络局部故障不会自动终止worker0。
+- 原因排序：worker1 guest OS/kernel/network stack或底层host卡死最可能；其次为worker1 NIC/路由状态异常或控制面endpoint陈旧；再其次为worker1磁盘/系统资源故障造成整机失去响应。单纯SSH key、用户名、22端口占用或仅sshd故障与22和8470三路径同时timeout不符；统一VPC firewall变更也因worker0仍可达且过去worker1可登录而概率较低，但不能在没有审计日志时绝对排除。
+- 安全诊断：可从Mac读取`get-guest-attributes`并按worker_id 0/1对照，或在Cloud Monitoring/Logs Explorer以`resource.type=tpu_worker`、node_id和worker_id筛选CPU、内存、网络及runtime_monitor最后上报时间。这些为控制面只读查询，不访问worker0训练进程。若worker1指标在某时刻整体停止而worker0连续，强烈支持局部VM/host失联。
+- 验证：查阅Google Cloud官方TPU VM架构、guest attributes命令和TPU Worker监控文档；本地`git diff --check`通过。未远程执行或改变云资源。
+
+## 2026-09-21 — 排除ziao2因容量不足仅启动半个v5p-16
+
+- 改动范围：无代码改动；分析用户提供的worker0/1 guest attributes和控制面endpoint，判断是否属于半分配，仅更新日志。
+- 修改文件：仅`develop.md`。
+- 关键证据：控制面为v5p-16返回两个networkEndpoints；worker0与worker1均有独立hostname、三类SSH host keys、guest-agent `sshable`和lifecycle属性。`sshable`值分别为1787970763与1787970751，换算为2026-08-29 02:32:43/02:32:31 UTC，仅差12秒，并与worker0在2026-09-21显示约23天uptime相吻合，证明该轮启动时两个worker均完整启动并由guest agent上报可SSH。
+- 结论：不是central1容量不足导致只分配worker0。多host slice作为完整拓扑配置；若启动时不足以满足v5p-16，正常表现应是等待资源、provisioning/failed或整个slice无法可用，而不是READY同时留下完整worker1 endpoint/host keys/sshable记录。当前属于成功启动后的worker1局部失联或控制面/底层host异常。
+- 容量的间接可能：区域缺少空闲备件可能影响Google后台对故障host的迁移/替换速度，但现有证据不能证明这一点；它与“最初只启动一个worker”是两个不同命题。
+- 限制：guest attribute `sshable`更像启动/配置事件而非持续心跳；两个instance-state均包含localhost:3201 health-agent timeout，且worker0当前可正常训练，因此该字段不能单独判定worker1故障原因。应以TPU Worker监控中两个worker最后上报时间作进一步对照。
+- 验证：查阅Google Cloud多host slice、queued resources与TPU资源文档；本地`git diff --check`通过。未更改云资源或运行训练。
+
+## 2026-09-21 — 纳入ziao2 worker1历史磁盘满与AIME停训线索
+
+- 改动范围：无代码改动；结合用户补充的AIME/GSM8K使用时间线重新评估worker1失联原因，仅更新日志。
+- 修改文件：仅`develop.md`。
+- 时间线：worker1此前长期运行GRPO AIME extension；曾因根盘占满停止一次，但用户清理后恢复正常且AIME停训时仍可登录。约一周半前转向GSM8K后未再登录worker1，直至当前发现公网/内网/IAP及22/8470均不可达。因此故障发生窗口只能确定在最后一次成功登录至当前之间，并非上次v5p-16启动时缺少容量。
+- 磁盘判断：历史磁盘满可能造成服务写入失败、journal/agent异常、残留大文件或间接诱发系统不稳定，值得作为线索；但若只是当前磁盘100%而kernel/network仍健康，TCP22通常仍能建立并返回SSH banner，随后才可能在认证/建session时失败。当前连8470也timeout，说明单纯“磁盘又满了”不足以解释，更像磁盘/负载问题进一步引发guest OS、kernel、NIC或底层host无响应。
+- 其他可能：AIME残留进程持续运行并耗尽host RAM/CPU、kernel OOM/hang、日志再次增长填盘、底层维护/硬件故障或worker1网络状态异常。普通TPU HBM OOM只终止XLA/JAX任务，通常不会使SSH与8470同时消失。
+- 无侵入核查：从Mac按worker_id比较Cloud Logging/Monitoring最后上报时间与CPU、memory、network。如果worker1在某一时刻全部停止，定位失联时点；若停止前memory/CPU异常或日志出现disk/OOM，可确定原因。查询控制面日志不触碰worker0训练。
+- 验证：本地`git diff --check`通过；未远程执行或修改资源。
+
+## 2026-09-21 — 定位ziao2 worker1监控中断时间
+
+- 改动范围：无代码改动；读取用户从Cloud Logging导出的worker0/1 runtime_monitor记录并确定故障窗口，仅更新日志。
+- 修改文件：仅`develop.md`。
+- 时间证据：worker0在2026-09-21 06:14 UTC仍约每32.55秒持续上报；worker1最后一条为2026-09-17 18:40:36.611523088 UTC，即北京时间2026-09-18 02:40:36，此前同样约每32.55秒稳定上报，随后完全停止。
+- 资源证据：worker1停止前约16分钟可用host memory稳定在428.2–428.3GiB，没有逐步下降或临界耗尽，故host RAM OOM不受当前数据支持。新增GSM8K baseline在9月13日已经开始而worker1继续监控至9月17日，说明该实验启动本身没有立即使worker1失联。
+- 判断：监控周期从正常稳定状态突然中断，加之当前SSH/IAP/22/8470不可达，更像worker1 VM/kernel/NIC/底层host突然失联，或runtime monitor与整机服务一并停止。它不能单独证明键控/SSH密钥丢失；密钥问题不会令runtime_monitor停止或8470不可达。历史磁盘问题仍可能间接诱发系统故障，但需故障时间窗内的error/serial日志支持。
+- 后续只读核查：从Mac读取2026-09-17 18:30–19:30 UTC的worker1全部日志（不仅runtime_monitor）以及同时间Cloud TPU审计日志，搜索OOM、disk、filesystem、kernel、maintenance、reset、stop/update事件。不会触碰worker0训练。
+- 验证：本地`git diff --check`通过；未远程执行或修改云资源。
+
+## 2026-09-21 — 尝试读取ziao2 worker1故障窗口JSON
+
+- 改动范围：无代码改动；尝试读取用户提及的故障窗口日志，仅更新日志。
+- 修改文件：仅`develop.md`。
+- 结果：用户给出的本机路径`/Users/jason/Desktop/ziao2_worker1_failure_window.json`在当前执行环境不存在，附件目录中也未发现同名文件，因而本轮无法检查日志内容。
+- 待办：请将JSON实际附加到任务，或复制到当前workspace可访问路径后重新提供；收到后检查最后正常心跳、severity、logName以及disk/OOM/kernel/network/maintenance事件。
+- 验证：本地`git diff --check`通过；未修改实验代码或云资源。
+
+## 2026-09-21 — 成功读取并分析worker1故障窗口JSON
+
+- 改动范围：无代码改动；用户确认后再次检查Desktop路径，文件已出现并完成内容分析，仅更新日志。
+- 修改文件：仅`develop.md`。
+- 文件情况：`/Users/jason/Desktop/ziao2_worker1_failure_window.json`为40KB，共38条记录；首次检查时文件尚不存在，二次检查时已可读取，并非权限错误。
+- 内容：全部为`runtime_monitor`的INFO级`memoryanalyzer`事件，覆盖2026-09-17 18:20:32至18:40:36 UTC；每约32.55秒一条。可用host memory最小428.2145、最大428.3329、均值428.2682GiB，首尾增加0.0362GiB，无内存耗尽趋势。最后一条evententry在18:40:34、Cloud Logging接收于18:40:37，随后至导出窗口结束无任何记录。
+- 结论：文件确认监控在稳定状态下突然中断，但没有包含warning/error、kernel、disk、network或maintenance事件，无法单独确定根因。它排除明显host-memory逐步耗尽，但不排除磁盘、kernel/NIC/host突然故障。需另查审计日志和非runtime_monitor日志。
+- 验证：使用`jq`检查记录数、首尾完整JSON、payload字段及内存统计；本地`git diff --check`通过。未更改云资源或训练。
+
+## 2026-09-21 — 停止追查ziao2 worker1并保留worker0执行GradAlign
+
+- 改动范围：无代码改动；用户反馈非runtime与audit日志查询未成功并决定停止诊断，仅更新日志。
+- 修改文件：仅`develop.md`。
+- 决策：现有公网/内网/IAP、22/8470和监控中断证据下，worker1无法通过用户态命令恢复；大概率需要node级stop/start或Google后端处理。节点级重启会中断worker0，且可能触发区域容量重新分配风险，因此截止期前不为恢复worker1重启ziao2。
+- 执行安排：保持worker0当前训练不动；训练结束、结果验证和备份后，继续在健康worker0运行GradAlign的validation rollouts=8实验。保持candidate rollouts=4、真实training rollouts=4、GradAlign q=4及其他冻结参数不变，避免把“rollouts=8”误扩展到其他阶段。
+- 启动前风险：worker0此前仅余11GB，正式下一轮前必须确认当前任务退出、备份必要结果并安全释放已完成run的模型/检查点空间；否则新run可能因磁盘不足失败。不要删除活跃run。
+- 验证：本地`git diff --check`通过；未停止/重启TPU、未启动新训练。
+
+## 2026-09-22 — 复核GradAlign的候选与验证rollout设定
+
+- 改动范围：无代码改动；逐页复核GradAlign正文第4.3/5.2节、附录A表5及附录F，仅更新日志。
+- 修改文件：仅`develop.md`。
+- 原文证据：第4.3节把`k_r < k_v`写成因训练候选池远大于验证集而可减少候选rollout的设计动机；但第5.2节和附录F明确给出标准配置`k_r = k_v = 16`，并另列真实RL更新rollout数`n_t = 128`。因此论文没有要求验证rollout必须高于候选或真实训练rollout。
+- 更正：此前建议在当前适配中采用candidate=4、validation=8，是基于第4.3节动机作出的工程折中，并非论文规定或论文标准超参数；也不应把候选估计的`k_r`称为真实training rollout。
+- 当前建议：若目标是冻结GSM8K训练预算并保持GradAlign两类估计对称，使用`k_r = k_v = 4`更直接且无需因论文重跑4/8；若追求原文超参数则应两者同时为16，但计算代价显著且真实更新仍是独立参数。任何4-rollout设置都应在论文中披露为框架适配。
+- 验证：渲染并目视检查PDF第5、7、15、20页；本地`git diff --check`通过。未修改实验代码或启动训练。
+
+## 2026-09-22 — 分析GSM8K中GradAlign弱于LearnAlign的原因
+
+- 改动范围：无代码改动；对照两篇论文与当前selector实现分析结果差异，仅更新日志。
+- 修改文件：仅`develop.md`。
+- 主要混杂因素：当前LearnAlign selector使用8 rollouts而GradAlign候选/验证均为4；论文原配置分别为LearnAlign 8以及GradAlign `k_r=k_v=16`。真实GRPO update均为4不等于selector估计预算相同，GradAlign的cosine需要同时估计候选和validation两侧方向，对低rollout更敏感。
+- validation实现：当前每seed从打乱后的3072个GSM8K训练样本取约2764个训练prompt，剩余held-out部分的前30个作为固定validation prompt；每10步重新生成rollouts并重算方向，但prompt身份不重选。它是干净同域参考集，却没有按难度或有效梯度分层。
+- 稀疏梯度机制：二元GRPO在一个prompt的rollouts全对或全错时组内advantage为零。有效非零信号概率为`1-p^k-(1-p)^k`；例如`p=0.1`时，k=4/8/16分别约0.344/0.570/0.815。因此GradAlign的4-rollout validation/candidate方向可能明显更稀疏、更高方差，而LearnAlign的8-rollout learnability与全训练池聚合更稳。
+- 任务差异：GradAlign原文优势集中在外部validation能提供额外目标信息的噪声、分布失衡和低效用数据场景；当前GSM8K训练与validation同域且较均质，LearnAlign的`p(1-p)`中等难度偏好本身就与其原文GSM8K优势匹配。20% deterministic rank reversal也不同于GradAlign论文的50% Bernoulli随机奖励污染。
+- 结果解释边界：修复签名哈希前的GradAlign结果受已量化的排序/符号误差影响，不能用于判断方法优劣；修复后若仍较差，应结合selection JSONL检查validation/candidate混合结果比例、cosine分数塌缩、跨轮稳定性、污染入选率及clean/mismatch差异，再区分估计噪声、过强25%保留和目标不匹配。
+- 验证：检查当前`alignment_main.py`、`curriculum.py`、`config.py`、`scoring.py`及两篇PDF相关章节；本地`git diff --check`通过。未修改实验代码或运行训练。
+
+## 2026-09-22 — 解释GradAlign validation rollout 8在单seed低于4
+
+- 改动范围：无代码改动；复核GradAlign附录E的梯度噪声实验、当前采样实现和五seed统计含义，仅更新日志。
+- 修改文件：仅`develop.md`。
+- 论文边界：附录E把`k_v`从32提高到128/512时，报告的是两次独立采样所得cosine similarity score的Pearson相关性从0.30提高到0.49/0.79；这证明更多rollout可提高评分稳定性，不证明最终模型accuracy随`k_v`逐seed或单调提高。主实验仍为`k_r=k_v=16`，没有4对8的最终性能消融。
+- 当前对比：只把validation从4改为8而保持candidate为4，并非论文标准的对称配置；它降低reference方向方差，但candidate梯度仍高方差，而且改变筛选集合后会引导完全不同的在线训练轨迹。因此seed5低约2个百分点可能是seed波动、选择轨迹差异或当前任务中更稳定的reference并未带来更好数据，而不是实现必然错误。
+- 随机性核查：Tunix vanilla sampler每次generate使用配置中的固定无状态seed，不存在“8比4额外消耗全局RNG导致后续随机流错位”的状态机；但不同validation方向会改变选中数据和模型参数，后续rollout即使同seed也会因模型不同而分叉。
+- 统计结论：paired t-test检验的是五个seed差值的均值相对差值标准差，并不要求五个差值同号；但n=5、df=4时双侧0.05临界值约2.776，功效很低。一个seed为-2pp会增加方差，但不会数学上自动导致检验失败。不能在其余seed完成前声称8优于4，也不能由单seed断言8更差。
+- 排期建议：validation=8只是可选消融，不是忠实复现要求。截止期约束下优先保留修复后统一`k_r=k_v=4`的五seed主baseline并披露计算适配；除非需要专门研究estimation budget，否则无需为证明8优于4追加整套五seed。
+- 验证：检查GradAlign PDF附录E表6、当前sampler/rollout seed路径和selector配置；本地`git diff --check`通过。未修改实验代码或启动/停止训练。
+
+## 2026-09-22 — 估算GradAlign从4/4提高到16/16的墙钟
+
+- 改动范围：无代码改动；依据当前curriculum规模、内存分块实现和已观测12小时墙钟估算，仅更新日志。
+- 修改文件：仅`develop.md`。
+- 工作量：当前约70个selection rounds，每轮常规为160 candidate和30 validation prompts；4/4约产生5.26万次selector rollouts，16/16约21.05万次，selector生成与梯度工作量接近4倍。真实691-step GRPO update仍是4 prompts×4 completions，前后1319题评测、保存和大部分初始化不会变成4倍。
+- 墙钟模型：以当前4/4约12小时、普通冻结训练/评测约5–6小时估算，selector部分约6–7小时；16/16约为`5.5 + 4×6.5 = 31.5`小时，现实范围约30–36小时/seed。48小时是把固定阶段也错误乘4所得保守上界。
+- HBM/编译：代码对`num_rollouts>4`会把completion梯度按4-rollout subbatch顺序执行，因此反向峰值不会直接按4倍增长；但每个4-prompt generation chunk会从16条completion增至64条，并触发新shape编译，仍需先做16/16 HBM smoke test，不能仅由4/4通过推断正式运行必过。
+- 排期：单worker五seed约150–180小时（6.3–7.5天）/condition，clean与mismatch两套约12.5–15天；因此截止期下完整16/16矩阵不可取，修复后的4/4五seed并披露计算适配更现实。
+- 验证：检查`gradient_features.py`的`num_rollouts>4`分块路径、GradAlign每轮candidate/validation规模及论文标准参数；本地`git diff --check`通过。未修改实验代码或运行TPU任务。
+
+## 2026-09-22 — 对齐LearnAlign、GradAlign与本项目的AIME评测指标
+
+- 改动范围：无实验代码改动；复核两篇论文的AIME数据集、采样数与聚合定义，并解释本项目表格中的`Pass@1`、`Pass@16`、`Maj@16`、`Extractable`和条件准确率，仅更新日志。
+- 修改文件：仅`develop.md`。
+- LearnAlign：在AIME2024的30道题上报告`pass@8`，即每题采样8次、至少一次正确的问题比例；Qwen2.5-3B/7B对应23.3%/30.0%。它不是单次生成准确率，不能与本表`Pass@1`直接比较。
+- GradAlign：在合并AIME24/25上报告的AIME曲线指标标为`reward/mean@16`，即每题16次生成的平均正确奖励；其18.3%或20.5%最接近本项目用16个completion估计的`Pass@1`，但模型、题集、训练数据与训练计算均不同。
+- 本项目表格：若每题生成16次，则`Pass@1=(1/N)\sum_i c_i/16`；`Pass@16=(1/N)\sum_i\mathbf{1}[c_i\ge1]`；`Maj@16`为16次答案多数/众数聚合后的题目准确率。`Extractable × Acc. given extractable = Pass@1`，截图中的DTV-Loo约为`0.7521×0.1773=0.1333`，验证了指标解释。
+- 结论：TPU/JAX本身不是绝对分数低的主要解释。更大的混杂因素是评测指标、AIME版本、模型规模、训练数据、rollout预算、解码参数、最大生成长度以及答案解析/判分器。两篇论文所称“效果好”主要是各自在匹配设置下相对baseline的提升，而不是一个可跨设置直接比较的统一AIME accuracy。
+- 验证：使用`pdftotext -layout`提取两篇论文并渲染目视检查LearnAlign表2和GradAlign的AIME曲线/实验表；按截图数值验证分母与恒等关系；`git diff --check`通过。未修改或运行训练代码。
+
+## 2026-09-22 — 比较AIME实验所用模型参数规模
+
+- 改动范围：无代码改动；按名义参数量比较本项目DeepSeek-R1-Distill-Qwen-1.5B与LearnAlign/GradAlign模型，仅更新日志。
+- 修改文件：仅`develop.md`。
+- 参数量比例：Qwen2.5-3B约为1.5B的2倍，Qwen2.5-7B约4.67倍，Qwen3-8B约5.33倍；因此8B可描述为约5.3倍，而不是严格6倍。
+- 解释边界：参数量比例不等同于AIME准确率比例，也不等同于端到端训练时间比例。蒸馏数据、预训练与后训练、模型代际、上下文/生成长度、rollout数量和评测协议都会影响结果；DeepSeek-R1-Distill-Qwen-1.5B的推理蒸馏也使其不能仅按参数量与普通Qwen基座线性比较。
+- 验证：算术核对`3/1.5=2`、`7/1.5≈4.67`、`8/1.5≈5.33`；未修改或运行训练代码。
+
+## 2026-09-22 — 核对GradAlign clean五seed、validation-rollouts=8启动命令
+
+- 改动范围：无实验代码改动；检查suite参数解析、额外参数透传、TPU单worker环境变量及nohup重定向语法，仅更新日志。
+- 修改文件：仅`develop.md`。
+- 参数核对：`--methods gradalign`、`--mismatch 0`、`--gradalign-selection-ratio 4`均由suite直接解析；`--`后的candidate rollouts 4和validation rollouts 8会透传到`alignment_main.py`。seed顺序`5 0 13 21 42`有效。
+- 发现问题：原命令在日志/PID文件名中写入字面量`*`，虽可创建但不便后续引用且有glob风险；最后参数行以反斜杠续行后又插入空行，可能提前结束`nohup`命令，使后续重定向成为独立命令。
+- 修正：文件名改用普通下划线；重定向紧跟最后一个续行块；正式启动前要求`pgrep`无现存alignment进程，并先用同参数`--dry-run`确认展开结果。
+- 验证：读取`run_alignment_baseline_suite.sh`和`run_alignment_baseline.sh`参数处理逻辑；`git diff --check`通过。未启动或停止TPU任务。
+
+## 2026-09-23 — ziao2 worker1重启后的检查与clean seed21启动准备
+
+- 改动范围：无实验代码改动；分析worker0向重启后的worker1同步归档失败的日志，并制定不影响worker0的检查、轻量同步和单seed启动流程，仅更新日志。
+- 修改文件：仅`develop.md`。
+- 当前状态：worker1的SSH/SCP连接已经恢复；失败原因不是网络，而是远端写入`/tmp/tunix_worker1_20260923_131400.tar.gz`时报`No space left on device`。606MB归档未成功落盘，不能视为同步完成。
+- 风险：多次SCP重试使用同一目标名，通常只留下一个截断文件，但仍需在worker1核对`df -h/df -ih`以及该文件实际大小；同时检查重启前的`Project_8k/tunix`、虚拟环境、数据和`.env`是否仍在。
+- 同步策略：若旧环境和数据完整，仅同步源码，排除`logs`、`.venv_jax081`、`data`、`.git`及缓存，避免再次传输606MB环境归档。同步后比较关键脚本SHA、运行CPU单元测试并确认TPU只暴露本worker的4颗芯片。
+- 启动目标：确认无活跃alignment进程后，在worker1单独启动GradAlign clean seed21，保持candidate rollouts=4、validation rollouts=8、selection ratio=4和真实GRPO冻结参数不变。
+- 验证：读取用户提供的完整SCP输出并复核suite启动参数；`git diff --check`通过。未远程删除文件、未启动或停止TPU任务。
+
+## 2026-09-23 — 制定worker0到重启worker1的完整训练环境流式同步方案
+
+- 改动范围：无实验代码改动；针对worker1缺少代码、`.venv_jax081`、数据和`.env`的情况，设计完整项目同步与验证流程，仅更新日志。
+- 修改文件：仅`develop.md`。
+- 同步内容：复用worker0已生成的`/tmp/tunix_worker1_20260923_131400.tar.gz`，其中仅排除了`logs`、Python缓存和pytest缓存，因而包含代码、Git元数据、虚拟环境、训练/测试数据及`.env`。
+- 空间处理：先删除worker1上同名的失败截断包并检查块空间与inode；远端至少要容纳项目解压后的实际大小并预留训练输出空间。采用`cat archive | gcloud ... ssh --ssh-flag=-T --command='tar -xzf - ...'`流式解压，避免远端再保存一份606MB压缩包。
+- 完整性验证：传输前在worker0运行`gzip -t`和SHA256核对；传输后在worker1检查关键目录、Python/JAX版本、`pip check`、`.env/HF_TOKEN`、CPU单元测试和4颗本地TPU枚举。虚拟环境绝对路径在两端一致，具备直接复用条件。
+- 启动边界：所有检查通过且无alignment进程后，才启动GradAlign clean seed21（candidate=4、validation=8、q=4）；如流式解压出现空间错误，不得继续训练。
+- 验证：复核原tar创建命令的排除项、已记录SHA256及目标绝对路径；`git diff --check`通过。未实际连接TPU或执行同步/训练。
+
+## 2026-09-23 — 修复worker1完整同步后的Unix所有权并重新核对环境hash
+
+- 改动范围：无实验代码改动；分析worker1上`.env`权限失败和pip-freeze hash变化，制定一次性所有权修复及当前两端环境对比流程，仅更新日志。
+- 修改文件：仅`develop.md`。
+- 根因：同步后的项目文件仍归worker0用户`jason_chia925_gmail_com`所有，而worker1登录身份为`sa_109738781960981123169`。`.env`为600权限，因此worker1无法读取或chmod；仓库根目录对other仅有读/执行权限，训练时也无法正常创建`logs`。
+- 修复原则：只对`/home/jason_chia925_gmail_com/Project_8k/tunix`及其直接父目录执行一次精确的`sudo chown`，不对系统或整个home做递归修改；之后测试和训练全部以普通`sa_...`用户运行，禁止用sudo启动训练，以免产生新的root-owned输出。
+- 环境判断：Python 3.11.13、JAX/JAXLIB 0.8.1以及`pip check`无错误说明复制环境基本可用。`pip freeze`旧参考hash`dc512...`来自之前时点/节点，不能单凭worker1当前hash`763167...`判定损坏；应分别在当前worker0和worker1生成排序后的freeze清单并比较。hash一致即可，若不一致再用`comm/diff`定位具体包。
+- 后续验证：修复所有权后确认`.env/HF_TOKEN`可读、仓库无异主文件、CPU测试通过、TPU为单进程4设备、磁盘充足且无旧alignment进程，再启动clean seed21。
+- 验证：根据用户提供的`ls -l`、权限错误、Python版本和pip输出完成诊断；`git diff --check`通过。未远程变更所有权或启动训练。
+
+## 2026-10-01 — 复核LearnAlign/GradAlign模型规模并评估7B rebuttal实验
+
+- 改动范围：无实验代码改动；重新逐页核对两篇论文的训练模型、judge模型、训练超参数、rollout预算和资源披露，并评估从1B/1.5B扩展到7B的必要性，仅更新日志。
+- 修改文件：仅`develop.md`。
+- LearnAlign模型：GSM8K子集实验使用Qwen2.5-1.5B-Instruct；DAPO-MATH-17K的跨基准/AIME实验使用Qwen2.5-3B和Qwen2.5-7B。AIME2024结果因此不是1.5B结果。DAPO配置为选1000题、每题探索8个rollout、batch 64、prompt 512、response 2048、2 epochs、AdamW、LR 1e-6、KL 0.04、训练温度1.0和评测温度0.8；warmup使用1000题，梯度估计主要取每题一个正确rollout。论文只说明Qwen2.5-3B时间在单GPU统计，未披露GPU型号；LoRA-space gradient被列为可选扩展而非明确的主实验设置。
+- GradAlign模型：AIME/AMC、SuperGPQA/TheoremQA和noisy-reward场景均训练Qwen3-8B-Base；MMLU-Pro与Countdown场景使用Qwen2.5-1.5B-Math系列。所有稀疏正确性reward由Qwen2.5-72B-Instruct judge提供。AIME/AMC配置为每步128个训练问题、每题128个真实训练rollout、每10步重选、标准估计rollout 16、q=4保留25%；标准计算分析使用candidate/validation均16。论文未披露GPU型号、数量或绝对墙钟，只报告选择带来约65%相对计算开销。
+- 参数比例：相对1.5B，3B/7B/8B分别约2倍/4.67倍/5.33倍；相对1B分别3倍/7倍/8倍。BF16纯权重大约为6GB/14GB/16GB；若按GradAlign附录所述AdamW全参数训练峰值约16 bytes/parameter，则约48GB/112GB/128GB，尚未计入参考模型、KV cache和长序列activation。72B judge的BF16权重约144GB，但它只用于推理判分。
+- rebuttal判断：1B/1.5B上的同规模公平对比仍然有效，不因其他论文使用大模型而失效；但两篇在AIME上的核心证据来自7B/8B，审稿人可能质疑scale generality。最有性价比的准备是先做DeepSeek-R1-Distill-Qwen-7B的HBM/编译smoke，再只扩展最核心AIME条件和Vanilla/DTV/DTV-Loo，不应直接复制GradAlign原始128训练rollout预算或立即承诺完整clean×mismatch×5-seed矩阵。
+- 资源估计：同token/rollout预算下，7B相对1.5B的参数相关计算约4.67倍，实际墙钟通常约3–6倍并取决于分片和生成长度；全矩阵成本远高于单一scale验证。建议先用1个seed验证趋势，再根据rebuttal问题决定是否扩展到3个seed；单seed只能作为补充趋势证据，不能支撑显著性结论。
+- 当前AIME代码可行性：现有正式配置使用`DeepSeek-R1-Distill-Qwen-1.5B`、8个generation、8192最大response、actor/reference与rollout分离到v5p-16双worker，并且当前`lora_config`为空，属于全参数训练。活跃模型配置中只明确注册了1.5B变体，因此7B并非只替换Hugging Face模型名；还需先补齐/验证7B模型配置、checkpoint转换与加载、tokenizer、FSDP/TP分片及vLLM兼容性。8192长生成与rollout KV cache预计比纯权重大小更容易成为HBM瓶颈。
+- 7B预备策略：先做只覆盖加载、一次rollout、一次真实更新、DTV/DTV-Loo梯度计算和checkpoint/eval恢复的兼容性smoke；通过后再运行最核心条件的Vanilla/DTV/DTV-Loo。若只为预防rebuttal，1个seed可验证工程和趋势，3个seed才适合形成较可信的规模证据；在收到明确scale质疑前，不建议预先跑全方法五seed矩阵。若预算不足，3B是与LearnAlign较小AIME设置直接对齐、成本约为1.5B两倍的中间选项。
+- 验证：使用Bundled Poppler完整抽取并渲染目视检查LearnAlign实验设置/表2/表4/表5/表6/限制与GradAlign实验设置/表1/表5/附录F；`git diff --check`通过。未修改或运行训练代码。
+
+## 2026-09-23 — 核对论文GRPO超参数表中的GSM8K列
+
+- 改动范围：无实验代码改动；沿正式GSM8K launcher、参数解析、数据切分、优化器构造、GRPO配置和前后评测路径逐项核对论文表格，仅更新日志。
+- 修改文件：仅`develop.md`。
+- 核对结果：4 prompts/update、4 completions/prompt、256/768最大prompt/生成长度、AdamW与`1e-6`峰值学习率、69-step warmup后cosine decay、691次更新、KL系数0.08、clip epsilon 0.2、Adam `(0.9, 0.99)`、weight decay 0.1、`sequence-mean-token-mean`、完整1319题test评测、greedy decoding和最大评测生成768均与正式代码一致。
+- 表格问题：GSM8K的`Train micro-batch size`不应写`--`，正式launcher明确设置为4；为避免歧义，首行宜写作`Prompts per update / completions per prompt`，其值仍为`4 / 4`。评测温度/top-p实际为`None / None`并配合`top-k=1`实现greedy，表中写`greedy`语义正确，但列名可改为`Evaluation decoding`。
+- 计算证据：3072个样本按4组成768个batch，90%训练切分为`int(768×0.9)=691`个batch/更新；默认warmup fraction为0.1，故`int(0.1×691)=69`步。
+- 已知边界：结论针对正式launcher未额外传入覆盖这些参数的CLI选项；smoke test或手工override运行不属于论文正式配置。
+- 验证：静态检查`my_example/run_grpo_gemma.sh`、`config.py`、`main.py`、`train.py`与`tunix/rl/grpo/grpo_learner.py`；未运行TPU训练。
+
+## 2026-09-25 — 向匿名GRPO/GSM8K仓库增量加入LearnAlign与GradAlign
+
+- 改动范围：源训练仓库无实验代码改动；将当前已提交的LearnAlign/GradAlign实现、正式launcher、suite、投影审计、TPU smoke入口和六个host测试增量整理到同级匿名仓库`anonymous_tunix/grpo_gsm8k`，并更新匿名README与根README。本仓库仅更新本日志。
+- 匿名仓库新增范围：`my_example/alignment_main.py`、`my_example/alignment_baselines/*.py`、`run_alignment_baseline.sh`、`run_alignment_baseline_suite.sh`、`audit_alignment_projection.py/.sh`、`test_alignment_selector_hbm.py`、`test_alignment_selector_v2.sh`、`verify_learnalign_feature_equivalence.sh`及`tests/my_example/alignment_*_test.py`。
+- 匿名化处理：把`runs_xuesong`默认目录改为通用`artifacts/alignment_baselines`；launcher改用匿名仓库已有的`export_results.py`和`result_tools/plot_global_eval_rewards_sum.py`；未复制源Git历史、handoff/develop记录、训练结果、checkpoint、`.env`、服务器队列或机器路径。公开上游Google Tunix的许可证归属和链接按第三方来源说明保留。
+- 文档：匿名README现列出七种方法，新增LearnAlign `q=2`、8个selector rollouts、300-prompt warmup，以及GradAlign `q=4`、30个clean validation prompts、4/4 candidate/validation rollouts、10-step重选间隔；说明二者保持691次真实GRPO更新并支持相同确定性reward-rank mismatch。
+- ICLR边界：依据ICLR 2027 Author Guidelines复核双盲要求；补充代码不得暴露作者身份，允许使用完全匿名仓库链接。匿名扫描未发现个人姓名、邮箱、macOS/Linux用户路径、主机名、私有远程地址或凭证；仅发现Tunix公开上游链接与一个通用`/home/user/project/...`文档示例。
+- 验证：匿名仓库37个host alignment tests通过、2个JAX/TPU测试按设计跳过；所有shell脚本通过`bash -n`；alignment suite的seed0/5、mismatch0.2 dry-run与独立projection self-test通过；全Python语法编译通过。未在本机运行TPU端到端训练。
+- 已知风险/待办：最终发布前仍需在匿名托管页面用无痕窗口复查渲染后的文件、仓库名称和下载包元数据；TPU smoke应在空闲四设备host运行。匿名仓库提交使用`Anonymous Authors <anonymous@invalid.example>`，不得把源仓库历史推入匿名remote。
+
+## 2026-11-07 — 评估rebuttal要求的PODS、DAPO dynamic sampling、PCGrad与CAGrad
+
+- 改动范围：无代码改动；核对四项工作的原文和当前GRPO过滤/污染链路，仅更新本日志。未启动训练或修改冻结配置。
+- 修改文件：仅`develop.md`；保留已有未提交日志。
+- 原文来源：PODS arXiv:2504.13818v1（2025-04-18）及v5（2026-04-22，当前页面标注TMLR 2026）；DAPO arXiv:2503.14476v1 §3.2；PCGrad arXiv:2001.06782v4 §2.3；CAGrad arXiv:2110.14048v1 §3.1。
+- PODS：与组内completion过滤直接相关，推荐优先补GSM8K baseline。每prompt先生成n条，选固定m条最大化reward方差，然后按入选子集重新计算advantage；不应仅在现有全组advantage后附加mask。冻结n=4可评估m=2/3，不额外增加rollout；需明确小group适配及固定保留预算。连续reward可求精确最大方差子集，不应默认总是最高/最低各半。TPU可固定shape gather，但只有loss mask不自动节省反向计算。
+- DAPO dynamic sampling：在binary reward下删除全对/全错prompt组并重采样，补足有效batch；只删不补不是完整流程。当前`tunix/rl/grpo/dapo_learner.py`第64行仍为TODO，不能将该flag视为实现。建议单独比较GRPO+dynamic sampling，保留其余冻结loss/KL/clip；dense reward下按训练可见reward方差过滤属于明确适配。记录rollout/token/wall-clock及cap防止补样无界。
+- PCGrad/CAGrad：原文为task/objective级梯度冲突处理，分别投影梯度/求约束合成方向，不是样本过滤；可做per-unit adaptation但需声明粒度，不能简单称不适用RL（两篇均含RL实验）。独立训练的两个MiniGrid环境不构成天然联合多任务。若只补一个梯度方法，PCGrad优先，复用已有per-unit梯度；CAGrad还需Gram矩阵、约束求解与参数选择，TPU验证成本较高。
+- mismatch要点：当前rank reversal只是重分配同组reward，保持多重集/mean/variance不变。因此按observed reward方差判定的dynamic sampling在同一rollout组上无法识别该污染；PODS也不天然抗rank reversal，但不能据此预断其最终性能。PODS和DS都必须接入污染后的可见reward，不能选择阶段使用clean correctness获得oracle优势。
+- 推荐实验优先级：PODS GSM8K clean+mismatch五seed > GRPO+dynamic sampling（适配和预算说明）> 有余量时PCGrad per-unit消融；CAGrad先做related-work/方法区别。全部工作应补引用，不能用LearnAlign/GradAlign代替对PODS的直接回应；避免声称首个RL rollout selection或首个gradient conflict处理方法。
+- 验证：联网阅读上述一手论文HTML及PODS版本记录；静态检查GRPO reward/advantage顺序、group LOO统计、dense reward、rank reversal和DAPO TODO；`git diff --check`通过。评估为方法与适配可行性判断，未做新baseline的TPU端到端验证。
+
+## 2026-11-07 — 核对作者PODS仓库的可复用实现
+
+- 改动范围：无代码改动；通过GitHub只读接口核查作者仓库`YixuanEvenXu/pods`，固定main提交`187f43b648f69385103029c2dd0934521e17bb71`，评估JAX/TPU移植。修改文件：仅`develop.md`，保留已有未提交内容。
+- 作者实现：README提供Unsloth单GPU与Open-R1多GPU两条路径，Apache-2.0许可证；单GPU核心位于`trainer/maxvargrpo_trainer.py`第515–538行，多GPU核心位于`open-r1/src/open_r1/grpo_trainer.py`第1099–1143行。多GPU版本明确按组reshape、比较所有高/低reward端点组合的子集方差、gather入选completion，再按入选子集计算advantage。
+- 参数辨析：单GPU`num_generations_reward=n`、`num_generations_grad=m`；多GPU`pods_full_size=n`、`num_generations=m`。根目录`config/train.yaml`当前n=m=16，是无下采样对照配置；单GPUconfig类默认32/8，多GPU`exp.sh`包含128/32和32/32对照，不能只根据默认YAML认定保留比例。作者reward是correctness+format+xmlcount之和，支持dense组合reward。
+- 细节：作者使用样本标准差（PyTorch默认correction=1）和1e-4，与当前Tunix的`compute_advantages`中ddof=1及epsilon一致；同方差候选只在严格更优时替换。全同reward仍保留m条，advantage全零，PODS自身不包含DAPO补采样。单GPU实现对扁平reward排序而默认每设备一个prompt，因此移植本项目四prompt batch应以Open-R1的逐组实现为依据，不能直接全batch排序。
+- 适配判断：移植reward子集选择和gather逻辑，无需导入CUDA/Unsloth/DeepSpeed依赖，无需逐样本梯度/投影或额外reference set。保留冻结n=4、prompt batch=4、691 updates、LR/KL/reward/mismatch/eval；新增独立PODS入口和learner分支，处理生成n与训练m的尺寸差异。m=2代表50%保留，m=3代表75%保留，为当前小group配置而非声称作者最佳参数；不要将作者beta=0和LR直接覆盖冻结配置。
+- mismatch：必须在全部n条生成回答的dense reward上先应用现有rank reversal，再选m条并重新计算advantage，不能先选子集再污染。数据记录应保留pre/post eval schema并增加n/m、选择索引、污染后reward与保留率。真正HBM/速度收益需物理缩小训练tensor并在TPU验证，不能仅凭mask宣称。
+- 验证：通过临时内联Python复写作者选子集循环，对n=2..8、m=2..n、连续离散reward/重复reward共1400组与穷举最优方差逐一核对，全部通过；示例包含binary、dense和全同reward。该测试只验证算法逻辑，未导入运行作者Torch trainer，也未运行TPU。`git diff --check`通过。
+- 已知风险/待办：后续实现需测试prompt组隔离、tie规则、所有token/mask/logps索引对齐、训练微批shape、KL与原日志保存；冻结配置下的clean/mismatch端到端与HBM smoke尚未执行。
+
+## 2026-11-07 — 澄清PODS最高/最低reward配额的含义
+
+- 改动范围：无代码改动；仅补充方法解释。修改文件：仅`develop.md`。
+- 结论：生成数量n与保留数量m属于用户设置；最高reward配额k不是需要调参的超参数。固定m后算法比较k=0..m的端点组合，选择reward方差最大的k；不同prompt/训练step可有不同k。binary reward在类别数量足够且m为偶数时偏好高低各半；一般dense reward不能预设等额。
+- 验证依据：此前已核对PODS原文Lemma 3.1/Algorithm 2以及固定提交的作者两个trainer实现，1400组穷举最优测试已通过；本次未重复运行训练或测试。
+
+## 2026-11-07 — 检查GSM8K当前分支并设计独立PODS模块接入
+
+- 改动范围：无代码改动；完成分支/工作区及训练链路静态检查，并设计后续实现；仅修改`develop.md`。未切换分支、提交、推送或启动训练。
+- 分支证据：当前`for_GRPO_8kBaseline`，HEAD `4d662c2`（Decouple LearnAlign and GradAlign selection ratios）；与本地tracking ref `origin/for_GRPO_8kBaseline`双向差异0，未fetch故不声称已在线确认远端。工作区仅`develop.md`未提交，保留既有内容。
+- 接入位置：`my_example/main.py`经`train.py:build_trainer`构造普通或RewardRankNoiseGRPOLearner；`RLLearner._prepare_data`按num_generations=4重复prompt，`GRPOLearner._generate_and_compute_advantage`生成/准备TrainExample，`RLLearner._process_accumulated_batches`按原4倍尺寸拆分。PODS缩为m条后必须同时修正子类中的拆分尺寸，否则可能跨microbatch切错/产生空chunk；不能仅gather completion。
+- 推荐文件设计：新增`my_example/pods.py`集中放max-variance选择、子集advantage、独立PODS learner/mixin、数据gather和PODS指标；在`train.py:build_trainer`增加显式opt-in工厂分支，复用原reward_fns、grpo_config和clean/mismatch learner。新增独立`run_pods_baseline.sh`/suite封装原main和原结果导出，新增`tests/my_example/pods_test.py`。本次仅设计，尚未创建这些文件。
+- 配置设计：优先使用独立PODS环境变量如`TUNIX_PODS_KEEP_COUNT`，由专用shell设置，避免修改既有CLI、RLTrainingConfig或其他方法开关。默认不启用PODS；启用时检查2<=m<=n、拒绝与DTV/DBC/random/reward梯度过滤叠加。n始终是生成数4，m是更新数，不能临时修改共享algo_config造成生成/污染/eval语义变化。
+- 训练流程：完整生成n条 -> 原dense reward -> 原确定性rank reversal（仅TRAIN）-> 逐prompt最大方差选择 -> 对选择的m条重算ddof=1/epsilon=1e-4 advantage -> 同步gather tokens/masks/logps -> 按prompt_count*m拆分后交原actor trainer。PODS子类可覆写生成准备与微批拆分；其余trainer/optimizer/checkpoint/eval复用。评测不应用PODS；KL仍按冻结beta在入选训练数据计算，不将未入选数据残留在KL项。
+- 冻结预算：每次4 prompts×4生成、总691更新、2764训练prompt访问、LR1e-6、KL0.08、prompt256/response768、原LoRA/模型/seed与1319题greedy pre/post eval均保持；m=2为候选起点，每次入选8 completions是PODS本身引入的训练子集变化，不冒充仍训练16条。
+- 验证计划：作者算法对照/穷举最优、组隔离、tie规则、m=n identity、全同reward、mismatch先后顺序、gather字段一致性、跨microbatch拆分和固定shape；CPU测试之后执行clean/mismatch短TPU训练检查生成16/入选8且optimizer只更新一次，再做满冻结序列长度的HBM smoke及pre/post结果schema核对。m=3、m=4可作消融/退化对照；不根据test结果选择m。
+- 已知风险：真正TPU适配尚未实施，需验证固定8/12条更新张量的分片和队列/step计数；不保证mask等同于计算提速，不预先声称HBM通过。保留所有既有未提交文档，不更改robust_trainer或冻结方法行为。
+- 验证：读取git branch/status/log、GRPO生成/advantage、RLLearner重复/拆分/更新队列、训练factory、rank noise与launcher；`git diff --check`通过。
+
+## 2026-11-07 — 复核GSM8K每prompt回答数并解释PODS尺寸语义
+
+- 改动范围：无代码改动；读取正式launcher、selector配置与历史日志，澄清每题rollout和整批completion总量；仅更新`develop.md`。
+- 当前证据：`run_grpo_gemma.sh:108/110`与`run_alignment_baseline.sh:74/76`均显式4 prompts、每prompt4 generations，故正式一次update生成16回答；底层config parser默认num_generations=2被launcher的4覆盖。历史2026-09-13实现记录及冻结参数核对同样明确4×4。
+- 8/16来源：LearnAlign额外selector每prompt8回答；GradAlign默认candidate/validation各4，后续validation8实验仅提高参考梯度估计的回答数；GradAlign论文kr=kv=16亦是额外selector参数。AIME训练8 generations属于不同repo/实验，不能据此改GSM8K。本地未找到实际服务器run metadata，结论依据当前脚本与既有日志，手动CLI覆盖的个别run需另查其stdout/metadata。
+- 原算法解释：PODS以每prompt生成n条、固定保留m条为定义；m不是prompt数量。n=4,m=2时每步依旧4个prompt、生成16条、实际更新8条；m为设计候选未实施。先原reward与污染再最大方差选子集，并以子集mean/std计算advantage。
+- 尺寸问题：现有代码记录微批展开后的原尺寸（例如4 prompts×4=16）；PODS若缩到4×2=8，后续拆分必须使用8。累计两个微批时原切分[16,16]不能用于筛选后的16条，否则第一块包含两个微批而第二块为空；应切为[8,8]。此项属于子类内部索引适配，不要求改变模型或生成预算。
+- 验证：定向rg与行号读取launcher/config、历史工作日志、RLLearner拆分实现；`git diff --check`通过。未修改配置或运行训练。
+
+## 2026-11-07 — 实现PODS在冻结GSM8K流程中的独立适配
+
+- 改动范围：在`for_GRPO_8kBaseline`新增PODS模块并接入原训练入口，原有已跟踪训练文件只修改`my_example/train.py`的8行opt-in工厂分支；未改RLTrainingConfig、CLI、原main、robust_trainer、GRPOLearner或LearnAlign/GradAlign。保留本轮之前全部未提交日志，未自动git commit/push。
+- 修改/新增文件：`my_example/train.py`；新增`my_example/pods.py`、`my_example/run_pods_baseline.sh`、`my_example/run_pods_baseline_suite.sh`、`my_example/test_pods_smoke.sh`、`my_example/test_pods_hbm.py`、`tests/my_example/pods_test.py`、`tests/my_example/pods_jax_test.py`、`PODS_BASELINE_HANDOFF.md`；同步本日志。
+- 核心算法：参考作者Apache-2.0代码提交`187f43b648f69385103029c2dd0934521e17bb71`，逐prompt枚举top-k/bottom-(m-k)最大reward方差子集；先沿用原dense reward和完整n条上的rank reversal，再按m条重算ddof=1/epsilon=1e-4的advantage，所有tokens/masks/ref/old-logps/filter_random_values共同gather。默认n=4/m=2，每step4 prompts、生成16、actor更新8条；m=n保持输入顺序/原TrainExample作为退化对照。全同reward不补采样。
+- 训练接入：PODSMixin复用factory已选择的普通/RewardRankNoiseGRPOLearner；只在显式TUNIX_PODS_KEEP_COUNT时启用，TUNIX_PODS_ARTIFACT_DIR指定选择记录。子类重写prepare后的微批拆分以使用prompt_count*m，生成/共享num_generations始终保留n；EVAL完全旁路。拒绝和use_dynamic_batch_curation梯度过滤叠加。
+- 最小取舍：为复用原生成、mask、reward与logps实现，不复制通用生成代码；reference/old-policy logps仍在n条上计算后gather，因此只缩小actor update而不声称reference阶段提速。无逐样本梯度、投影、候选池、额外validation或额外rollout。不覆盖冻结LR/KL/LoRA/生成长度/优化器；KL仅由入选回答进入原loss。
+- 结果：新增run_metadata、按prompt记录observed_rewards/selected_indices/selected_rewards/selected_advantages/mismatch成员、会话累计pods_summary及TensorBoard保留率；原stdout、TensorBoard、checkpoint/model和pre/post eval_accuracy完整字段通过原main/exporter保存。suite默认seed显式传入，遇错停止并记status.tsv；launcher保留Python/tee错误码。smoke产物不自动删除。
+- 本地验证：bundled Python运行`python -m unittest discover -s tests/my_example -p 'pods*test.py'`共11项，其中10项通过、1项真实JAX/Flax结构测试因本机无依赖按设计skip；覆盖穷举最优、group隔离、tie、m=n、零方差、subset advantage、20%生产rank noise前置、字段gather、两个微批8/8拆分、EVAL旁路及DBC拒绝。原`alignment_*test.py`共37项，35通过/2依赖相关skip。新增Python文件及train.py语法编译通过，三个shell脚本`bash -n`通过，单次及五seed suite dry-run通过，`git diff --check`通过。
+- 服务器验证入口：`bash my_example/test_pods_smoke.sh`在已配置单worker四TPU设备的空闲host上运行CPU测试、clean/mismatch各2次真实update（仅缩小数据为16、eval为1题，长度保持256/768）、断言生成32/入选16/两个step和完整pre/post schema，再启动独立HBM进程。HBM进程先1次真实rollout/update驻留cache/Adam状态，再执行2次满256/768长度、非零advantage合成更新，记录设备内存统计；若peak/limit可得要求至少5%headroom，否则注明headroom_verified=false。合成补丁仅在测试文件，生产无此开关。
+- 已知风险/待办：本机没有JAX/Flax/TPU，未执行真实设备gather、端到端smoke、checkpoint/eval恢复或HBM压力程序；不得把host测试通过当作TPU验收。HBM程序执行通过也不保证未来所有分配峰值。正式五seed clean/mismatch需服务器验证通过再启动。m=2是冻结4-rollout预算下的适配，不声称为论文最优值；不要依据test准确率选m。重复同artifact目录时JSONL追加、summary只计当前会话，metadata已注明。
+
+## 2026-11-07 — 固定PODS测试与训练仅使用当前v5p-16 worker
+
+- 改动范围：按用户双worker硬件约束为新增PODS入口固化单worker环境；不更改PODS数学、冻结训练参数或其他方法。
+- 修改文件：`my_example/run_pods_baseline.sh`、`run_pods_baseline_suite.sh`、`test_pods_smoke.sh`、`test_pods_hbm.py`、`PODS_BASELINE_HANDOFF.md`及本日志。
+- 行为：shell入口均设置TPU_PROCESS_BOUNDS=1,1,1、TPU_CHIPS_PER_PROCESS_BOUNDS=2,2,1、TPU_VISIBLE_CHIPS=0,1,2,3、CLOUD_TPU_TASK_ID=0；读取.env的脚本在读取后设置，避免旧配置覆盖。suite与单run dry-run也展示四个变量。直接Python HBM入口在导入JAX前设置相同变量，并记录process/device counts到报告。
+- 语义：worker0和worker1各自运行时均使用逻辑process0及当前host的四颗本地芯片；task0不表示跨机器连接物理worker0。未使用SSH、多worker启动器或jax.distributed.initialize，不改变其他worker已运行进程的环境。
+- 验证：三个shell语法、Python语法、单run与suite dry-run、PODS host测试及git diff --check通过；本机无TPU，需在当前空闲worker执行smoke并验证报告1进程/4本地设备。CPU单元测试继续显式JAX_PLATFORMS=cpu。
+
+## 2026-11-07 — 对齐PODS正式rebuttal结果目录命名
+
+- 改动范围：仅调整新增PODS正式run/suite目录名称及说明，不改算法、参数、训练或产物内容；保留正在运行和历史测试目录。修改文件：`my_example/run_pods_baseline.sh`、`run_pods_baseline_suite.sh`、`PODS_BASELINE_HANDOFF.md`、`develop.md`。
+- 历史核对：LearnAlign/GradAlign使用`METHOD_seedX_mismatchY_TIMESTAMP`；原GSM8K seeded launcher使用`grpo_gsm8k_METHOD_seedX_clean或mismatch0p2_TIMESTAMP`。因此用户记忆来自不同launcher的两套约定，实际都采用method→seed→数据模式→时间顺序。
+- 新命名：PODS正式默认`logs/rebuttal_grpo_gsm8k_pods_seedX_mismatchY_YYYYMMDD_HHMMSS/`，结合原GRPO数据集前缀、alignment mismatch数值写法和用户要求的rebuttal前缀；suite为`rebuttal_grpo_gsm8k_pods_suite_mM_mismatchY_TIMESTAMP/`。m保留于metadata/suite，不改变method pods。结果文件内部`pods__grpo_TIMESTAMP__...`维持不变，兼容原exporter。
+- smoke解释：`pods_smoke.aT3i0n`由mktemp生成独立临时测试根目录，后缀仅防重名；mismatch0/mismatch0.2/hbm是对应测试子目录。测试显式传入TUNIX_PODS_RUN_ROOT，因此默认正式命名变化不影响smoke路径，也不重命名或删除已产生文件。
+- 验证：内联Python解析实际launcher dry-run，分别核对seed5/clean0、mismatch0.2正式格式、checkpoint/model/tensorboard/selection共同根目录、4 generations和单worker变量，以及显式测试根目录覆盖，共3组通过；两个shell语法及git diff --check通过。路径命名变更未重复运行模型或算法测试。
+
+## 2026-11-07 — 修复PODS HBM测试输入列表导致的展开尺寸错误
+
+- 改动范围：仅修复独立HBM测试和补回归测试；正式PODS算法、生产训练入口、冻结参数和微批尺寸校验不变。修改文件：`my_example/test_pods_hbm.py`、`tests/my_example/pods_test.py`、`tests/my_example/pods_jax_test.py`、`PODS_BASELINE_HANDOFF.md`及本日志。
+- 根因：HBM测试batch的prompts/answer使用Python list；RLLearner以jax.tree.map对叶子np.repeat，列表作为pytree容器被逐字符串处理，形成外层4项、每项4值而非扁平16值。micro_batch_sizes按4*4记录16，merge后的prompts外层长度却为4，触发PODS严格尺寸校验。错误发生于第一次真实rollout之前，不是HBM溢出或GPU/TPU拓扑错误。正式Grain batch使用数组，前面的真实smoke不受此测试输入bug影响。
+- 修复：新增轻量make_hbm_batch返回shape(4,)的NumPy数组，匹配正式批次；新增host数组/展开检查及使用真实JAX tree.map+生产merge的CPU回归（本机缺依赖时skip）。HBM通过条件另要求12条prompt记录和3个phase，避免空集合检查误报。
+- 验证：本地PODS共13项测试，11项通过、2项真实JAX依赖测试skip；原alignment共37项，35通过、2项skip；相关Python语法编译和git diff --check通过。本机无TPU，满长度HBM仍待服务器重测。文档给出只重跑HBM的命令，不必重复已通过的clean/mismatch smoke。
+
+## 2026-11-07 — 提供PODS smoke的nohup后台重启命令
+
+- 改动范围：无代码改动；仅记录远端测试操作方案。修改文件：仅`develop.md`。
+- 方案：SSH中断不代表旧测试退出，先在当前worker检查smoke/main/HBM进程；确认无残留测试或训练再用nohup包装完整test_pods_smoke.sh，保存独立launch日志/PID/exit_code，stdout与stdin均重定向。包装shell捕获实际退出码，不依赖当前SSH会话。
+- 资源范围：沿用已固化的单worker四芯片拓扑，后台入口显式传四个TPU变量；不启动另一worker，不执行kill或删除历史目录。重跑会创建新的pods_smoke随机后缀目录，不自动恢复旧测试。
+- 验证：基于已检查的test_pods_smoke.sh与单worker设置提供命令；未远程启动/停止任务，本次无需重复算法测试。
+
+## 2026-11-07 — 确认服务器PODS HBM重测PASS并准备首个完整seed5
+
+- 改动范围：无代码改动；核对用户回传的HBM重测stdout与测试通过条件，并提供首个正式训练的nohup命令，仅更新`develop.md`。
+- 服务器证据：用户输出`3/691`及`PASS: .../logs/pods_hbm_retry.jYQAXQ/report/hbm_report.json`，说明进程通过3次optimizer更新、3个phase、12条prompt选择记录及合成阶段非零advantage断言；3/691是压力测试在冻结691步调度下主动只提供3批，不是要求继续跑691步。日志中的model cache/LoRA/reference共置警告未中止测试，不据此更改冻结配置。
+- 证据边界：尚未直接读取远端JSON，不能给出具体HBM数值或声称headroom_verified必为true；给出只读小脚本供用户确认passed/topology/configuration/phases/headroom。若计数器可用，现有测试已检查5%余量；不可用时仍可能执行PASS而headroom_verified=false。
+- 正式计划：按此前5/0/13/21/42顺序只启动首个seed5，沿用当前mismatch0.2，PODS n=4/m=2。脚本默认3072上限/90%训练切分，2764 training prompts、691更新、4prompt/update、256/768长度、LR1e-6、beta0.08、原LoRA/优化器及完整1319题pre/post eval；禁止使用smoke的数据或skip-eval缩减参数。
+- 启动范围：单worker四颗本地芯片，不连接另一worker；清除旧测试RUN_ROOT/RESULT_DIR覆盖和CPU平台限制，使用nohup运行suite --seeds 5（不含其他seeds），保存launch日志/PID，检查当前worker无其他训练，不自动kill。正式结果目录沿用rebuttal_grpo_gsm8k_pods_seed5_mismatch0.2_TIMESTAMP。
+- 验证：重新读取当前launcher/config/seeding和HBM判定代码，seed5 mismatch0.2单run/suite dry-run通过；`git diff --check`通过。未远程启动训练，本轮不需新增代码提交。
+
+## 2026-11-07 — 核对PODS服务器HBM报告及五seed运行安排
+
+- 改动范围：无代码改动；根据用户回传JSON解析输出确认结果并记录实验安排，仅更新`develop.md`。
+- 服务器结果：process_count=1、process_index=0、device_count=local_device_count=4；配置n4/m2/prompts4、长度256/768、beta0.08正确。headroom_verified=true，三个phase各四设备headroom约0.97099–0.97105，均超过测试要求5%；这是设备所暴露统计下的余量，不推广成完整训练所有峰值保证。
+- seeds：原五seed集合0、5、13、21、42；当前约定执行顺序5、0、13、21、42，先seed5是沿用此前先检验seed5资源风险的安排。
+- 运行安排：可先完成mismatch0.2，再补clean（mismatch0）；二者独立从相同预训练模型初始化，不从mismatch训后checkpoint继续clean。每种条件均需五seed，合计PODS十个正式run；首个seed5结束应检查691更新与1319题pre/post结果完整，再跑余下0/13/21/42。保持相同代码版本、n/m、模型/LoRA、优化器/预算/评测协议，仅改变污染比例并按同seed配对。
+- 验证：依据用户给出的报告字段与此前launcher/历史记录；`git diff --check`通过，未远程启动或停止训练。
+
+## 2026-11-07 — 确认正式PODS启动不使用随机目录后缀
+
+- 改动范围：无代码改动，仅记录命名确认；修改文件为`develop.md`。
+- 结论：用户引用的nohup命令调用正式run_pods_baseline_suite.sh，当前默认正式run、suite和launch日志均采用YYYYMMDD_HHMMSS时间戳；不调用测试脚本的mktemp，不出现pods_smoke.aT3i0n或pods_hbm_retry随机后缀。命令已unset旧TUNIX_PODS_RUN_ROOT/RESULT_DIR等覆盖。launch、suite、run创建时刻可能相差数秒，属于正常时间戳差异。
+- 验证依据：本轮此前已核对的正式launcher/suite及其dry-run；未重复训练或更改命名实现。
+
+## 2026-11-07 — 澄清PODS保留数量与冻结cosine学习率
+
+- 改动范围：无代码改动；核查并解释原优化器与PODS参数，修改文件仅`develop.md`。
+- 学习率：build_optimizer使用optax warmup_cosine_decay_schedule，init_value=0、peak_value来自training.learning_rate、warmup_steps=int(warmup_fraction*max_steps)、decay_steps=max_steps、end_value=0。正式691步/0.1 warmup得到69步warmup，PODS launcher指定峰值1e-6，与原框架调度一致，不是constant LR。
+- 参数语义：--pods-keep-count 2指定每prompt入选回答数m，生成数n独立固定为4。最大方差算法自动选择的只是给定m后高分配额k与低分配额m-k及具体回答，不自动决定m。n4/m2必取reward最高/最低各一条（ties按确定规则），每step生成16条而actor更新8条。
+- 是否需要train/传参：m是固定方法超参数，不是可学习参数，无额外训练/selector阶段；当前launcher默认2，故可省略，但正式命令建议显式写2以便审计和避免环境变量覆盖。m2尚未证明为当前任务最优，不根据test准确率事后挑m。
+- 验证：读取train.py优化器、config.py调度默认、PODS launcher参数解析和selector代码；未运行训练或修改配置。
+
+## 2026-11-07 — 评估PODS keep-count敏感性实验用于rebuttal
+
+- 改动范围：无代码改动；仅根据PODS原文§4.2与当前advantage实现给出实验设计建议，修改`develop.md`。
+- 原文核对：arXiv:2504.13818v5 Fig.4固定n64考察m16/8/4/2，并讨论小m<=4的性能退化风险，建议一般down-sampling ratio n/m在2–4。当前n4/m2比值为2只是合理动机，不能由此声称小绝对m2已获论文最优验证。
+- m1：PODS按入选子集重算advantage，单样本reward等于自身mean，丢失组内对比；当前ddof1 std未定义会NaN，即使用总体方差/防护令advantage0也只剩KL/weight decay等非policy信号，故不应作为有效PODS候选，代码拒绝正确。
+- m2/m3/m4：分别保留50%/75%/100%，m2最大方差取两端，m3可能取2高1低或1高2低，m4退化普通GRPO。固定n4并要求2<=m<n时m2和m3即全部有效下采样数量，补m3可直接回应固定预算下的敏感性追问，不保证m3优于m2。
+- 建议：保持当前m2主配置和首个seed5运行；提前规划m3配对敏感性，优先相同3seeds（5/0/13）并同时clean/mismatch，预算允许扩展同5seeds。单seed仅作初步趋势，不能称稳健。固定预算下同时报告m2/m3结果，不按test结果事后挑最佳；若必须选主配置应据独立validation。m4可引用严格匹配的Vanilla配置，但不假称已验证新m4路径的完整训练bitwise等价。
+- 验证：联网核对原文§4.2/图4/Practical guidelines，静态确认当前validate_keep_count与sample std定义；未修改参数或启动额外训练。
+
+## 2026-11-07 — 阅读三位ICLR评审并重排rebuttal证据与baseline优先级
+
+- 改动范围：无代码改动；使用PDF阅读流程完整提取并渲染目视检查用户评审汇总4页，联网核对ICLR2027规则、公开评分快照和DAPO/PCGrad/CAGrad原文。新增`REBUTTAL_REVIEW_ANALYSIS_20261107.md`保存详细方案，同步本日志；未改训练或启动其他方法。
+- 评审解析：LpRi(2/conf3)关注假设有效性、minority signal、PODS/DS/norm median、预算与规模；G6iL(2/conf3)认可现有收益但重点质疑组内reference效用、Fig2/Table3矛盾和RB2负迁移，并明确要求fixed-checkpoint独立clean utility验证；vmLX(2/conf2)核心为协议不清和general-RL结论过宽，需解释LoRA并非SFT、DPO并非在线policy-gradient RL、MiniGrid从头训练的定位。不能把所有意见当missing-baseline问题或承诺提分。
+- 评分信息：四档1/2/3/4；社区OpenReview原始公开快照2026-11-06T13:54Z记录40458篇带评分、均值2.0607/中位2，2.6667约处于并列前4.7%-15.2%分带、3约前0.7%-4.1%。非官方录取曲线且不等于接受概率；官方AC指南明确不按均分排序、无公开固定rating curve，borderline也考虑分歧与AC判断。讨论窗口官方现为Nov5-18，不能等待全部昂贵训练后才回复。
+- baseline重排：PODS继续；新增优先group norm top50%(2/4)与GRPO+DS，再考虑PCGrad per-unit适配，CAGrad优先引用解释。理由是R1明确问norm median和DS，而PCGrad/CAGrad仅一般性比较；groupwise mask、tie/零梯度、gradient定义及额外采样预算都需披露。PODS m3/7B全矩阵不应挤占核心证据。
+- 核心有效性：组内所有梯度反号时DTV/LOO内积不变，说明DPO minority-noise论证不能不经验证地转移到整组污染GRPO；实际dense rank reversal并非总是整体反号。负advantage不等于无用回答，self/cross corr不能证明clean utility。当前没有投稿正文，不能据评审摘要给出Assumption1的最终形式化证明或认定图表错误成因。
+- 建议诊断：固定已有checkpoint、同候选rollouts与噪声、独立clean heldout objective；克隆参数及AdamW moments，比较vanilla/DTV/LOO单步validation loss变化，辅以unit score与独立utility Spearman、kept/drop utility、prompt/seed层不确定性。heldout仅诊断不参与实际filter，不产生训练oracle优势；teacher-forced loss是proxy，不能冒充greedy accuracy。同步统计clean/noisy×advantage符号×correctness和粗难度，直接检验rare correct retention。
+- 文献/官方来源：ICLR ReviewerGuidelines、AreaChairGuidelines；shiqiangw/iclr-2027-scores/docs/data/site.json（明确社区采样），paperlist.ai公开表交叉核对；arXiv 2503.14476v1 §3.2、2001.06782v4 §2.3、2110.14048v1 §3.1。PDF为用户整理意见，按内容分析，不把其中的表格数值当已独立审计的论文结果。
+- 验证：PDF四页完整阅读和图片检查；静态检查现有group LOO、逐样本梯度/fixed filter接口；git diff --check通过。无新增模型训练或数值结果，主论文/Assumption1精确审计及相关诊断可行性仍待后续核对。
+
+## 2026-11-07 — 确认PODS沿用GSM8K warmup cosine学习率
+
+- 改动范围：无代码改动；仅核对并记录学习率调度，修改`develop.md`。
+- 证据：`my_example/train.py:build_optimizer`使用optax.schedules.warmup_cosine_decay_schedule，init_value=0、peak_value=training.learning_rate、end_value=0、warmup_steps=int(warmup_fraction*max_steps)、decay_steps=max_steps。CLI默认warmup_fraction=0.1，PODS正式launcher显式learning-rate=1e-6。
+- 正式691更新对应69步warmup，之后cosine衰减至0；1e-6是峰值，不是全程固定值。PODS复用原main/build_optimizer，没有另建或更改调度。smoke/HBM的步数/调度展示不用于推断正式完整run的逐步学习率。
+- 验证：静态读取optimizer/config、main的max_steps与PODS launcher；未更改参数或启动训练。
+
+## 2026-11-07 — 建立独立rebuttal逐项方案与图表/benchmark核查记录
+
+- 改动范围：无代码改动；新增根目录`rebuttal.md`并同步本日志，保留已有未提交内容和运行中的PODS，未修改外部DPO仓库。
+- 梯度与norm对照：澄清复用的是在线逐completion梯度计算能力，不要求历史完整梯度；区分新baseline、历史mask审计、固定checkpoint重算和真实AdamW诊断各自所需文件。norm top50%检验magnitude-only是否足够，组内2/4是对齐group-DTV的适配建议，不冒充评审已指定scope；ties、policy/full loss、KL、clipping和归一化必须匹配。
+- 文献与代码：核对DAPO原文和迁移后的`verl-project/verl-recipe/dapo`核心std组过滤/补满/上限报错代码；规划observed dense reward variance适配，保留原GRPO其他组件，记录额外生成预算。rank reversal保留reward方差，只能说明固定rollout上DS规则不会识别这种污染，不能预言最终性能。阅读作者PCGrad TensorFlow wrapper和CAGrad multi-task RL求解实现，记录per-completion适配、随机顺序/零范数、KL及solver/rescaling风险，暂不实现。
+- 固定checkpoint诊断：先1个中期checkpoint、8个固定候选batch与64–128个clean heldout；三方法从相同参数/AdamW moments/schedule临时一步后恢复，报告paired clean NLL utility。teacher-forced NLL和unit first-order alignment均明确是proxy；没有optimizer不能宣称历史AdamW等价；按块和单模型管理HBM，未开展测试。
+- DPO证据：当前yaml周期val为train_prefs hash划分eval，offlineTest默认test_prefs且可环境覆盖；绘图按同seed相减并插值后求均值。重算本地rawCSV clean step110：Vanilla .6164801121、DTV .6195895553、LOO .6133706450，后两相对Vanilla约+/- .00310945；配置max115但曲线末110，实际投稿图表的run/split/checkpoint仍需manifest逐项核对，未认定最终错误原因。
+- 三额外benchmark：当前主表代码列LiveBench-IF、RB2 Precise IF、IFBench prompt-strict。前者仅IF category，RB2该列是PreciseIF子集的给定回答隐式reward排序、非多类总分，IFBench是可验证新约束生成泛化；不能一律称“混合任务所以正常下降”。7个百分点代价若核实应承认并收窄generalization表述，任务局部性仅解释框架、不代替独立效用验证。
+- 验证命令/结果：只读检索和标准库CSV汇总完成；`git diff --check`通过；本轮仅文档，无CPU/TPU训练或现有代码参数更改。待办：确认median范围、取得投稿图表实际manifest与optimizer归档、另轮批准实现DS/norm/utility probe。
+
+## 2026-11-07 — 澄清三个额外benchmark的数据、checkpoint与指标含义
+
+- 改动范围：无代码改动；补充`rebuttal.md`第7.0节并同步日志。
+- 核实：当前三列来自DPO仓库Qwen2.5/UltraFeedback评测器，不是在GSM8K上计算三种分数。LiveBench-IF和IFBench各自加载独立prompt并用run exported_model_path生成新回答；RB2用独立数据集已有候选，actor相对SFT reference的DPO隐式reward排序，仅汇总PreciseIF列。
+- checkpoint/归档边界：新评测不更新模型，但导出路径不能单独证明实际最后训练step；入口还可复用legacy/cache，需实际run manifest对上投稿附录，不能把脚本存在当每列重新运行的证据。
+- 解释：多题材/多约束、多benchmark汇总、clean/noisy混合是不同概念；生成约束遵循、偏好对accuracy和候选回答ranking不是同一个评测目标。不同objective可以出现不同收益，但这不是已经查明下降原因。
+- 验证：只读函数调用链和dataset加载/生成/评分代码，核对三个官方dataset cards；`git diff --check`通过。未启动训练、评测或修改DPO仓库；尚待同作者提供附录表的实际run/模型映射。
+
+## 2026-11-07 — GRPO rebuttal材料/理论诊断设计与独立DS baseline第一版
+
+- 改动范围：新增`GRPO_REBUTTAL_PREPARATION.md`、`my_example/dynamic_sampling.py`、`run_ds_baseline.sh`、`run_ds_baseline_suite.sh`、`test_ds_smoke.sh`、`test_ds_hbm.py`、`tests/my_example/dynamic_sampling_test.py`；`my_example/train.py`仅加9行opt-in factory分支；同步`rebuttal.md`与本日志。未改robust trainer、DTV/LOO/PODS、通用learner、RLTrainingConfig或原CLI；保留原有未提交文档，未启动/中断任何训练。
+- 诊断准备：区分norm新baseline无需历史完整梯度、固定checkpoint真实AdamW检查需参数/moments/schedule/配置；规划32候选prompts与64–128独立clean heldout、同候选与同初态单步恢复、NLL utility及unit first-order proxy输出。需投稿理论原文核对精确Assumption，未假装完成正式定理审计；norm/fixed-ckpt/PCGrad/CAGrad本轮均未实现。
+- 理论解释：L-smooth界要求相对于独立clean梯度的alignment和步长条件；引入reference误差项解释内部正内积为何不是无条件clean utility保证。PCGrad/CAGrad与DS分别是gradient manipulation与reward-group选择；组内completion作为task属于适配，不能直接套原多任务理论。
+- DS实现：依据DAPO§3.2与维护者`verl-project/verl-recipe`commit`0a9360bb366d8bd71e26fb86da1acf077da9e6d9` std>0过滤/补满/cap机制，在原观察dense reward（含rank reversal）上筛完整组。固定4×4块顺序生成，够4个有效组才入队更新；保留其原answers/advantages/ref-old-logps，超额eligible组按源顺序舍弃，补采样不更新actor，不重新rollout入选组。只循环train分区、固定691update预算；不假称token预算与vanilla相同。
+- 工程/输出：不同候选块token长度按prompt-left/completion-right padding且mask/logps补零；每组记录observed rewards/eligible/selected/reason/noise标志和唯一occurrence trajectory IDs；metadata、summary、TB、原pre/post eval JSON、规范`rebuttal_grpo_gsm8k_ds_seed..._mismatch..._timestamp`目录。cap默认20仅安全上限，仍不足即失败无partial update；明确prepared counts不是完成更新。自动resume暂不支持，拒绝旧selection/恢复step，防止候选cursor和rollout RNG不一致。
+- TPU管理：新launcher/smoke/HBM均限制当前worker为logical process0/4local chips；HBM脚本一次真实更新+两次256/768满长度强制两轮refill，要求可测5%峰值余量。该测试只在空闲worker执行；尚未服务器验证，不宣称无OOM或正式ready。
+- 本地验证：`JAX_PLATFORMS=cpu /tmp/dtv-rebuttal-venv/bin/python -m unittest discover -s tests/my_example -p 'dynamic_sampling*test.py'`20项通过；含真实CPU JAX/Flax gather/padding、factory不启用/clean/mismatch/互斥、生产污染函数混合池、完整refill/原advantage对齐/cap与partial queue保护。bash -n、Python py_compile、suite五seed dry-run、git diff --check通过。
+- 回归边界：bundled轻量Python下PODS13项中11通过/2框架项skip、alignment37项中35通过/2autodiff项skip；本地不完整JAX环境尝试完整PODS/alignment时因metrax缺失等导入依赖失败，未将其当代码通过或修改环境/依赖来掩盖。完整训练框架回归与真实TPU/HBM等待用户服务器执行。
+- 待办：取得checkpoint/optimizer目录清单及投稿理论页；用户确认norm median的group/batch范围；服务器CPU回归、clean/mismatch DS smoke和满长度HBM通过后再先跑seed5，不直接铺五seeds；PCGrad/CAGrad仍先设计/引用，不能用新增baseline代替Assumption的独立效用检验。
+
+## 2026-11-07 — 规划ziao1 worker0到worker1的PODS代码同步与SHA256校验
+
+- 改动范围：无代码改动；仅提供用户手动执行的同步/校验命令并记录本日志，未访问远端、同步实际文件或启动训练。
+- 用户状态：报告PODS seed5已完成且post低于pre，尚未读取实际结果；不据单seed更改冻结参数或丢弃结果。剩余seed为0/13/21/42，待worker1代码与环境检查完成后再给启动命令。
+- 同步方案：以服务器worker0当前工作树为准（包括未提交、非ignored源文件），打包源代码/配置与逐文件SHA256清单，使用gcloud指定node-v5p-16-ziao1、us-central1-a、worker1传输；不依赖worker1 git。排除.git、环境、data、logs/checkpoint/model等结果和.env，避免覆盖训练产物或泄露token。worker1先查空闲及sudo能力，覆盖同名代码时保留编号备份；只修正本次文件及logs目录所有权，不对整个项目递归chown。
+- 校验与边界：worker1先sha256sum -c逐文件验收，再比较manifest摘要；该校验不代表venv/data/.env一致，另做不打印token的可读性检查和pip freeze摘要。未删除worker1额外文件、不承诺目录完全镜像，未运行JAX设备初始化，以免影响其他worker。
+- 验证：只读核对PODS正式launcher/5seed suite及Google官方ssh/scp的--worker/--internal-ip语义，git diff --check通过。远端传输、权限、SHA和环境结果待用户执行反馈。
+
+## 2026-11-07 — 确认ziao1 worker1可启动PODS剩余四seeds
+
+- 改动范围：无代码改动；只读取用户回传日志并提供nohup命令，记录本日志，未代用户在远端启动任务。
+- 回传证据：worker1为sa_109738781960981123169，pip check无冲突；PODS13项CPU测试全部OK、无skip；根盘可用51GB。代码SHA同步成功由用户报告，本附件未重复展示SHA输出，未把pip check当完整包版本等价证明。
+- 命令范围：仅ziao1 worker1顺序执行seeds0/13/21/42、mismatch0.2、n4/m2，与已完成seed5同配置，不重跑seed5、不同时并行四个seed，不启动clean或DS。显式当前worker logical process0/4local chips；清理CPU测试与run-root覆盖、DS opt-in残留，保留原评测/优化器配置。
+- 安全与结果：先检测worker1无相关训练、.env可读及train/test目录存在，再nohup并保存PID/总日志；目录沿原rebuttal_grpo_gsm8k_pods_seed..._mismatch..._timestamp规范。51GB为当前可用量，不保证任意累计checkpoint策略均足够；建议训练期间观察空间。FutureWarning非当前依赖错误，勿临时升级Python改变冻结环境。
+- 验证：静态核查当前suite/单run脚本的seeds、mismatch、keep-count、退出失败停止与输出命名；git diff --check通过。本轮未运行CPU/TPU训练或改动超参数。

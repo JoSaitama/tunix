@@ -179,6 +179,15 @@ def build_trainer(rl_cluster, grpo: GrpoGenerationConfig) -> GRPOLearner:
         )
 
     pods_keep_count = os.environ.get("TUNIX_PODS_KEEP_COUNT", "").strip()
+    if os.environ.get("TUNIX_DYNAMIC_SAMPLING", "") == "1":
+        from .dynamic_sampling import dynamic_sampling_learner_class
+
+        if pods_keep_count:
+            raise ValueError("Dynamic sampling cannot be combined with PODS")
+        learner_cls = dynamic_sampling_learner_class(learner_cls)
+        learner_kwargs["ds_max_generation_batches"] = int(os.environ.get("TUNIX_DS_MAX_GENERATION_BATCHES", "20"))
+        learner_kwargs["ds_artifact_dir"] = os.environ.get("TUNIX_DS_ARTIFACT_DIR")
+
     if pods_keep_count:
         from .pods import pods_learner_class
 
