@@ -13107,3 +13107,12 @@ This file tracks engineering changes made in this repository.
 - 风险/边界：新norm路径双份逐样本梯度与DTV policy-score类似，但HBM须实测，不能用PODS97%余量背书；50%固定保留与DTV自适应不同，不声称是同drop rate的纯方向消融。该baseline既不是正确性筛选器，也不能替代Assumption/独立utility证据；whole-group反号范数不变。完整历史参数仍需根据实际launch确认，代码保存本次实际配置。
 - 最终本机静态结果：4个Python文件AST、新CPU套件21项test定义、ruff E9/F（含rl_cluster.py）、三个shell bash -n及git diff --check均通过；保护文件与原main/train/config/launcher/RobustTrainer无本轮diff，共享变更仅rl_cluster.py七行opt-in分支。本机未执行任何CPU/JAX/模型/TPU测试，不声称21项或新HBM已通过；只提供服务器拉取和单worker nohup测试命令，等待实际结果后再排正式seed。
 - 追加第22项测试定义：实际复用原20%/seed5 rank-noise及GRPO advantage函数，128个微型prompt组同时包含clean与被污染组；验证norm输入来自observed A而非clean/oracle，未污染A不变，逐组50% mask与独立稳定排序一致。只定义/静态核对，不在Mac执行。
+
+
+## 2026-11-08 — 修正 norm baseline 路由单元测试替身
+
+- 证据：附件d9809091的服务器CPU套件22项/6.055秒，唯一ERROR在test_cluster_opt_in_preserves_baseline_and_existing_dtv_routes：路由日志访问actor_trainer_cls.__name__，测试却以字符串充当类，触发AttributeError。其余21项未报告失败；NaN/Inf callback报错属于assertRaises负例，未进入真实smoke或HBM，不是训练梯度爆炸。
+- 改动范围/文件：仅 `tests/my_example/gradient_norm_test.py` 和本 `develop.md`；norm算法、生产路由、参数、loss/梯度、mask、正式启动脚本均不改。
+- 修复：路由测试替身全部改为具备真实__name__的空类，保留原条件分支执行与逐类身份断言，不跳过用例；只在预期NaN/Inf拒绝测试上下文临时关闭jax._src.debugging logger，正常生产运行日志/异常不受影响，assertRaises仍然有效。
+- 验证命令与结果：本机AST、ruff E9/F和git diff --check静态检查均通过，并复核修改只作用于测试文件和日志；不在Mac运行单元/JAX/模型。服务器需重新CPU通过后继续clean/mismatch smoke与HBM；没有新的TPU或HBM通过证据。
+- 风险/待办：该修复只修测试支架，不证明真实训练/HBM已成功。旧进程应已因CPU测试失败退出，launcher仍会拒绝同worker并行模型任务。未代提交推送、未运行服务器命令；其他dirty rebuttal文档保持原状。

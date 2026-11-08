@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import json
+import logging
 import os
 from pathlib import Path
 import subprocess
@@ -93,14 +94,17 @@ class GradientNormTest(unittest.TestCase):
         for compiled in (False, True):
             fn = self.jax.jit(self.norm.group_top50_mask) if compiled else self.norm.group_top50_mask
             for value in (float("nan"), float("inf")):
-                with self.subTest(compiled=compiled, value=value), self.assertRaises(Exception):
+                with self.subTest(compiled=compiled, value=value), \
+                     mock.patch.object(logging.getLogger('jax._src.debugging'), 'disabled', True), \
+                     self.assertRaises(Exception):
                     fn(self.jp.array([value, 1., 2., 3.])).block_until_ready()
                     self.jax.effects_barrier()
 
     def test_nonfinite_kl_gradient_does_not_silently_continue(self):
         trainer, model = self.trainer(), self.model()
         optimizer = self.nnx.Optimizer(model, self.optax.sgd(.1), wrt=self.nnx.Param)
-        with self.assertRaises(Exception):
+        with mock.patch.object(logging.getLogger('jax._src.debugging'), 'disabled', True), \
+             self.assertRaises(Exception):
             result = self.nnx.jit(trainer._train_step)(model, optimizer, dict(
                 policy=self.jp.array([4., -3., 2., -1.]), kl=self.jp.array([float('inf'), 0., 0., 0.])))
             self.jax.block_until_ready(result)
@@ -296,17 +300,24 @@ class GradientNormTest(unittest.TestCase):
         for node in ast.walk(block):
             if isinstance(node, ast.If):
                 node.body = [n for n in node.body if not isinstance(n, ast.ImportFrom)]
+        # The real routing block logs actor_trainer_cls.__name__, so stand-ins
+        # must be CLASSES, not strings. No actual trainer construction occurs.
+        vanilla = type('Trainer', (), {})
+        robust = type('RobustTrainer', (), {})
+        dtv = type('SelfInfTrainer', (), {})
+        dtv_policy = type('PolicySelfInfTrainer', (), {})
+        loo = type('SelfInfLooTrainer', (), {})
         names = dict(gradient_norm_trainer=self.norm, os=os, logging=SimpleNamespace(info=lambda *a: None),
-            robust_trainer=SimpleNamespace(RobustTrainer='robust'), rl_trainer=SimpleNamespace(Trainer='vanilla'),
-            self_inf_trainer=SimpleNamespace(SelfInfTrainer='dtv'),
-            self_inf_policy_trainer=SimpleNamespace(PolicySelfInfTrainer='dtv_policy'),
-            self_inf_loo_trainer=SimpleNamespace(SelfInfLooTrainer='loo'))
+            robust_trainer=SimpleNamespace(RobustTrainer=robust), rl_trainer=SimpleNamespace(Trainer=vanilla),
+            self_inf_trainer=SimpleNamespace(SelfInfTrainer=dtv),
+            self_inf_policy_trainer=SimpleNamespace(PolicySelfInfTrainer=dtv_policy),
+            self_inf_loo_trainer=SimpleNamespace(SelfInfLooTrainer=loo))
         for enabled, variant, flags, expected in (
-                (False, 'gradient_norm_top50', {}, 'vanilla'),
+                (False, 'gradient_norm_top50', {}, vanilla),
                 (True, 'gradient_norm_top50', {}, self.norm.GradientNormTop50Trainer),
-                (False, '', {}, 'vanilla'), (True, '', {}, 'robust'),
-                (True, 'self_inf', {}, 'dtv'), (True, 'self_inf', {'TUNIX_DBC_SELF_INF_POLICY': '1'}, 'dtv_policy'),
-                (True, 'self_inf', {'TUNIX_DBC_SELF_INF_LOO': '1'}, 'loo')):
+                (False, '', {}, vanilla), (True, '', {}, robust),
+                (True, 'self_inf', {}, dtv), (True, 'self_inf', {'TUNIX_DBC_SELF_INF_POLICY': '1'}, dtv_policy),
+                (True, 'self_inf', {'TUNIX_DBC_SELF_INF_LOO': '1'}, loo)):
             namespace = dict(names, actor_config=SimpleNamespace(use_dynamic_batch_curation=enabled))
             with mock.patch.dict(os.environ, dict(TUNIX_DBC_VARIANT=variant, **flags), clear=True):
                 exec(compile(block, 'norm_route_test', 'exec'), namespace)
