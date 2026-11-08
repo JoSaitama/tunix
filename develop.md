@@ -12833,6 +12833,35 @@ This file tracks engineering changes made in this repository.
 - 解释边界：HBM配置candidate_batches_per_update2、受控reward与测试保留率不是正式DS固定设定；正式按真实observed dense reward过滤并动态补满4组，日志selection记录实际额外生成预算。19GB只先安排一seed并监测空间，不承诺多seed磁盘够用、不自动清理结果。
 - 验证：静态核查DS suite/单run launcher的参数、命名、独立worker拓扑与正式reward路径；git diff --check通过。本轮未重跑测试或改动训练代码。
 
+## 2026-11-08 — 仅分析norm top50与固定checkpoint utility实现，待用户批准
+
+- 改动范围：无代码改动；用户明确要求先分析、批准后实现，本轮只记录本日志。保留已有未提交文档，不修改trainer/launcher或启动任何任务。
+- 接口核查：FixedFilterTrainer已有逐样本full-loss vmap、group/batch mask与masked-mean更新；GRPOLearner通过with_policy_score_loss_fn自动提供beta0的打分loss。norm建议新增独立NormTopKTrainer实现该接口，policy-only打分、full-loss更新，对齐当前group DTV/LOO；不改原fixed filter/DTV/robust逻辑，cluster仅未来opt-in分支。group4取2默认，batch16取8可支持但正式scope需预先固定；随机ties加index最终键，NaN失败、全零组仍按top50规则并单独记录。不用哈希投影、不重算入选advantages或refill。
+- 重要纠正：实际读取tunix/sft/checkpoint_manager.py，save签名只接收model并保存model_params/custom metadata；peft_trainer也未传optimizer。因此当前默认历史checkpoint不含AdamW moments/count，不应继续把“有完整actor目录就能恢复真实AdamW”当既定事实。需核查原run版本及是否另有快照；无额外保存时，采用明确标注的fixed-parameter first-order/SGD或标准化方向probe，不伪称历史AdamW一步重放。
+- utility建议：1个非零LR中期checkpoint，8批4prompts×4completions共32prompt；独立64–128clean heldout，按prompt哈希去重且不借test。共同候选只生成一次，冻结tokens/masks/rewards/advantages/old-ref logps，统一policy打分及full-loss update方向。主表unit clean-gradient alignment与保留/删除效用，补固定规则的临时单步NLL变化；plain SGD/等范数方向probe和真实AdamW严格区分，有限步长先做数值分辨率预检，不能根据有利结果事后挑步长。
+- clean objective细节：现有data.py只保留最终numeric answer，若要合理的teacher-forced推理NLL，诊断应额外读原TFDS参考推导+####final answer套模板，不改训练loader；明确NLL proxy不是greedy accuracy，截断和输出mask计数需记录。
+- 验证/待办：只读核查接口、checkpoint保存恢复、policy/full-mask与policy-only-mask差异；git diff --check通过。下一步需用户批准scope/诊断口径，提供实际DTV/LOO run配置、中期ckpt路径/目录清单及对应代码版本、数据路径与投稿Assumption原文；本轮未实现两项代码、未给出实验性能预测。
+
+## 2026-11-08 — 记录norm设计获同意但暂停开发，细化R1数字化回应
+
+- 改动范围：无代码改动；用户明确同意norm设计但暂不实施，更新`GRPO_REBUTTAL_PREPARATION.md`与本日志，保留其他已有工作树修改，无训练/诊断启动。
+- norm状态：group top2/4、相同policy-score/full-update、原4条advantage不重算、确定ties/零组记录、梯度树norm无哈希；记录为设计同意而非立即编码授权。
+- R1验证设计：以共同固定checkpoint与独立clean heldout为基础，输出方法级score–utility rho/kept useful fraction/rare-correct drop/U表，以及actual conflict的正utility比例和有用negative-A/rare-correct额外删除计数，不要求新图。标明NLL/一阶效用proxy、cap前后mask、分母/零值/相关采样与有限步数值分辨率，未伪造实测数字。
+- 条件解释：仅在用户补充正式Assumption原文后才能精确核对；先给reference误差margin的条件性说明，强调多数clean计数不等于gradient mean可信、GRPO共享advantage使LOO并不独立。纠正准备文档残留的默认AdamW恢复表述：当前checkpoint仅模型，无额外快照不能重放历史moments。
+- 事前选择：独立warmup validation配对probe可作为另行验证的选择协议，但它增加validation成本；不能声称该整个选择流程validation-free。若不开发选择器，应诚实给条件/机制/限制，不按test或self/cross大小事后宣称确定赢家。
+- 完成范围：用户报告PODS和DS各至少一seed完成，区分方法实现/单seed结果与尚未确认补齐的五seed clean/mismatch矩阵；DS不等于完整DAPO。
+- 验证：只读核对既有准备文档及当前工作树，git diff --check通过。待用户提供Assumption1/定理原文、实际checkpoint/run配置与selection字段样例，尚未新增audit或norm代码。
+
+## 2026-11-08 — 完整阅读投稿并逐条规划R1回复
+
+- 改动范围：无代码改动；新增`REBUTTAL_R1_RESPONSE_PLAN.md`，同步`rebuttal.md`、`GRPO_REBUTTAL_PREPARATION.md`与本日志。保留已有其他任务的未提交记录；norm/audit继续暂停，未运行或中断训练。
+- PDF证据：完整提取用户`/Users/jason/Downloads/DTV_ICLR2027.pdf`22页文本，分段核对完整相关页面，用pdftoppm渲染并目视p3/p5；明确Assumption1是定性局部条件，未见正式定理/证明，先前原稿缺失待办已补齐。核对表1/2/3/8和附录E/F，识别Fig2 test/validation命名需按实际run对账。
+- 数值核查：Decimal重算表1 DTV−Vanilla clean6.55pp/mismatch6.82pp，DTV−Learn4.69/5.50pp、−Grad6.07/6.38pp、−LOO.67/1.79pp；未从mean/std伪造paired p-value。Vanilla较pretrained仅1.05/.08pp，Random/Reward多条件高方差、AIME单seed及Table8负迁移均需边界说明，不把明显gain认定无效，也不因gain大回避baseline充分性。
+- 理论与样本解释：用3clean梯度+1、1坏梯度-4的25%反例及80/20混合期望反例说明数量多数不保证方向多数/长期clean收敛；GRPO组相关/整组污染使全局80%clean不能替代组内reference可靠。少量误删可以是取舍，但须量化rare-correct及有用negative-A代价；负reward/advantage/alignment不混淆。
+- 文献核对：DAPO四组件+移除KL，当前DS仅隔离sampling而非JAX做不了整算法；核对Zhu等NeurIPS2025《The Surprising Effectiveness of Negative Reinforcement in LLM Reasoning》官方摘要，未从其结果推断DTV必然误删。
+- 回复产物：R1 W1–W5/Q1–Q5逐项状态、英文骨架和数字验收；PODS/DS实现/单seed完成与完整矩阵区分，PC/CAG仅设计，norm同意但暂停。独立utility两表、事前选择若用validation要披露额外成本；不将内部corr或test赢家当证明。记录投稿abstract/Assumption/表1caption/图2/LOO默认风险语句及AI-use声明应按实际情况由作者核查。
+- 验证命令/结果：PDF提取/渲染、Decimal表格计算、一手web来源核查完成；git diff --check通过。无代码测试或新增实验数值；下一步等待用户确认诊断/修稿优先项，不擅自开发。
+
 
 ## 2026-11-08 — 新服务器仓库备份与个人 checkout 准备
 
@@ -12908,3 +12937,42 @@ This file tracks engineering changes made in this repository.
 - 提交范围：显式 add dtv_flip_trainer.py、rl_cluster.py、run_dtv_flip.sh、dtv_flip_trainer_test.py、docs/dtv_flip.md、develop.md。保留但不提交已有 GRPO_REBUTTAL_PREPARATION.md 与 REBUTTAL_REVIEW_ANALYSIS_20261107.md 改动；develop.md 包含先前日志，会随整个日志文件一起提交。
 - 验证命令与结果：git status/remote/branch/log/diff、`git diff --check` 通过；本轮无算法改动，不重复上一轮已通过的 17 项 CPU 隔离测试。
 - 风险/待办：远端若前进，普通 push 将拒绝；不使用 force，需先检查并协调提交。尚未服务器同步或完整 TPU 验证。
+
+
+## 2026-11-08 — 准备 Project_8k 整目录服务器间同步命令
+
+- 改动范围：无代码改动；仅更新 `develop.md`，提供用户手动 rsync 命令，未连接服务器或执行同步。
+- 修改文件列表：`develop.md`。
+- 用户指定源：t1v-n-a9c72b46-w-0 上 /home/jason_chia925_gmail_com/Project_8k；目标：t1v-n-d0f559df-w-0 上 /home/lhf_hongfu_gmail_com/Project_8k。源代码为用户报告已拉取最新，未远程核实 commit。
+- 方案：源机先 du、SSH 检查目标 df 与 rsync；再 rsync -a --no-owner --no-group --partial --info=progress2 --stats，包含隐藏文件/.git/目录内环境及数据，不使用 --delete、不打包、不覆盖目标 ~/tunix。末尾以 checksum dry-run 核对，允许单独目录时间元数据差异；源数据写入期间不承诺一致快照。
+- 验证命令与结果：仅静态核对 rsync 源路径末尾无斜杠与目标父目录路径语义，`git diff --check -- develop.md` 通过；实际 SSH/DNS/认证、空间和同步结果待用户执行。
+- 风险/待办：目标先前空间紧张，完整复制仍需对应可用空间；主机名可能需换内网 IP，源用户需能 SSH 为目标 lhf。符号链接保留但不复制外部指向内容；复制的 venv 可能含源机绝对路径，启动训练前需核查。
+
+
+## 2026-11-08 — 排查服务器间 rsync 的 SSH 公钥认证失败
+
+- 改动范围：无代码改动；仅更新 `develop.md`，提供专用传输密钥与目标账号追加公钥的手动命令，未远程改 SSH 配置。
+- 修改文件列表：`develop.md`。
+- 用户证据：目标 hostname 成功解析到 10.128.0.20，SSH host key 已接受；失败为 lhf 账号 `Permission denied (publickey)`，不是 DNS/hosts 配置问题。
+- 方案：源账号生成或复用独立 dtv_transfer Ed25519 key，仅复制 .pub 到目标 lhf 的 authorized_keys（追加，不覆盖）；修正 .ssh/authorized_keys 权限后，显式 IdentityFile 与 IdentitiesOnly 测试登录，再用同一 key rsync。
+- 验证命令与结果：参考 Google Cloud 官方 SSH troubleshooting / OS Login 文档，确认 Google 账号密钥、OS Login/IAM 与本地 SSH 配置均可能影响认证；`git diff --check -- develop.md` 通过。未实际验证密钥安装、SSH 或复制。
+- 风险/待办：若仍失败需查有效 sshd 配置/OS Login，不能以关闭认证或禁用 OS Login 解决；目标磁盘空间仍需检查。
+
+
+## 2026-11-08 — 同步后准备 GSM8K seed5 DTV-flip / LOO-flip 顺序启动命令
+
+- 改动范围：无代码改动；仅更新 `develop.md`，提供用户手动 nohup 队列命令，未连接服务器或启动训练。
+- 修改文件列表：`develop.md`。
+- 配置依据：核对 run_seeded_full.sh、run_grpo_gemma.sh、config.py 与 seeding.py：accuracy reward、Gemma-3-1B-IT、4 prompts×4 generations、3072 max examples / 0.9 train fraction、1 epoch、LR1e-6、beta.08、prompt256/generation512、完整1319 pre/post评测；seed5 对应 data shuffle47/rollout5。本轮明确假定 clean（noise0）与 batch 范围，不擅自启用 mismatch0.2。
+- 命令范围：目标 /home/lhf_hongfu_gmail_com/Project_8k/tunix；优先直接选 .venv_jax081/bin Python，其次 .venv，避免复制 activate 脚本旧绝对路径。单process/四localTPU设定，清除CPU测试及policy/PODS/DS变量；完整依赖的非隔离CPU测试通过并检查TPU后，顺序 dtv batch、dtv-loo batch，各自独立 checkpoints/model/tensorboard/results/exit_code，失败即停，队列日志和PID可查看。
+- 验证命令与结果：`bash -n /tmp/run_flip_seed5_review.sh` 通过；静态核对参数、失败退出/路径与现有入口一致；`git diff --check -- develop.md` 通过。服务器代码已同步由用户报告，未实测环境或设备。
+- 风险/待办：同步虚拟环境能否运行、完整导入/TPU测试与根盘容量待目标实际执行；本命令不承诺两轮训练checkpoint的磁盘充足，不清理旧数据。my_example/.env 应只放凭据，不能重新覆盖本次方法/seed/noise等变量（原launcher会重载）。
+- 2026-11-08（fixed-checkpoint utility实施前澄清）：无代码改动；新增 `docs/fixed_checkpoint_utility_protocol.md`，区分教授的长期期望方向直觉、有限checkpoint局部实证和无条件保证。只读核对 `AGENTS.md`、checkpoint_manager.py、audit_alignment_projection.py、policy DTV/LOO trainers和数据加载；确认当前模型checkpoint不含AdamW moments，独立梯度/SGD-direction probe不需要历史optimizer，不能称真实AdamW重放。协议给出独立clean GRPO surrogate（优先）与gold-answer NLL proxy（可选）的不同口径，32候选/64heldout的初版计划、零梯度与prompt-cluster统计、cap/full-vs-policy分支、参数恢复、单worker/HBM边界及所需run目录清单。训练代码/参数不变，诊断脚本尚未实现，需实际checkpoint结构与run配置接恢复接口；norm开发继续暂停。验证：`git diff --check`（结果在本轮最终核对）；未执行TPU/模型恢复或生成诊断数字。
+- 2026-11-08（checkpoint诊断材料二次核查）：无代码改动；更新 `docs/fixed_checkpoint_utility_protocol.md`。检查checkpoint_manager.py、peft_trainer.py、main.py、train.py、config.py、run_seeded_full.sh、run_baseline.sh及alignment launcher，确认原Vanilla/DTV参数在runs而非仅logs；当前默认500步周期/max_to_keep4与close强制末步，LoRA-only参数、metadata可为空，无optimizer/RNG快照。原main有最终参数恢复与merged导出代码，但未实际云端恢复；不保证历史500/691目录仍存在。提供gcloud登录及runs/logs限定只读目录检查，不初始化JAX、不改/删/停训练。诊断脚本需新增，普通一阶/SGD probe不需改原保存；真实历史AdamW重放所需状态无法回填。验证：`git diff --check`通过（本轮）；未执行TPU、云端登录或checkpoint恢复。
+- 2026-11-08（GCS历史checkpoint访问澄清）：无代码改动；仅更新 `develop.md`。第一阶段同checkpoint比较Vanilla/DTV/LOO masks与utility，仅需一个共同Vanilla模型，不要求LearnAlign/GradAlign各自checkpoint；额外方法/多训练状态为后续扩展。用户归档前缀为 `gs://node-v5-jason/GRPO_GSM8K/`，说明可在已安装gcloud且有bucket读取权限的Mac/服务器直接用storage ls查看，不需先SSH TPU；ll/普通ls不能直接列gs URL（除非已挂载）。cp必须给源和目的地，当前无需整份下载。核对Google Cloud官方storage ls/cp文档；提供只读顶层及recursive baseline checkpoint元数据定位命令，不代执行认证、下载、云端修改。验证：`git diff --check`通过；实际bucket结构、权限与checkpoint完整性仍未核实。
+- 2026-11-08（Mac GCS小范围目录检查命令兼容）：无代码改动；仅更新 `develop.md`。用户已成功列bucket前缀，Mac交互zsh将粘贴的#行视为命令且无rg。后续提供无注释命令，优先只列 `GRPO_GSM8K/clean/` 顶层；若目录多，用系统grep筛baseline，候选run确定后再列该run的actor steps。不安装依赖、不递归整个归档、不下载模型；明确小部分指单个完整checkpoint而非随意部分权重文件。验证：`git diff --check`通过；未直接访问用户GCS或声称找到checkpoint。
+- 2026-11-08（选择utility audit的clean/noisy模型状态）：无代码改动；仅更新 `develop.md`。用户列出GCS clean前缀下Vanilla seeds0/5/13/21/42，确认有run目录不等于已确认checkpoint。建议先seed0 clean验证恢复/诊断，再以相同seed且相近step的mismatch20 Vanilla checkpoint扩展；区分模型训练污染条件、audit候选observed reward污染条件、始终clean的独立heldout目标。clean模型上施加候选污染只属固定状态的局部敏感性，不代替受污染训练轨迹证据；不按已知accuracy挑seed/step。提供用户已确认seed0路径的顶层与actor层只读storage ls，不先下载或假设step存在。验证：`git diff --check`通过；未访问GCS、恢复模型或启动训练。
+- 2026-11-08（服务器端Vanilla step500诊断输入准备）：无代码改动；仅更新 `develop.md`。用户已在ziao1 worker0确认GCS clean Vanilla seed0 run根含git revision/branch、Python/JAX/pip环境记录、checkpoints/model，actor保留500和691；根盘可用17GB。后续真实模型恢复/计算/HBM测试只在服务器空闲worker执行，不在Mac运行或把目录存在当恢复成功。先storage du汇总step500大小，再选择性复制完整500目录及五个小环境/版本文件到独立utility_audit_inputs，不下载691/merged model/整run，不自动恢复进正式trainer。CLI Python3.10 FutureWarning属于gcloud自身环境，当前ls已成功，不为此改训练venv。验证：核对Google官方storage du/cp命令，`git diff --check`通过；未实际下载、连接TPU或执行诊断，脚本仍未实现。
+- 2026-11-08（Vanilla seed0历史commit与68.93MiB checkpoint核对）：无代码改动；更新协议和本日志。用户确认step500结构及占用68.93MiB、旧commit6fba11c8/for_GRPO；本地git cat-file/git show可读，不切branch。确认model.py与当前无diff、LoRA默认64/64；历史parser generation768而当前512、data固定shuffle42且无seeding.py，reward存在环境分支，实际run覆盖仍需历史记录。提供服务器仅下载完整step500与五个已存在版本/环境txt至独立utility_audit_inputs的命令，并用系统Python读JSON元数据/列文件，不import JAX、不触TPU、不把旧目录设正式trainer的checkpoint-root。模型完整性及真实restore尚未验收，不按压缩大小推断rank。验证：只读git核查成功，`git diff --check`通过；无训练/诊断脚本新增或执行。
+- 2026-11-08（独立checkpoint恢复自检实现）：新增 `my_example/audit_grpo_checkpoint_restore.py`、`my_example/audit_grpo_checkpoint_restore.sh`、`tests/my_example/fixed_checkpoint_restore_test.py`，同步更新 `docs/fixed_checkpoint_utility_protocol.md` 和本日志。不改原trainer/config/CLI/保存逻辑。metadata模式标准库检查JSON/payload/旧commit/环境差异及完整step源hash；restore模式隔离当前worker，仅加载base+LoRA，用带sharding的target恢复并验tree/shape/dtype/finite、参数digest和源未变，记录恢复阶段内存，没有optimizer/训练/梯度/utility。新增12项服务器标准库测试；本机遵用户要求不执行模型/CPU诊断测试，只做语法与shell静态检查。已知边界：源revision元数据非脏工作树证明、HF backbone历史revision未认证、反传和utility脚本尚未实现、恢复成功不等于其余诊断/HBM通过；真实TPU验收需服务器空闲worker。测试命令及结果在本轮最终核对补充。
+- 恢复自检静态验证补充：`bash -n my_example/audit_grpo_checkpoint_restore.sh`、新增两个Python文件的AST语法解析、`git diff --check`均通过；AST确认12项标准库单元测试已定义，但本机未执行（服务器运行待用户反馈）。当前branch为`for_GRPO_8kBaseline`；config/train/main/model、checkpoint_manager、RobustTrainer的本轮git diff为空。未代执行git add/commit/push、服务器pull或任何模型恢复；PASS尚未获得。
