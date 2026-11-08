@@ -172,3 +172,9 @@ heldout独立不等于无噪声真梯度：PG surrogate仍受有限rollouts与�
 输入模型来自clean；candidate-noise0.2仅为此状态敏感性，不替代mismatch训练模型证据。强制显式reward-mode，保存数据版本及未认证历史split/config/HF revision警告。matched random的mask不读取heldout h/clean audit标签。统计按prompt/batch聚类，但区间条件于当前h/checkpoint，不伪装训练seed不确定性。stress全长数据不进入科学汇总。程序完成不自动宣称assumption/实用性已验证。
 
 本机仅AST、bash -n、diff检查；按用户要求所有CPU/JAX toy、真实smoke及满长度HBM必须在服务器执行，当前不能声称通过。正式数字须恢复/CPU/smoke/HBM和配置核对后产生、检查，先勿启动大规模probe或据此写结论。
+
+### 9.1 NNX状态快照别名修复（2026-11-08，待服务器回归）
+
+用户nohup smoke到最终SHA256失败，退出码1。确定原脚本存在快照别名缺陷：`self.snapshot=nnx.state(actor,LoRAParam)`保留可变Variable引用，原逐probe比较可能自比较，不能保证每branch从同一theta0开始。核对Flax v0.12.6官方graphlib的state/flatten逻辑（https://github.com/google/flax/blob/v0.12.6/flax/nnx/graphlib.py）后，改成新增`parameter_snapshot.py`中的独立copied-array tuple；每次生成新State包装以恢复，前后按路径/shape/dtype/bitwise检查，保留最终初始SHA检查，不放宽allclose。失败记录具体变化，不自动fallback。
+
+新增`roundtrip`模式用于实际checkpoint两次扰动/恢复，不取数据、不rollout/反传；只检查恢复且utility标false。新增6项`parameter_snapshot_test.py`服务器CPU回归，覆盖快照不随actor变化、包装可丢弃、signed zero与微小bit变化、真实probe的成功/异常finally、dirty起点拒绝、真实roundtrip；其余utility测试仍保留。额外占用仅一份LoRA参数数组，byte数记录到manifest。只改rebuttal独立文件/launcher/docs，不改训练参数、loss、原数据或源checkpoint。旧失败run的有限步比较不作为有效证据，保留作debug；无须重训或重新下载。全部模型/CPU测试仍仅服务器执行，本机静态检查不算回归通过。

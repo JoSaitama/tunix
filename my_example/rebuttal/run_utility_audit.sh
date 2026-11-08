@@ -5,8 +5,8 @@ AUDIT_REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 AUDIT_MODE="${1:-preflight}"
 if [ "$#" -gt 0 ]; then shift; fi
 case "$AUDIT_MODE" in
-  preflight|smoke|hbm|score|probe) ;;
-  *) echo "usage: bash $0 preflight|smoke|hbm|score|probe --reward-mode accuracy|legacy [args...]" >&2; exit 2 ;;
+  preflight|roundtrip|smoke|hbm|score|probe) ;;
+  *) echo "usage: bash $0 preflight|roundtrip|smoke|hbm|score|probe --reward-mode accuracy|legacy [args...]" >&2; exit 2 ;;
 esac
 cd "$AUDIT_REPO"
 AUDIT_PYTHON="${AUDIT_PYTHON:-$AUDIT_REPO/.venv_jax081/bin/python}"

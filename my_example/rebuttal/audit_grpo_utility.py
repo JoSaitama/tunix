@@ -29,7 +29,7 @@ def parser():
     p.add_argument("--output-dir", required=True)
     p.add_argument("--step", type=int, default=500)
     p.add_argument("--expected-commit", default="6fba11c8d2e4cb00ee19e8ed45e196521d3f93d0")
-    p.add_argument("--mode", choices=("preflight", "smoke", "hbm", "score", "probe"), default="preflight")
+    p.add_argument("--mode", choices=("preflight", "roundtrip", "smoke", "hbm", "score", "probe"), default="preflight")
     p.add_argument("--reward-mode", choices=("accuracy", "legacy"), required=True,
                    help="Explicit source dense reward branch; never infer it from checkpoint weights.")
     p.add_argument("--heldout-reward-mode", choices=("same", "binary"), default="same")
@@ -73,7 +73,7 @@ def parser():
 
 
 def validate(args):
-    small = args.mode in {"smoke", "hbm"}
+    small = args.mode in {"roundtrip", "smoke", "hbm"}
     args.candidate_prompts = args.candidate_prompts if args.candidate_prompts is not None else (4 if small else 32)
     args.heldout_prompts = args.heldout_prompts if args.heldout_prompts is not None else (8 if small else 64)
     args.random_repeats = args.random_repeats if args.random_repeats is not None else (1 if small else 3)
@@ -219,7 +219,8 @@ def run(args):
         manifest["audit_source_sha256"] = {
             name: hashlib.sha256((repo / name).read_bytes()).hexdigest() for name in (
                 "my_example/rebuttal/audit_grpo_utility.py", "my_example/rebuttal/utility_runtime.py",
-                "my_example/rebuttal/utility_math.py", "tunix/rl/grpo/grpo_learner.py",
+                "my_example/rebuttal/utility_math.py", "my_example/rebuttal/parameter_snapshot.py",
+                "tunix/rl/grpo/grpo_learner.py",
                 "my_example/rewards.py", "my_example/reward_rank_noise.py", "my_example/prompts.py")}
         recorded_data_versions = {}
         freeze = source / "pip-freeze.txt"
@@ -260,6 +261,19 @@ def run(args):
         os.environ.pop("JAX_PLATFORMS", None)
         os.environ.pop("JAX_PLATFORM_NAME", None)
         from .utility_runtime import UtilityRuntime
+        if args.mode == "roundtrip":
+            runtime = UtilityRuntime(args, checkpoint, output)
+            manifest.update(topology=runtime.topology, backbone_path=runtime.model_path,
+                            restored_lora=runtime.initial_summary,
+                            snapshot_storage="detached_copied_array_tuple")
+            write_report(output / "audit_manifest.json", manifest)
+            summary["parameter_roundtrip"] = runtime.roundtrip_check()
+            summary["theta0_restored"] = True
+            summary["source_unchanged"] = fingerprint_directory(checkpoint) == preflight["input_fingerprint"]
+            if not summary["source_unchanged"]:
+                raise RuntimeError("source checkpoint files changed during parameter roundtrip")
+            summary["execution_passed"] = True
+            return output
         candidates, heldout_examples, partition = select_examples(args)
         manifest["data_partition"] = partition
         write_report(output / "audit_manifest.json", manifest)
@@ -267,13 +281,17 @@ def run(args):
         manifest["topology"] = runtime.topology
         manifest["backbone_path"] = runtime.model_path
         manifest["restored_lora"] = runtime.initial_summary
+        manifest["snapshot_storage"] = "detached_copied_array_tuple"
+        manifest["snapshot_bytes"] = int(runtime._snapshot.bytes)
         write_report(output / "audit_manifest.json", manifest)
         # Finish ALL rollouts at theta0 BEFORE any temporary parameter change.
         heldout = [runtime.prepare(heldout_examples[i:i + 4], role="heldout", batch_id=i // 4)
                    for i in range(0, len(heldout_examples), 4)]
         candidate_batches = [runtime.prepare(candidates[i:i + 4], role="candidate", batch_id=i // 4)
                              for i in range(0, len(candidates), 4)]
+        runtime.assert_original_parameters("after_shared_rollouts")
         h, h_report = runtime.heldout_gradient(heldout)
+        runtime.assert_original_parameters("after_heldout_gradients")
         summary["independent_gradient"] = h_report
         baseline = runtime.clean_value(heldout)
         baseline_repeat = runtime.clean_value(heldout)
@@ -284,11 +302,13 @@ def run(args):
         units, batches, references, first_order, random_rows = [], [], [], [], []
         mean_reference_sum = None
         for batch_id, host in enumerate(candidate_batches):
+            runtime.assert_original_parameters(f"before_candidate_batch_{batch_id}")
             # Synchronize each kernel: no overlapping total/policy AD programs.
             full = runtime.gradients(host, full=True)
             runtime.snapshot_memory(f"candidate_full_backward_{batch_id}")
             pg = runtime.gradients(host)
             stats = runtime.batch_statistics(pg, full, h)
+            runtime.assert_original_parameters(f"after_candidate_gradients_{batch_id}")
             with runtime.mesh:
                 mean_reference = runtime.average(pg, runtime.jnp.ones(16))
                 mean_reference_sum = (mean_reference if mean_reference_sum is None
@@ -396,10 +416,16 @@ def run(args):
                         "batch_cluster_ci95": cluster_interval(differences, [row["batch_id"] for row in by_method[left]],
                                                                 repeats=args.bootstrap_repeats)}
             summary["finite_step"][str(eta)] = results
+        summary["parameter_validation"] = runtime.assert_original_parameters("audit_end")
         with runtime.mesh:
             current = runtime.parameter_summary(runtime.jax, runtime.nnx.state(runtime.actor, runtime.nnx.LoRAParam))
         if current["sha256"] != runtime.initial_summary["sha256"]:
-            raise RuntimeError("audit ended at modified parameters")
+            write_report(output / "parameter_restore_failure.json", {
+                "stage": "audit_end_sha256", "original_sha256": runtime.initial_summary["sha256"],
+                "current_sha256": current["sha256"],
+                "bitwise_array_guard": summary["parameter_validation"],
+                "differences": runtime._snapshot.differences(runtime.nnx.state(runtime.actor, runtime.nnx.LoRAParam))})
+            raise RuntimeError("audit final parameter SHA256 mismatch; see parameter_restore_failure.json")
         summary["theta0_restored"] = True
         memory = json.loads((output / "hbm_report.json").read_text(encoding="utf-8"))
         summary["hbm_headroom_verified"] = memory["headroom_verified"]

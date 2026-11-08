@@ -94,12 +94,17 @@ the latter, supply its own checkpoint and label the provenance correctly.
 - `utility_runtime.py`: read-only restoration, shared real rollouts, original
   GRPO derivatives, exact TPU tree dot products, sequential probes and HBM data.
 - `utility_math.py`: NumPy controls, score oracle, stratified/cluster statistics.
+- `parameter_snapshot.py`: detached copied array values; fresh NNX wrappers for
+  every restoration, strict parameter path/shape/dtype/bitwise checks.
 - `run_utility_audit.sh`: safe single-worker launcher, no training entry point.
 - `test_utility_cpu.sh` and `tests/`: tiny server CPU tests; no HF downloads.
 
 Modes:
 
 - `preflight`: no JAX import; verify checkpoint metadata, payload and source hash.
+- `roundtrip`: load the actual checkpoint, perturb/restore twice in memory and
+  verify the backup stays original. No generation, dataset loading or backward;
+  this mode does NOT validate utility or gradient HBM.
 - `smoke`: four candidate/eight heldout prompts, one matched-random repetition,
   real rollouts, gradients, exact scores and five finite-step branches.
 - `hbm`: smoke PLUS full configured prompt/completion lengths with all-valid
@@ -195,3 +200,38 @@ Local work is restricted to syntax/shell/static checks per user instruction.
 The CPU suite, real TPU smoke and full-length HBM tests must be run on the
 server. Until those results are received, neither utility execution nor HBM
 headroom is claimed to pass. Existing restore-only code/input remains unchanged.
+
+### Snapshot alias fix and fast regression (2026-11-08)
+
+The original implementation incorrectly retained `nnx.state(actor, LoRAParam)`
+as an immutable backup. Flax0.12.6 state mappings can contain live Variable
+references, so actor updates could also change that alleged backup. Comparing
+actor against the same live backup after each probe was insufficient; the final
+initial SHA256 check correctly rejected the run. Do not use that failed run's
+finite-step comparisons. No source checkpoint or formal training model was saved.
+
+The authoritative backup is now a tuple of copied immutable parameter arrays,
+with no live NNX Variable wrappers. `materialize()` reconstructs disposable
+wrappers each time. Every probe checks theta0 before updating and restores/checks
+exact parameter bits afterwards, including when evaluation raises. Extra guards
+surround rollout/gradient boundaries and the audit end. The original final
+SHA256 check is retained. No allclose tolerance is substituted. A failure writes
+paths/changed element counts/max errors to `parameter_restore_failure.json`.
+The extra storage is one trainable LoRA parameter copy, not a full model copy;
+its byte count is in the manifest/roundtrip report.
+
+Server fast regression (no TPU):
+
+```bash
+env -u JAX_PLATFORM_NAME JAX_PLATFORMS=cpu .venv_jax081/bin/python -m unittest discover -s my_example/rebuttal/tests -p 'parameter_snapshot_test.py'
+```
+
+Then on an idle CURRENT worker:
+
+```bash
+bash my_example/rebuttal/run_utility_audit.sh roundtrip --reward-mode accuracy
+```
+
+If that passes, rerun smoke under nohup, followed by HBM only after inspection.
+`parameter_roundtrip.passed` is a restoration check, not utility evidence.
+Do not overwrite the failed report or reuse its partial finite-step results.

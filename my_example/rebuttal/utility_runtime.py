@@ -13,6 +13,8 @@ from pathlib import Path
 import time
 import numpy as np
 
+from .parameter_snapshot import ParameterSnapshot
+
 
 def production_per_unit_gradient(loss):
     """Same differentiation order as the production per-sample trainer."""
@@ -94,7 +96,7 @@ class UtilityRuntime:
             finally:
                 checkpointer.close()
             nnx.update(self.actor, restored)
-            self.snapshot = nnx.state(self.actor, nnx.LoRAParam)
+            self._snapshot = ParameterSnapshot(nnx.state(self.actor, nnx.LoRAParam))
             self.initial_summary = parameter_summary(jax, self.snapshot)
             if parameter_summary(jax, restored)["sha256"] != self.initial_summary["sha256"]:
                 raise ValueError("actor parameters differ from restored checkpoint")
@@ -145,12 +147,6 @@ class UtilityRuntime:
         self.dot = dot
 
         @jax.jit
-        def identical(a, b):
-            return jnp.all(jnp.stack([jnp.array_equal(x, y)
-                                     for x, y in zip(jax.tree.leaves(a), jax.tree.leaves(b))]))
-        self.identical = identical
-
-        @jax.jit
         def statistics(pg, full, h):
             pgl, ful, hl = jax.tree.leaves(pg), jax.tree.leaves(full), jax.tree.leaves(h)
             n = pgl[0].shape[0]
@@ -197,6 +193,52 @@ class UtilityRuntime:
             return changed, delta, norm, clip, count
         self.perturb = perturb
         self.snapshot_memory("restored_model")
+
+    @property
+    def snapshot(self):
+        # nnx.update may mutate/alias State Variable wrappers. Return a NEW
+        # wrapper tree each time; the authoritative copied array tuple is private.
+        return self._snapshot.materialize()
+
+    def assert_original_parameters(self, stage):
+        with self.mesh, self.monitor(self.jax):
+            current = self.nnx.state(self.actor, self.nnx.LoRAParam)
+            equal = self._snapshot.matches(current)
+        if not equal:
+            from my_example.audit_grpo_checkpoint_restore import write_report
+            details = self._snapshot.differences(current)
+            details.update(stage=stage, criterion="same parameter paths, shapes, dtypes and exact bits")
+            write_report(self.output / "parameter_restore_failure.json", details)
+            raise RuntimeError(f"parameters differ from immutable theta0 at {stage}; see parameter_restore_failure.json")
+        return {"stage": stage, "bitwise_equal": True,
+                "snapshot_storage": "detached_array_values_no_live_NNX_variables"}
+
+    def roundtrip_check(self):
+        """Fast actual-checkpoint mutation/restore test, no rollout or backward."""
+        results = []
+        self.assert_original_parameters("roundtrip_start")
+        for shift in (1e-4, -2e-4):
+            try:
+                with self.mesh, self.monitor(self.jax):
+                    temporary = self.jax.tree.map(
+                        lambda leaf: (leaf.astype(self.jnp.float32) + shift).astype(leaf.dtype), self.snapshot)
+                    self.jax.block_until_ready(temporary)
+                    self.nnx.update(self.actor, temporary)
+                    if self._snapshot.matches(self.nnx.state(self.actor, self.nnx.LoRAParam)):
+                        raise RuntimeError("roundtrip test did not change any parameter bits")
+                    # The backup must remain equal to its original host hash,
+                    # even WHILE the model holds different parameters.
+                    backup = self.parameter_summary(self.jax, self.snapshot)
+                    if backup["sha256"] != self.initial_summary["sha256"]:
+                        raise RuntimeError("immutable backup changed during model mutation")
+            finally:
+                with self.mesh, self.monitor(self.jax):
+                    self.nnx.update(self.actor, self.snapshot)
+                results.append(self.assert_original_parameters("roundtrip_restore"))
+        self.snapshot_memory("parameter_roundtrip_only_no_gradients")
+        return {"passed": True, "roundtrips": len(results), "backup_bytes": int(self._snapshot.bytes),
+                "bitwise_restoration": True, "utility_audit_completed": False,
+                "scope": "parameter mutation/restoration only, NOT utility or gradient HBM"}
 
     def snapshot_memory(self, name):
         self.jax.effects_barrier()
@@ -362,6 +404,7 @@ class UtilityRuntime:
     def probe(self, direction, h, heldout, baseline, eta):
         jp, jax = self.jnp, self.jax
         started = time.monotonic()
+        self.assert_original_parameters("before_probe")
         try:
             with self.mesh, self.monitor(jax):
                 params, delta, raw_norm, clip, changed = self.perturb(
@@ -382,14 +425,11 @@ class UtilityRuntime:
                     "predicted_first_order_utility": predicted,
                     "elapsed_seconds": time.monotonic() - started}
         finally:
-            # Snapshot arrays are immutable and never donated. Restore after
-            # EVERY method, even if evaluation/allocator errors interrupt it.
+            # Restore from detached ARRAY VALUES, not a State sharing model
+            # Variables. Check exact bits; numerical allclose is insufficient.
             with self.mesh, self.monitor(jax):
                 self.nnx.update(self.actor, self.snapshot)
-                restored = self.nnx.state(self.actor, self.nnx.LoRAParam)
-                equal = bool(jax.device_get(self.identical(restored, self.snapshot)))
-            if not equal:
-                raise RuntimeError("counterfactual probe failed to restore theta0")
+            self.assert_original_parameters("after_probe_restore")
 
     def stress(self, heldout, h, baseline):
         """Full configured length, all-valid synthetic masks; never scientific data."""
