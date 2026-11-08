@@ -13084,3 +13084,26 @@ This file tracks engineering changes made in this repository.
 - 修复：run_pairs计算的分辨率floor先转Python float，再传入numerical_pair_check，避免其嵌套resolution_floor保留NumPy float32；数值门槛/步长/精度/梯度/训练参数均不变。原失败报告测试新增顶层与嵌套type断言和strict JSON序列化断言，保留失败验收标准，不跳过测试或放宽阈值。
 - 验证命令与结果：本机两文件AST、ruff E9/F、launcher bash -n和git diff --check均通过；遵约不在Mac跑单元/JAX/模型测试。服务器CPU62项需修复后重新通过，之后再单worker有界FP32对照；没有已通过TPU/HBM的新证据。
 - 风险/待办：本次修复只解决报告类型错误，不声称原BF16数值问题或新FP32测量已解决；45分钟TPU预算及失败后转norm-top50的止损安排保持不变。未代提交推送或启动远端作业，其他dirty rebuttal文档保持原状。
+
+
+## 2026-11-08 — FP32 小规模对照完成但数值验收未通过，按预算止损
+
+- 改动范围：无代码改动；只读核对run_pairs/numerical_pair_check与用户服务器输出，更新本 `develop.md`。
+- 服务器证据：CPU阶段OK；FP32control run20261108_122043执行170.302秒，无traceback/OOM/超时，execution_passed=true、前向嵌套JAXPR浮点dtype仅float32、LoRA逐位恢复、源checkpoint/replay未改、HBM计数验收true。但fp32_numerical_control_passed=false、validated_step_sizes空，预定两步长没有通过完整数值门槛。不是前次JSON类型错误，也不能将执行完成误称科学验收通过。
+- h观测：32回答/8prompts、norm .4945633，两半各4prompts、norm .8617055/.3513538、cos .1856004；只是小样本方向描述，不是稳定性认证。utility_audit_completed/production_path_validated/method_benefit_inferred/assumption_proven均false在此独立控制中本就不作肯定，不表示已证明理论不成立。
+- 决定/待办：停止继续TPU重试、换候选/步长/阈值或扩大128扫描；按已约定下一优先级转gradient-norm top50训练baseline，但本轮不擅自开发。仅请求现有numerical_report.json只读数据以区分分辨率/符号/Taylor/恢复门槛，未拿到明细前不认定根因或BF16唯一原因。有限步utility不能写成已完成的rebuttal证据，已完成历史训练不因此被宣告无效。
+- 验证命令与结果：核对本地两函数与用户已完成报告字段；`git diff --check -- develop.md` 通过。未运行新单测/模型/服务器任务，未中断其他worker训练、未改环境或生产算法。
+
+
+## 2026-11-08 — 记录 FP32 对照明细并开发 gradient-norm top50% baseline
+
+- FP32现有报告记录（不重跑）：run20261108_122043 zero/restore差0；1e-6正反符号正确，预测±4.9456e-8、实测+6.5193e-8/-8.1025e-8，Taylor在绝对容差内但resolvable=false；1e-4预测±4.9456e-6，实测+7.7672e-6/-7.6396e-6，resolvable=true但Taylor=false（约55–57%幅值偏差）。不是两个方向都错误，也不是理论被否定；保留未通过，不松阈值、不扩大utility扫描。
+- 修改范围：新增独立rebuttal norm trainer/单次与suite启动/CPU与smoke/HBM测试/说明；共享代码仅rl_cluster.py新增显式variant条件分支。RobustTrainer、RLTrainingConfig、原config/训练CLI/main/train/GRPOlearner、DTV/LOO/flip/PODS/DS/utility代码均保持不变。
+- 文件列表：新增 `my_example/rebuttal/gradient_norm_trainer.py`、`run_gradient_norm_baseline.sh`、`run_gradient_norm_suite.sh`、`test_gradient_norm.sh`、`test_gradient_norm_hbm.py`、`gradient_norm_top50.md`、`tests/my_example/gradient_norm_test.py`；修改 `tunix/rl/rl_cluster.py`、本 `develop.md`。用户既有rebuttal文档改动不纳入提交。
+- 算法：复用DTV policy-score同一KL-free逐completion AD与LoRA空间；按梯度树全部leaf的FP32平方范数，每组4稳定选2，0/tie按原索引补足，准确名top50不是严格大于median。更新对入选完整grad（含配置beta）按保留数求均值；原4答案A/生成预算/16回答反传形状不变，不压缩、不额外rollout/heldout、不缩batch或重算A，原污染learner仍先反rank再计算A。非有限loss/grad拒绝，不伪装被过滤。
+- 记录：选择JSONL包含L2/平方范数、原A、局部mask及token prompt hash；session summary、原TensorBoard/skipped/eval pre/post/export/模型checkpoint全部保留；runtime_config.json捕获当前parser实际默认与CLI覆写，launch_command记录命令，避免把historical未知覆写冒认为确认。正式长度跟现有PODS/DS/current parser保持一致（当前512），HBM强测256/768，不能擅自将压力长度改成正式长度。
+- 验证设计：server CPU测试定义包括真实NNX/Optax/JAX、完整GRPO loss解析数值、policy-vs-full排序、LoRA空间、4CPU分片JIT、ties/zero、非有限拒绝、路由legacy不变、JSON/launcher干跑；clean/mismatch各2步真实smoke验证32生成/16保留及pre/post1的原指标schema。HBM顺序调用生产actor.train避免prefetch阶段标记竞态，1次真实生成+2次全valid满256/768，全部受控测试reward、固定691步LR schedule，仅3实际update；核对范数排名/全部4设备峰值至少5%余量，测试不冒充科学结果。
+- 当前验证状态：仅静态AST、ruff E9/F、shell bash-n、diff检查，最终结果后补；遵用户要求不在Mac执行任何单元/JAX/模型/TPU测试。服务器门槛通过后才建议seed5正式训练，不自动启动五seed；当前worker逻辑0/4设备隔离并拒绝同worker另一模型任务，不触碰worker1 DS训练。
+- 风险/边界：新norm路径双份逐样本梯度与DTV policy-score类似，但HBM须实测，不能用PODS97%余量背书；50%固定保留与DTV自适应不同，不声称是同drop rate的纯方向消融。该baseline既不是正确性筛选器，也不能替代Assumption/独立utility证据；whole-group反号范数不变。完整历史参数仍需根据实际launch确认，代码保存本次实际配置。
+- 最终本机静态结果：4个Python文件AST、新CPU套件21项test定义、ruff E9/F（含rl_cluster.py）、三个shell bash -n及git diff --check均通过；保护文件与原main/train/config/launcher/RobustTrainer无本轮diff，共享变更仅rl_cluster.py七行opt-in分支。本机未执行任何CPU/JAX/模型/TPU测试，不声称21项或新HBM已通过；只提供服务器拉取和单worker nohup测试命令，等待实际结果后再排正式seed。
+- 追加第22项测试定义：实际复用原20%/seed5 rank-noise及GRPO advantage函数，128个微型prompt组同时包含clean与被污染组；验证norm输入来自observed A而非clean/oracle，未污染A不变，逐组50% mask与独立稳定排序一致。只定义/静态核对，不在Mac执行。

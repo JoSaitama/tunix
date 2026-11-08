@@ -622,6 +622,13 @@ class RLCluster:
           filter_ratio,
           num_generations,
       )
+    elif actor_config.use_dynamic_batch_curation and dbc_variant == "gradient_norm_top50":
+      from my_example.rebuttal import gradient_norm_trainer  # pylint: disable=g-import-not-at-top
+      actor_trainer_cls = gradient_norm_trainer.GradientNormTop50Trainer
+      actor_trainer_kwargs.update(
+          gradient_norm_trainer.configuration_from_environment(os.environ)
+      )
+      logging.info("Rebuttal gradient-norm top50: group4 keep2; policy score/full update.")
     elif (
         actor_config.use_dynamic_batch_curation
         and dbc_variant == "self_inf"
