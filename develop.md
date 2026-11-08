@@ -13075,3 +13075,12 @@ This file tracks engineering changes made in this repository.
 - 验证命令与结果：待最终补充 AST、ruff E9/F、bash -n、git diff --check；未提交推送、未远程启动/中断任务。
 - 已知边界：NNX/TPU trace及新峰值尚待服务器；H的8prompt分半不稳定不会因数值对照通过自动解决。即便通过也不证明batch agreement有用或R2 finite utility已完成，只确认新FP32测量能工作。下一步是否开展科学对齐统计须另外判定。
 - 最终静态验收：所有rebuttal Python AST解析、新8项test定义计数、ruff E9/F、launcher与nohup片段bash -n、git diff --check通过；对tunix/、正式main/train/config及原utility_runtime/audit_grpo_utility的diff为空。本轮没有在Mac或服务器执行单元/JAX/模型/TPU测试；用户需手动提交推送后，在空闲worker0执行新launcher（先服务器CPU回归，再有45分钟预算的FP32数值/HBM对照）。
+
+
+## 2026-11-08 — 修复 FP32 数值对照报告的 NumPy 标量序列化
+
+- 证据：附件b9c4ce08显示服务器CPU回归62项在3.564秒完成、1项ERROR；报错位于FP32GateTest失败报告写JSON，`TypeError: Object of type float32 is not JSON serializable`。launcher阶段1已停，尚未启动TPU对照；弃用警告不是此次原因，不需要更换环境/升级依赖。
+- 改动范围/文件：仅 `my_example/rebuttal/utility_fp32_control.py`、`my_example/rebuttal/tests/utility_fp32_control_test.py` 和本 `develop.md`。
+- 修复：run_pairs计算的分辨率floor先转Python float，再传入numerical_pair_check，避免其嵌套resolution_floor保留NumPy float32；数值门槛/步长/精度/梯度/训练参数均不变。原失败报告测试新增顶层与嵌套type断言和strict JSON序列化断言，保留失败验收标准，不跳过测试或放宽阈值。
+- 验证命令与结果：本机两文件AST、ruff E9/F、launcher bash -n和git diff --check均通过；遵约不在Mac跑单元/JAX/模型测试。服务器CPU62项需修复后重新通过，之后再单worker有界FP32对照；没有已通过TPU/HBM的新证据。
+- 风险/待办：本次修复只解决报告类型错误，不声称原BF16数值问题或新FP32测量已解决；45分钟TPU预算及失败后转norm-top50的止损安排保持不变。未代提交推送或启动远端作业，其他dirty rebuttal文档保持原状。

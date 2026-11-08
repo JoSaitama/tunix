@@ -176,6 +176,11 @@ class FP32GateTest(unittest.TestCase):
             self.assertFalse(result["production_path_validated"])
             self.assertTrue(result["not_method_evidence"])
             self.assertEqual(len(result["pairs"]), 2)
+            self.assertIs(type(result["minimum_resolution_floor"]), float)
+            for pair in result["pairs"]:
+                self.assertIs(type(pair["check"]["resolution_floor"]), float)
+            # Regression: np.float32 must not leak into nested report fields.
+            json.dumps(result, allow_nan=False)
             self.assertEqual(json.loads((Path(tmp) / "numerical_report.json").read_text())["validated_step_sizes"], [])
 
 

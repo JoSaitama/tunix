@@ -121,7 +121,9 @@ def run_pairs(runtime, heldout, h, baseline, repeat):
     from my_example.audit_grpo_checkpoint_restore import write_report
 
     args = runtime.args
-    floor = max(abs(baseline - repeat), np.finfo(np.float32).eps * max(1., abs(baseline)))
+    # NumPy can keep the maximum as np.float32. It is also nested unchanged
+    # in numerical_pair_check's report, so normalize BEFORE passing it on.
+    floor = float(max(abs(baseline - repeat), np.finfo(np.float32).eps * max(1., abs(baseline))))
     report = {"passed": False, "validated_step_sizes": [], "pairs": [],
               "baseline": baseline, "same_parameter_repeat_difference": abs(baseline - repeat),
               "minimum_resolution_floor": float(floor), "rtol": .1, "atol": 1e-7,
