@@ -12816,3 +12816,95 @@ This file tracks engineering changes made in this repository.
 - 加强验收：`validate_hbm_selection`要求三阶段名字/累计rounds2,4,6、24生成组/12入选组、每update八生成/四入选/四常数拒绝以及selected正std，防止只查最终更新数漏掉refill覆盖。保留cap失败安全行为，不通过增大上限或放行无信号组掩盖问题。
 - 验证命令与结果：`JAX_PLATFORMS=cpu /tmp/dtv-rebuttal-venv/bin/python -m unittest discover -s tests/my_example -p 'dynamic_sampling*test.py'`23项全部通过；新增相同答案、真实prompt模板、污染后方差规则、HBM精确两轮fill和报告负例测试。py_compile、git diff --check通过。
 - 风险/待办：本机无TPU，修复后HBM内存余量未验证；已通过的完整smoke无需为此测试改动重跑，可在空闲worker单独重试HBM并使用新report目录。正式DS仍可能在真实候选长期无有效组时触发cap，未更改该科学/安全边界；不影响PODS既有seed结果或运行中的任务。
+
+## 2026-11-07 — 确认服务器DS HBM通过与当前实现范围
+
+- 改动范围：无代码改动；只读核对HBM通过逻辑，更新`GRPO_REBUTTAL_PREPARATION.md`与本日志；未启动训练。
+- 用户回传：23项测试OK；`ds_hbm_retry.Du03qd/report/hbm_report.json`打印PASS。按当前脚本严格条件，完成单process/四localTPU设备、三次actor update、各两轮refill和默认每设备至少5%实测峰值余量；具体报告数据未贴出，不编造内存数值或保证未来所有峰值。3/691来自测试stop3、LR schedule保持691，不是正式训练被截断。
+- 方法范围：本轮仅新增GRPO+DS（非完整DAPO）；PCGrad/CAGrad未实现，norm trainer与fixed-checkpoint诊断仍为设计。PODS与LearnAlign/GradAlign是先前已有baseline，不能称仓库只有DS。
+- 下一步：无需重跑已通过smoke，建议补看report简版配置/拓扑/各阶段min headroom及磁盘后先正式DS单seed；真实reward长期常数组仍会按原cap20停止，受控HBM通过不等于验证所有正式采样轨迹。
+- 验证：静态核对test_ds_hbm.py的PASS gating与实现清单；git diff --check通过。无新增CPU/TPU执行或参数更改。
+
+## 2026-11-07 — 记录DS实际HBM余量并准备正式seed5单run
+
+- 改动范围：无代码改动；更新准备文档及本日志，提供当前空闲worker0的nohup命令，未远程代启动训练。
+- 用户回传：单process0、global/local均4个TPU设备；prompts4、generations4、selected_groups4、beta.08、256/768压力长度；三阶段报告minimum headroom均97.04%，passed/headroom_verified均True。仅作为该压力测试的内存计数结果，不保证整轮所有allocator/编译峰值。根盘剩19GB。
+- 启动范围：仅DS mismatch0.2 seed5、cap20、原4×4/691步及pre/post1319评测，不修改LR/KL或使用test fixture受控reward；清除CPU测试、PODS与临时目录覆盖残留，并先检查当前worker无其他相关任务。不影响worker1的PODS四seed作业。
+- 解释边界：HBM配置candidate_batches_per_update2、受控reward与测试保留率不是正式DS固定设定；正式按真实observed dense reward过滤并动态补满4组，日志selection记录实际额外生成预算。19GB只先安排一seed并监测空间，不承诺多seed磁盘够用、不自动清理结果。
+- 验证：静态核查DS suite/单run launcher的参数、命名、独立worker拓扑与正式reward路径；git diff --check通过。本轮未重跑测试或改动训练代码。
+
+
+## 2026-11-08 — 新服务器仓库备份与个人 checkout 准备
+
+- 改动范围：无代码改动；仅更新 `develop.md`，提供远端手动备份与个人目录 clone 方案，未连接或修改服务器。
+- 修改文件列表：`develop.md`。
+- 核查：本地 `git remote -v` 为 `git@github.com:JoSaitama/tunix.git`；`git status --short` 显示已有准备文档/日志改动及未跟踪分析文档，均保留。`rg` 检索当前 my_example/tunix/rl 的 flip 入口，未据此确认负 DTV flip 训练实现。
+- 验证命令与结果：本地只读 git/rg 与 `git diff --check -- develop.md`；远端 tar、校验、clone 尚未执行，待用户回传。
+- 风险/待办：远端目录属于另一用户；safe.directory 只解决 Git 信任，不赋予写权限。建议停止对源目录的写入后完整 tar（含 .git/ignored/venv）并比对，再在用户自己的 home clone；原目录不覆盖、不递归 chown。归档不包含符号链接指向的外部数据，恢复原 owner 可能需要管理员权限；venv 可能含绝对路径，应独立准备环境。后续确认远端分支/commit、硬件环境与 DTV<0 flip 的精确定义再启动 GSM8K。
+
+
+## 2026-11-08 — 新服务器备份因磁盘不足失败后的处理
+
+- 改动范围：无代码改动；仅更新 `develop.md`，提供服务器上清理指定失败归档与只读空间诊断命令，未远程执行删除或替换。
+- 修改文件列表：`develop.md`。
+- 用户回传：当前已切换 lhf 账号；原仓库 origin 为 yangziao56/tunix，my-changes 分支有 tracked 修改与 untracked 源码/数据/结果；根盘输出仅剩 2.2G，用户另称剩余 8.8GB，以重新 df 为准。tar 写入失败，未完成比对或 checksum，不能作为有效备份。
+- 方案：仅清理日志中明确失败的 repo_backups/tunix_20261108_003620/repo.tar，保留其状态与 patch；检查 df、du、挂载点，之后确定原目录代码备份/替换方案。不得将仅保存 tracked diff 视为完整备份，不直接 reset/clean，不改原 remote 或训练配置。
+- 验证命令与结果：`git diff --check -- develop.md` 通过；远端清理、空间诊断与替换均待用户执行。
+- 风险/待办：完整可恢复备份需有足够容量或外部存储；原目录保留环境/数据可避免重复占用，但仍需保护未跟踪代码/结果及核对 flip 实现。
+
+
+## 2026-11-08 — TPU runtime 日志 truncate 范围说明
+
+- 改动范围：无代码改动；仅更新 `develop.md`，解释用户所列普通日志、软链接和系统临时目录的清理边界。
+- 修改文件列表：`develop.md`。
+- 结论：两个 25010176 字节的 INFO/WARNING 文件合计约 47.7MiB，可在不需要历史诊断内容时精确 truncate；不操作 main.INFO/main.WARNING 软链接、当前小日志或系统/SSH 临时目录，不将这次清理视为解决 GB 级空间问题。
+- 验证命令与结果：按用户提供的文件类型与大小核算；`git diff --check -- develop.md` 通过。未连接服务器或执行 truncate。
+- 风险/待办：truncate 不可恢复地删除日志内容，服务仍可能持有文件并继续写入；文件属于 tpu-runtime，可能需 sudo。清理后用 df/du 核对实际空间。
+
+
+## 2026-11-08 — 核查 GSM8K 负 DTV / DTV-LOO flip 支持情况
+
+- 改动范围：无代码改动；只读检查现有 trainer 与脚本，更新 `develop.md`。
+- 修改文件列表：`develop.md`。
+- 结论：当前本地 SelfInfTrainer 通过 scores>=dot_threshold 的布尔 mask 聚合；SelfInfLooTrainer 通过零阈值加最低保留比例生成 mask（可能保留负分），均未实现负分 sample 梯度取反。policy-score 与 policy-only 子类同样是过滤而非 flip。搜索到的 DPO preference flip 与 GSM8K DTV 无关。不能据本地代码断言远端未提交版本完全相同。
+- 验证命令与结果：`rg -n -i flip tunix my_example tests --glob '*.py' --glob '*.sh'` 与 trainer 源码静态核查完成；`git diff --check -- develop.md` 通过；未执行训练。
+- 风险/待办：新增 flip 前需明确评分目标、batch/group 范围及翻转 policy 梯度还是完整梯度（后者也翻转 KL）；严格 score<0 取 -1，否则 +1，按原样本数归一化，不能沿用 mask.sum 分母。advantage 取反经 PPO clipping 不应直接视为已算梯度取反的等价操作；尚未实现或远端验证。
+
+
+## 2026-11-08 — 明确 DTV flip 沿用对应 mask 的梯度作用范围
+
+- 改动范围：无代码改动；仅更新 `develop.md`，回应用户实验定义澄清。
+- 修改文件列表：`develop.md`。
+- 用户明确：按原 DTV / DTV-LOO gradient alignment 打分，原方法 mask 什么梯度分量，新方法就 flip 同一分量，不另行改成 policy-only。普通与 policy-score/full-update 变体原本 mask 完整梯度，故对应 flip 也作用完整梯度；只有显式 policy-only 变体才保持 KL 不变。
+- 数学约定：对原始 score<0 的 sample 使用 -1，否则 +1；评分范围和目标保持对应原方法，取反后按原样本数平均。按用户先前严格负分定义，不让 LOO minimum-retention cap 豁免负分 flip；区别于复用 post-cap 最终 mask 选择样本。
+- 验证命令与结果：只读核对 self_inf_loo_policy_trainer.py 与 rl_cluster.py factory，以及前轮已读聚合实现；`git diff --check -- develop.md` 通过。未改 trainer 或启动实验。
+- 风险/待办：flip 分支仍未实现；非有限 score 处理与对应运行入口需在实施时明确验证。
+
+
+## 2026-11-08 — 新增 dtv-flip 完整梯度实验分支（实施中）
+
+- 改动范围：新增独立 DTVFlipTrainer、rl_cluster opt-in 分支和 run_dtv_flip.sh；普通 DTV / 严格 DTV-LOO，batch/group 范围均支持。原始 score<0 时完整 sample 梯度乘 -1，否则 +1，按 N 平均，KL 与 policy 同时翻转，不使用 LOO retention cap。
+- 修改文件列表：`tunix/rl/dtv_flip_trainer.py`、`tunix/rl/rl_cluster.py`、`my_example/run_dtv_flip.sh`、`develop.md`；测试/说明随后补齐。原 baseline 脚本、RobustTrainer、RLTrainingConfig、原 CLI 及原过滤 trainer 均未改。
+- 验证命令与结果：初始普通 trainer import 在本机因缺 metrax 失败；计划真实 CPU JAX/Flax 的隔离测试及 shell/静态检查，结果后补。
+- 风险/待办：未在 TPU 或新服务器运行；非有限分数主动报错，group 不完整主动报错；launcher 留存逐 sample 分数/权重供核对。尚未推送。
+
+- 测试补充：新增 `tests/rl/dtv_flip_trainer_test.py`，覆盖评分与旧 trainer 一致性、full loss/含 KL 更新、JIT、无 aux、全负 LOO、零分、归一化、group 隔离、非有限分数拒绝、环境互斥、生产 factory 路由、LoRA、decision JSONL 和 launcher 转发/失败退出。初轮 13 项中 12 通过，factory 测试 sentinel 用字符串导致缺 __name__，已修正测试夹具；生产算法未因此改动。
+
+- 中间验证：16 项隔离 CPU JAX/Flax 测试全部通过。追加多设备 sharded JIT 测试，并将非有限检查 callback 设为 unordered 以兼容多设备 SPMD（不改变 flip 数学定义）。额外 ruff 全规则检查提示新文件导入风格、测试 exec/subprocess、dict 风格，后续只按项目现有两空格/Google 风格整理并检查语法与 F 级错误，不据此宣称全规则 lint 通过。
+
+- 文档补充：新增 `docs/dtv_flip.md`，列出四种评分/scope 组合、完整梯度定义、日志核验、独立 checkpoint 路径、环境互斥及隔离测试边界。同步收紧非有限测试为检查明确异常消息。
+
+- 最终验证：`XLA_FLAGS=--xla_force_host_platform_device_count=4 TUNIX_FLIP_TEST_ISOLATED=1 JAX_PLATFORMS=cpu /tmp/dtv-rebuttal-venv/bin/python -m unittest discover -s tests/rl -p dtv_flip_trainer_test.py` 17 项全部通过，无 skip，含真实四 CPU 设备 sharded JIT/Optax 更新。预期的 NaN/Inf 负例触发 callback 错误日志但测试按明确异常消息通过。
+- 静态验证：`bash -n my_example/run_dtv_flip.sh`、新 trainer/factory/test 的 `python3 -m py_compile`、新增 Python 的 `ruff check --select E9,F`、`git diff --check` 全部通过。protected 文件（RobustTrainer、原 DTV/LOO trainers、config.py、run_grpo_gemma.sh）git diff 为空；rl_cluster.py 仅新增 opt-in 分支，未改 RLTrainingConfig。
+- 最终文件列表：`tunix/rl/dtv_flip_trainer.py`、`tunix/rl/rl_cluster.py`、`my_example/run_dtv_flip.sh`、`tests/rl/dtv_flip_trainer_test.py`、`docs/dtv_flip.md`、`develop.md`。保留已有用户准备文档与未跟踪分析文档，不纳入本次功能改动。
+- 未验证范围：本机普通完整框架 import 缺 metrax，隔离测试只替换基类 import（以及 factory 测试中的依赖 sentinel），不是全框架/TPU 通过。未执行服务器训练、checkpoint restore 或远程同步/push；服务器安装依赖后须执行非隔离测试并跑实际 GSM8K。
+
+
+## 2026-11-08 — 推送前本地仓库检查与命令准备
+
+- 改动范围：无代码改动；仅更新 `develop.md`，检查工作树并提供用户手动提交/推送命令，未代执行 git add/commit/push。
+- 修改文件列表：`develop.md`。
+- 检查结果：当前分支 `for_GRPO_8kBaseline`，HEAD `7285578`，origin 为 `git@github.com:JoSaitama/tunix.git`；与本地缓存的 origin 同名分支一致，未 fetch 验证实时远端。当前无已暂存文件。dtv-flip 由 4 个新增文件、rl_cluster.py 的 15 行新增分支和 develop.md 构成；launcher 具有执行权限。
+- 提交范围：显式 add dtv_flip_trainer.py、rl_cluster.py、run_dtv_flip.sh、dtv_flip_trainer_test.py、docs/dtv_flip.md、develop.md。保留但不提交已有 GRPO_REBUTTAL_PREPARATION.md 与 REBUTTAL_REVIEW_ANALYSIS_20261107.md 改动；develop.md 包含先前日志，会随整个日志文件一起提交。
+- 验证命令与结果：git status/remote/branch/log/diff、`git diff --check` 通过；本轮无算法改动，不重复上一轮已通过的 17 项 CPU 隔离测试。
+- 风险/待办：远端若前进，普通 push 将拒绝；不使用 force，需先检查并协调提交。尚未服务器同步或完整 TPU 验证。

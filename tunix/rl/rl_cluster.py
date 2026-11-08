@@ -622,6 +622,21 @@ class RLCluster:
           filter_ratio,
           num_generations,
       )
+    elif (
+        actor_config.use_dynamic_batch_curation
+        and dbc_variant == "self_inf"
+        and os.environ.get("TUNIX_DBC_SELF_INF_FLIP", "").strip().lower()
+        in ("1", "true", "yes", "on")
+    ):
+      from tunix.rl import dtv_flip_trainer  # pylint: disable=g-import-not-at-top
+      actor_trainer_cls = dtv_flip_trainer.DTVFlipTrainer
+      actor_trainer_kwargs.update(
+          dtv_flip_trainer.configuration_from_environment(os.environ)
+      )
+      logging.info(
+          "dtv-flip: full-gradient scoring and flipping (scope=%s, loo=%s).",
+          actor_trainer_kwargs["scope"], actor_trainer_kwargs["loo"],
+      )
     elif actor_config.use_dynamic_batch_curation and dbc_variant == "self_inf":
       use_self_inf_loo = os.environ.get(
           "TUNIX_DBC_SELF_INF_LOO", ""
