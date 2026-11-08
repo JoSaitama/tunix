@@ -178,3 +178,39 @@ heldout独立不等于无噪声真梯度：PG surrogate仍受有限rollouts与�
 用户nohup smoke到最终SHA256失败，退出码1。确定原脚本存在快照别名缺陷：`self.snapshot=nnx.state(actor,LoRAParam)`保留可变Variable引用，原逐probe比较可能自比较，不能保证每branch从同一theta0开始。核对Flax v0.12.6官方graphlib的state/flatten逻辑（https://github.com/google/flax/blob/v0.12.6/flax/nnx/graphlib.py）后，改成新增`parameter_snapshot.py`中的独立copied-array tuple；每次生成新State包装以恢复，前后按路径/shape/dtype/bitwise检查，保留最终初始SHA检查，不放宽allclose。失败记录具体变化，不自动fallback。
 
 新增`roundtrip`模式用于实际checkpoint两次扰动/恢复，不取数据、不rollout/反传；只检查恢复且utility标false。新增6项`parameter_snapshot_test.py`服务器CPU回归，覆盖快照不随actor变化、包装可丢弃、signed zero与微小bit变化、真实probe的成功/异常finally、dirty起点拒绝、真实roundtrip；其余utility测试仍保留。额外占用仅一份LoRA参数数组，byte数记录到manifest。只改rebuttal独立文件/launcher/docs，不改训练参数、loss、原数据或源checkpoint。旧失败run的有限步比较不作为有效证据，保留作debug；无须重训或重新下载。全部模型/CPU测试仍仅服务器执行，本机静态检查不算回归通过。
+
+## 10. 评审原文与实现再审查（2026-11-08）
+
+已重新完整读取同级ICLR2027.pdf四页并渲染核对p2。当前用户回传roundtrip及smoke通过，修复后的参数恢复已验收；smoke4候选/8heldout prompts不足以构成机制证据，full-length HBM仍未验收。本文前面“计划/未实施”的段落保留为历史协议，当前实现以my_example/rebuttal/README.md和本节为准。
+
+| 评审问题 | 本诊断能回答的部分 | 必须保留的限制 |
+| --- | --- | --- |
+| R1 W2/Q3：Assumption1是否有依据 | 各prompt reference与独立clean h的cosine、正对齐比例、零reference及不确定性 | 不是全程/所有任务保证；不能用全数据污染<50%直接解释整组GRPO reference |
+| R2 W1：agreement是否预测有用信号/排名 | 更新前score与dot(h,g_i)的关联、kept/drop效用及norm对照 | 一阶梯度代理不是原influence-function utility的排名保真定理，也不是accuracy |
+| R1 minority风险/R2 Q1过滤分层 | clean/selected/effective noise、advantage、correctness、unique-correct、观察到的组成功率分层 | 需分母/数量与联合noise×advantage统计；4回答成功率只是难度代理，unique-correct不是所有rare reasoning |
+| R2 Q3：fixed-checkpoint independent objective improvement | 同theta0/同rollout下有限步U与matched-retention随机的配对差 | 当前实测与一阶预测约1097倍，不满足数值解释门槛；仅cos/rho不能声称完整完成此问 |
+| R1：不看test如何选DTV/LOO | conflict的独立utility可解释相对行为、提出局部诊断依据 | 尚无验证过的无验证集事前选法规则；若用heldout选方法须披露额外验证资源 |
+| R1 baselines/cost/scaling、R2 Table/Figure与跨分布、R3 scope/protocol | 本诊断不能替代这些回答 | 分别需要独立baseline/成本统计/结果口径核查/写作和claim范围修订 |
+
+实现已具备：原始LoRA梯度精确FP32内积，无哈希；heldout不进入mask；policy打分/full-KL更新口径分开；真实mask/cap和matched随机；prompt-cluster相关性区间；源只读、精确参数恢复、单worker限制。score模式可不做临时参数更新。
+
+正式统计前最小核查项（本轮未改算法或执行）：
+
+1. 数据及配置：固定候选/heldout IDs、源checkpoint实际训练条件与reward分支；相同sample_seed在候选规模变化时不保证heldout不变。当前无跨run完整NPZ回放入口，不能冒称已支持；clean模型+候选污染只报告固定状态敏感性。优先预先固定128候选/128heldout、scope group和原cap，不按有利结果选样本。
+2. h可靠性：当前informative仅表示norm>1e-12，并不表示方向稳定或接近真实目标。建议同一次heldout backward中分开累计h_A/h_B，报告两半方向及关键结论稳定性；当前bootstrap只针对候选，未包含heldout/训练seed不确定性。
+3. 数值门槛：复用固定smoke tokens，先检查零步/同值参数更新、恢复后loss、heldout自身负梯度及预定正反向步长，比较实际delta和Taylor预测。old logps在16回答batched forward生成，loss/AD用per-completion vmap，形状/混合精度差异是应测量的具体风险，不是已确认根因；不能只放宽误差门槛或挑有利步长。若不能通过则停止有限步科学结论，明确只交付梯度对齐证据。
+4. 统计补齐：主报全量，辅报仅按policy_gradient_norm非零界定的有效梯度子集；目前non-near-zero子集同时按score和utility筛选，须标注条件，不能独立承担主结论。补noise×advantage联合表、所有子集数量/分母、reference区间及paired first-order差的区间；数据已大部分存在CSV，不需额外训练。
+
+必须承认的结构边界：若一整个prompt组的policy梯度同步变为-g，组内DTV和LOO分数均不变，但相对固定外部h的utility反号。现有toy测试覆盖此代数例子；真实dense rank reversal不总是严格梯度反号，不能泛化为每个污染组必然不变，也不能把方法描述成有保证的整组噪声检测器。
+
+最小交付是两张数值表（reference/score与独立梯度对齐；过滤率与minority/advantage/noise分层），数值门槛通过后加一张局部finite-step表。不要求新训练seed、所有方法checkpoint或新coefficient；不把gradient-norm baseline、PODS/DS或R2图表口径问题视为已由此解决。score与gradient norm的相关性目前仅诊断，不能代替R1点名的norm-top50训练baseline。
+
+## 11. Utility v2已补齐代码，等待服务器验收（2026-11-08）
+
+- 正式trainer/config/训练CLI/PODS/DS完全不改，仅my_example/rebuttal中的独立模块、启动与测试及说明变更。
+- 新utility_data.py用独立permutation流固定candidate/heldout源ID前缀，支持partition-file及prompt哈希核对；replay-rollouts读取原manifest/NPZ，禁止pickle/输入输出重叠，核对生产source hash/配置/恢复theta0和backbone snapshot身份。V1旧档案仅同污染条件回放，V2保存完整prompt strings可按原哈希重施candidate污染，heldout始终clean；不重采样原回答、不改源文件、不把新随机IDs冒充旧划分。
+- h在原16回答反传路径内交替按完整4prompt批累计两半，无额外backward；新增两半cosine、reference/单元对两半的效用、norm-only有效子集、全量主统计、reference含零的mean dot/条件bootstrap区间及分污染组的reference统计。两半方向正相关不等于真实方向已知，区间仍条件于估计h，不伪装training-seed CI。
+- 补noise-selected/effective × advantage三类的filter_strata.csv（units/prompts/dropped/correct分母）、既有minority风险、method vs Vanilla/LOO/matched-random的一阶配对区间（随机重复先在batch内平均）。assumption_report.json逐项报告正/负/跨零/不可计算的局部证据；assumption_proven永远false表示不宣称普适定理，不是软件失败。没有自动事前选法规则。
+- 新numerics模式可复用用户成功smoke（20261108_061613）：不跑候选梯度扫描；检查旧full16 logps与per-unit前向差、零步、恢复后的F，以及预声明1e-6/1e-4的+/-heldout自身梯度响应，使用实际delta预测。预设rtol.1/atol1e-7及10倍分辨率门槛，不能据DTV结果挑步长或改精度/old logps。无通过步长则numerics退出2并保留报告；执行完成与数值验收区分。smoke/probe只在自检通过的步长上做method probe，每条仍需一致性，失败时保留raw但finite_step_validated=false；score只交付梯度几何。HBM合成probe仍只作资源压力测试，不作收益数字。
+- 新test_utility_v2.sh只排CPU→metadata→numerics，失败停，不自动大规模probe。当前worker单process/四localTPU沿用，h两半新增聚合树的HBM需重测，不以旧91.53%余量替代；不改变16回答AD来绕过峰值。
+- 新增数据/证据/微型JAX runtime/NumPy假runtime编排测试，现共54项已定义。遵用户要求本机不执行任何单测/模型/JAX计算，仅AST、ruff E9/F、bash -n、diff检查；服务器实际通过尚未获得，也未声称约1097倍偏差根因已消除。先在空闲worker跑小回放自检，回传numerical/heldout报告后再定正式128/128统计，不重新训练seed。

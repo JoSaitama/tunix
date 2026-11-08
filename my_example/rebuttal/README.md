@@ -44,6 +44,13 @@ directions use the production masked-mean normalization. Scalar scores may
 differ from a Gram reconstruction by floating-point reduction; decisions use
 the production-style score reductions, not the reconstruction.
 
+Version2 also accumulates alternating whole heldout four-prompt batches into
+`h_A`/`h_B`, without extra backward calls, and repeats alignment against both.
+A nonzero `h` or positive split-half cosine is not a true-direction guarantee.
+Intervals condition on estimated h, not heldout/independent training seeds.
+The mean `<r,h>` INCLUDING zero references and its candidate-cluster interval
+estimate local reference informativeness, not a universal majority-noise theorem.
+
 For each method separately, construct `d_M` at theta0 and apply
 `theta_M = theta0 - eta * clip_by_global_norm(d_M)`; measure
 `U_M = F_H(theta0) - F_H(theta_M)`. This is an **SGD-direction probe**, NOT an
@@ -52,6 +59,14 @@ AdamW replay. Step sizes are declared before running (full default 1e-6 and
 training hyperparameters. No temporary update is persisted. Report update norms,
 changed parameter counts, repeat-evaluation difference and the numerical floor;
 an unresolvable tiny positive change is not evidence of a benefit.
+
+Version2 gates method finite steps with bounded +/- heldout SELF-gradient
+controls, zero-step writeback and restoration checks. Only declared step sizes
+with sign-correct, resolvable changes within `atol=1e-7 + rtol=.1 * |prediction|`
+are used. Failed/unresolved sizes are recorded, not silently passed. Each method
+probe has its own consistency flag; raw means are not verified benefits if a
+constituent method probe is inconsistent. Repeated unchanged evaluation alone
+does NOT validate precision after parameter perturbations.
 
 This is a local surrogate-objective test. It is NOT greedy accuracy, actual
 expected reward, long-term generalization, or a formal validation of Assumption1.
@@ -94,10 +109,14 @@ the latter, supply its own checkpoint and label the provenance correctly.
 - `utility_runtime.py`: read-only restoration, shared real rollouts, original
   GRPO derivatives, exact TPU tree dot products, sequential probes and HBM data.
 - `utility_math.py`: NumPy controls, score oracle, stratified/cluster statistics.
+- `utility_data.py`: independent prefix-stable partitions, fixed IDs and strict
+  no-pickle rollout replay with production/config/parameter fingerprints.
 - `parameter_snapshot.py`: detached copied array values; fresh NNX wrappers for
   every restoration, strict parameter path/shape/dtype/bitwise checks.
 - `run_utility_audit.sh`: safe single-worker launcher, no training entry point.
 - `test_utility_cpu.sh` and `tests/`: tiny server CPU tests; no HF downloads.
+- `test_utility_v2.sh`: CPU -> metadata -> small numerical checks; no automatic
+  large scientific audit or training.
 
 Modes:
 
@@ -105,15 +124,20 @@ Modes:
 - `roundtrip`: load the actual checkpoint, perturb/restore twice in memory and
   verify the backup stays original. No generation, dataset loading or backward;
   this mode does NOT validate utility or gradient HBM.
+- `numerics`: default4 candidate/8 heldout, declared sizes1e-6/1e-4; +/-SELF
+  gradient, zero-step, post-restore loss and full16-vs-unit old-logps checks.
+  NO candidate-gradient scan. Exit2 if execution completes but no size passes.
 - `smoke`: four candidate/eight heldout prompts, one matched-random repetition,
-  real rollouts, gradients, exact scores and five finite-step branches.
+  real/replayed rollouts, exact scores; five finite-step branches ONLY if the
+  numerical gate passes. Geometry can finish with finite steps disabled.
 - `hbm`: smoke PLUS full configured prompt/completion lengths with all-valid
   synthetic masks and nonzero advantages; total/policy gradients, exact Gram
   and a finite-step probe. Synthetic examples never enter scientific statistics.
   Missing peak counters mean headroom cannot be certified and this mode fails.
 - `score`: default32 candidate/64 heldout prompts; first-order utility only.
 - `probe`: same as score plus independent finite steps. Three random masks per
-  target by default; only repetition0 is finite-stepped to bound cost.
+  target by default; only repetition0 and numerically validated sizes are
+  finite-stepped. Check individual rows AND `finite_step_validated`.
 
 TPU topology is always one logical process with four local devices, even on
 physical worker1. Source checkpoint files are fingerprinted before/after. No
@@ -235,3 +259,84 @@ bash my_example/rebuttal/run_utility_audit.sh roundtrip --reward-mode accuracy
 If that passes, rerun smoke under nohup, followed by HBM only after inspection.
 `parameter_roundtrip.passed` is a restoration check, not utility evidence.
 Do not overwrite the failed report or reuse its partial finite-step results.
+
+## Version2 acceptance and reviewer evidence
+
+All actual tests remain SERVER-only. On the currently idle worker0, after
+pulling code and activating the original environment, run under nohup:
+
+```bash
+bash my_example/rebuttal/test_utility_v2.sh \
+  --replay-rollouts logs/rebuttal_grpo_gsm8k_utility_smoke_seed0_mismatch0_step500_20261108_061613 \
+  --candidate-noise 0 --noise-seed 0
+```
+
+This reuses the successful smoke's answers, no generation/TFDS loading. Replay
+requires the same theta0 SHA256, backbone snapshot identity, production loss/
+reward sources and rollout protocol. V1 archives lack exact prompt strings and
+allow only SAME-condition corruption replay. V2 archives save prompt strings
+and can reapply a predeclared candidate-noise condition with the original hash
+rule. Heldout always stays clean. Source files are read-only and hashed before/
+after, and replay output/input must not overlap. Pin `--backbone-path` to the
+recorded existing snapshot to avoid resolving a newer HF revision.
+
+Exit0 means at least one declared +/-SELF control pair passed (read per-size
+results), NOT Assumption1 passed. Exit2 with completed execution means the gate
+did not pass (or input was rejected: distinguish by log). Do not repeat large
+probes or loosen tolerances to obtain favorable method values. Gradient-only
+`score` mode is independent of the finite-step gate, but its results must be
+called gradient-alignment evidence, not verified loss improvement.
+
+After CPU, small checks and full-length HBM review, the predeclared main
+geometry audit can use e.g.128 candidate/128 independent heldout prompts:
+
+```bash
+bash my_example/rebuttal/run_utility_audit.sh score --reward-mode accuracy \
+  --candidate-prompts 128 --heldout-prompts 128 --sample-seed 0 --rollout-seed 0 \
+  --candidate-noise 0.2 --noise-seed 0
+```
+
+The default is still the CLEAN-trained model. This example is fixed-state
+candidate-corruption sensitivity, NOT a mismatch-trained trajectory. Supply
+the actual noisy checkpoint/input-dir/provenance to study that setting.
+`--partition-file <data_partition.json>` reuses IDs; `--replay-rollouts <run>`
+reuses exact answers. New sampling uses independent permutation streams: changing
+candidate count does not move heldout IDs, and increasing either count preserves
+its own ID prefix. Saved prompt hashes guard against changed dataset/format when
+reusing IDs. Generation reproducibility is not assumed instead of replay hashes.
+
+Reviewer-facing outputs:
+
+- `assumption_report.json`: local mean-reference-dot and score/utility interval
+  readouts, heldout-half sensitivity, kept/drop utility and numerical status.
+  `assumption_proven=false` ALWAYS means no universal theorem; not a failed test.
+  Negative/inconclusive results stay visible. No automatic DTV/LOO choice rule or
+  original influence-function ranking guarantee is claimed.
+- `reference_alignment.csv`: dot/cosine against h and both halves, selected/
+  effective group-corruption labels. Summary counts zero references and reports
+  candidate-cluster intervals, including zeros for raw mean dot.
+- `unit_utility.csv` and summary: full Spearman, norm-only nonzero-gradient
+  subset, split-half sensitivity, zero/tied scores and minority risks. The
+  legacy nonzero-score AND nonzero-utility subset is CONDITIONAL sensitivity
+  only, not the primary result.
+- `filter_strata.csv`: method x selected/effective corruption x advantage sign,
+  with unit/prompt denominators, dropped counts and correctness. These are
+  COMPLETION drop rates within groups, not whole-group deletion rates.
+- `direction_utility.csv` and summary: paired first-order differences vs
+  Vanilla/LOO/count-matched random, with batch-cluster intervals. Random repeats
+  are averaged WITHIN each batch before the paired bootstrap.
+- `numerical_report.json`: untouched old-logps forward-shape differences,
+  raw +/-SELF/zero-step controls, actual/predicted changes and per-size status.
+  Precision, old logps and batch shapes are not rewritten merely to pass.
+
+Limits: whole-group synchronous policy-gradient reversal preserves internal
+scores but reverses external utility; actual dense rank reversal is not always
+exact gradient sign reversal. No guarantee follows from corruption<50% by count.
+Observed0..4 correct answers and unique-correct are finite-rollout difficulty/
+minority proxies, not intrinsic difficulty or every rare reasoning mode.
+Norm/utility correlation does not replace norm-top50 TRAINING baselines. This
+diagnostic does not answer scaling/cost or figure/table evaluation discrepancies.
+
+Memory: h_A/h_B need extra aggregate gradient trees, but no extra backward calls,
+full candidate gradient pool or model exports. Keep original16-response AD;
+do not infer new HBM safety from an older report. Run HBM before larger scans.

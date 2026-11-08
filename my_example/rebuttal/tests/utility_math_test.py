@@ -13,7 +13,7 @@ import unittest
 import numpy as np
 
 from my_example.rebuttal import utility_math as m
-from my_example.rebuttal.audit_grpo_utility import parser, validate, run
+from my_example.rebuttal.audit_grpo_utility import parser, validate
 
 
 class UtilityMathTest(unittest.TestCase):

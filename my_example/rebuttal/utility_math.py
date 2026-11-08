@@ -147,15 +147,24 @@ def unit_summary(rows, epsilon=1e-12, bootstrap_repeats=200):
         full = np.array([row["utility_full"] for row in rows])
         kept = np.array([row[f"keep_{method}"] for row in rows], dtype=bool)
         active = (np.abs(score) > epsilon) & (np.abs(pg) > epsilon)
+        gradient_active = np.array([row["policy_gradient_norm"] > epsilon for row in rows])
+        clusters = [row["prompt_id"] for row in rows]
         summaries[method] = {
             "units": len(rows), "retained_fraction": fraction(kept),
             "spearman_score_policy_utility_all": spearman(score, pg),
             "spearman_score_full_utility_all": spearman(score, full),
             "spearman_non_near_zero": spearman(score[active], pg[active]),
+            "non_near_zero_definition": "conditional on BOTH nonzero score and utility; sensitivity only",
+            "nonzero_gradient_units": int(gradient_active.sum()),
+            "spearman_nonzero_gradient": spearman(score[gradient_active], pg[gradient_active]),
+            "nonzero_gradient_definition": "policy_gradient_norm > epsilon, NOT selected by utility",
             "spearman_gradient_norm_policy_utility": spearman(
                 np.array([row["policy_gradient_norm"] for row in rows]), pg),
             "score_utility_prompt_cluster_interval": correlation_interval(
-                score, pg, [row["prompt_id"] for row in rows], repeats=bootstrap_repeats),
+                score, pg, clusters, repeats=bootstrap_repeats),
+            "nonzero_gradient_prompt_cluster_interval": correlation_interval(
+                score[gradient_active], pg[gradient_active], np.asarray(clusters)[gradient_active],
+                repeats=bootstrap_repeats),
             "non_near_zero_units": int(active.sum()),
             "near_zero_score_non_near_zero_policy_utility_units": int(
                 ((np.abs(score) <= epsilon) & (np.abs(pg) > epsilon)).sum()),
@@ -167,6 +176,13 @@ def unit_summary(rows, epsilon=1e-12, bootstrap_repeats=200):
             "mean_policy_utility_dropped": fraction(pg[~kept]),
             "dropped_fraction_by_stratum": {},
         }
+        for half in ("a", "b"):
+            key = f"utility_half_{half}"
+            if rows and all(row.get(key) is not None for row in rows):
+                target = np.array([row[key] for row in rows])
+                summaries[method][f"spearman_heldout_half_{half}"] = spearman(score, target)
+                summaries[method][f"mean_half_{half}_utility_kept"] = fraction(target[kept])
+                summaries[method][f"mean_half_{half}_utility_dropped"] = fraction(target[~kept])
         strata = {
             "noise_selected": [row["noise_selected"] for row in rows],
             "noise_effective": [row["noise_effective"] for row in rows],
@@ -183,7 +199,23 @@ def unit_summary(rows, epsilon=1e-12, bootstrap_repeats=200):
         for name, mask in strata.items():
             mask = np.asarray(mask, dtype=bool)
             summaries[method]["dropped_fraction_by_stratum"][name] = {
-                "units": int(mask.sum()), "drop_fraction": fraction(~kept[mask])}
+                "units": int(mask.sum()), "prompts": len(set(np.asarray(clusters)[mask])),
+                "dropped_units": int((~kept[mask]).sum()),
+                "drop_fraction": fraction(~kept[mask])}
+        summaries[method]["noise_advantage_joint"] = []
+        for noise_key in ("noise_selected", "noise_effective"):
+            for noisy in (False, True):
+                for sign, condition in (("negative", lambda a: a < 0), ("zero", lambda a: a == 0),
+                                        ("positive", lambda a: a > 0)):
+                    mask = np.array([bool(row[noise_key]) == noisy and condition(row["advantage"])
+                                     for row in rows], dtype=bool)
+                    summaries[method]["noise_advantage_joint"].append({
+                        "noise_definition": noise_key, "corrupted": noisy, "advantage_sign": sign,
+                        "units": int(mask.sum()), "prompts": len(set(np.asarray(clusters)[mask])),
+                        "dropped_units": int((~kept[mask]).sum()),
+                        "drop_fraction": fraction(~kept[mask]),
+                        "mean_policy_utility": fraction(pg[mask]),
+                        "correct_units": sum(row["correct"] for row, yes in zip(rows, mask) if yes)})
         for count in range(5):
             mask = np.array([row["group_correct_count"] == count for row in rows])
             summaries[method]["dropped_fraction_by_stratum"][f"observed_group_correct_{count}_of_4"] = {
@@ -198,3 +230,128 @@ def unit_summary(rows, epsilon=1e-12, bootstrap_repeats=200):
                                                for row in conflict),
     }
     return summaries
+
+
+def reference_summary(rows, *, epsilon=1e-12, repeats=200):
+    valid = [row for row in rows if row["informative"]]
+    cosine = [row["cosine"] for row in valid]
+    ids = [row.get("prompt_id", f"{row['batch_id']}:{row['scope_index']}") for row in valid]
+    result = {"references": len(rows), "informative_references": len(valid),
+              "zero_or_uninformative_references": len(rows) - len(valid),
+              "mean_cosine_informative": fraction(cosine),
+              "mean_cosine_cluster_ci95": cluster_interval(cosine, ids, repeats=repeats),
+              "positive_alignment_fraction_informative": fraction([x > 0 for x in cosine]),
+              "positive_fraction_cluster_ci95": cluster_interval([x > 0 for x in cosine], ids, repeats=repeats),
+              "uncertainty": "candidate prompt/reference clusters, CONDITIONAL on estimated heldout h"}
+    if rows and all("dot_with_heldout" in row for row in rows):
+        all_ids = [row.get("prompt_id", f"{row['batch_id']}:{row['scope_index']}") for row in rows]
+        dots = [row["dot_with_heldout"] for row in rows]
+        result["mean_reference_dot_clean_including_zeros"] = fraction(dots)
+        result["mean_reference_dot_cluster_ci95"] = cluster_interval(dots, all_ids, repeats=repeats)
+    result["noise_strata"] = {}
+    for definition in ("noise_selected", "noise_effective"):
+        for noisy in (False, True):
+            group = [row for row in rows if row.get(definition) is not None and row[definition] == noisy]
+            usable = [row for row in group if row["informative"]]
+            result["noise_strata"][f"{definition}_{noisy}"] = {
+                "references": len(group), "informative_references": len(usable),
+                "mean_dot_clean": fraction([row["dot_with_heldout"] for row in group]),
+                "mean_cosine": fraction([row["cosine"] for row in usable]),
+                "positive_alignment_fraction_informative": fraction([row["cosine"] > 0 for row in usable])}
+    for half in ("a", "b"):
+        values = [row[f"cosine_half_{half}"] for row in rows if row.get(f"cosine_half_{half}") is not None]
+        result[f"mean_cosine_half_{half}"] = fraction(values)
+    both = [row for row in rows if row.get("dot_half_a") is not None and row.get("dot_half_b") is not None]
+    active = [row for row in both if abs(row["dot_half_a"]) > epsilon and abs(row["dot_half_b"]) > epsilon]
+    result["half_sign_comparison_references"] = len(active)
+    result["half_sign_agreement"] = fraction([np.sign(row["dot_half_a"]) == np.sign(row["dot_half_b"])
+                                             for row in active])
+    return result
+
+
+def direction_summary(rows, *, repeats=200):
+    """Paired across batches; random repetitions averaged WITHIN each batch."""
+    methods = sorted({row["method"] for row in rows})
+    result = {}
+    for name in methods:
+        group = [row for row in rows if row["method"] == name]
+        values = [row["direction_dot_clean_gradient"] for row in group]
+        result[name] = {"batches": len(group), "mean_dot_clean_gradient": fraction(values),
+                        "mean_retained_fraction": fraction([row["retained_fraction"] for row in group]),
+                        "batch_cluster_ci95": cluster_interval(values, [row["batch_id"] for row in group],
+                                                               repeats=repeats)}
+    for left, right in (("dtv", "loo"), ("dtv", "vanilla"), ("loo", "vanilla"),
+                        ("dtv", "random_match_dtv"), ("loo", "random_match_loo")):
+        a = {row["batch_id"]: row["direction_dot_clean_gradient"] for row in rows if row["method"] == left}
+        b = {}
+        for row in rows:
+            if row["method"] == right or row["method"].startswith(right + "_"):
+                b.setdefault(row["batch_id"], []).append(row["direction_dot_clean_gradient"])
+        ids = sorted(a.keys() & b.keys())
+        values = [a[key] - float(np.mean(b[key])) for key in ids]
+        result[f"paired_{left}_minus_{right}"] = {
+            "batches": len(ids), "mean": fraction(values),
+            "batch_cluster_ci95": cluster_interval(values, ids, repeats=repeats)}
+    return result
+
+
+def numerical_pair_check(plus, minus, *, floor, rtol=.1, atol=1e-7):
+    """Prespecified self-gradient +/- probe gate, not a method outcome test."""
+    expected = [plus["predicted_first_order_utility"], minus["predicted_first_order_utility"]]
+    actual = [plus["utility"], minus["utility"]]
+    resolvable = all(abs(x) > 10 * floor for x in expected)
+    finite = all(np.isfinite(x) for x in expected + actual)
+    accurate = finite and all(abs(a - p) <= atol + rtol * abs(p) for a, p in zip(actual, expected))
+    signs = expected[0] > 0 and expected[1] < 0 and actual[0] > 0 and actual[1] < 0
+    return {"passed": bool(resolvable and accurate and signs), "resolvable": bool(resolvable),
+            "taylor_within_tolerance": bool(accurate), "expected_and_actual_signs_correct": bool(signs),
+            "max_abs_residual": float(max(abs(a - p) for a, p in zip(actual, expected))) if finite else None,
+            "rtol": rtol, "atol": atol, "resolution_floor": floor}
+
+
+def assumption_evidence(reference, units, heldout):
+    """Descriptive evidence, NEVER an automatic certificate or method choice."""
+    def positive_interval(interval):
+        return interval is not None and interval[0] > 0
+
+    def interval_result(interval):
+        if interval is None:
+            return "insufficient_clusters_or_undefined"
+        if interval[0] > 0:
+            return "positive_conditional_interval"
+        if interval[1] < 0:
+            return "negative_conditional_interval"
+        return "interval_includes_zero"
+
+    stable = heldout.get("split_half", {}).get("positive_alignment", False)
+    result = {"assumption_proven": False, "method_selection_rule_validated": False,
+              "scope": "local independent clean policy-gradient surrogate at this fixed checkpoint",
+              "local_informativeness_condition": "<E[r_observed], gradient F_clean> > 0; empirical, conditional estimate",
+              "heldout_split_half_positive_alignment": stable,
+              "reference_result": interval_result(reference.get("mean_reference_dot_cluster_ci95")),
+              "heldout_caveat": "interpret alignment cautiously if split halves are unavailable/nonpositive",
+              "mean_reference_dot_ci_entirely_positive": positive_interval(
+                  reference.get("mean_reference_dot_cluster_ci95")),
+              "reference_mean_cosine_ci_entirely_positive": positive_interval(
+                  reference.get("mean_cosine_cluster_ci95")),
+              "reference_majority_positive_ci_above_half": (
+                  reference.get("positive_fraction_cluster_ci95") is not None and
+                  reference["positive_fraction_cluster_ci95"][0] > .5),
+              "method_evidence": {}}
+    for name in ("dtv", "loo"):
+        data = units[name]
+        ci = data["score_utility_prompt_cluster_interval"]["ci95"]
+        halves = [data.get(f"spearman_heldout_half_{half}") for half in ("a", "b")]
+        result["method_evidence"][name] = {
+            "score_result": interval_result(ci),
+            "score_utility_ci_entirely_positive": positive_interval(ci),
+            "score_utility_rho": data["spearman_score_policy_utility_all"],
+            "score_utility_ci95": ci,
+            "both_half_correlations_positive": all(x is not None and x > 0 for x in halves),
+            "kept_mean_policy_utility": data["mean_policy_utility_kept"],
+            "dropped_mean_policy_utility": data["mean_policy_utility_dropped"]}
+    result["interpretation"] = (
+        "All intervals condition on estimated h. Split-half is sensitivity, not a calibrated accuracy guarantee. "
+        "Report negative/zero/undefined results; this is not an IF ranking theorem or proof of long-term return. "
+        "Whole-group synchronous gradient reversal can preserve internal scores while reversing external utility.")
+    return result

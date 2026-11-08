@@ -14,6 +14,7 @@ import time
 import numpy as np
 
 from .parameter_snapshot import ParameterSnapshot
+from .utility_math import numerical_pair_check
 
 
 def production_per_unit_gradient(loss):
@@ -39,6 +40,22 @@ def production_mean_loss(loss):
         axes = jax.tree.map(lambda value: None if value is None else 0, example,
                             is_leaf=lambda value: value is None)
         return jnp.mean(jax.vmap(loss, in_axes=(None, axes))(model, example))
+    return nnx.jit(calculate)
+
+
+def production_per_unit_logps(compute, pad_id, eos_id):
+    """Measure the forward-shape risk without changing frozen old logps."""
+    import jax
+    from flax import nnx
+
+    def single(model, example):
+        return compute(model, example.prompt_ids[None, :], example.completion_ids[None, :],
+                       pad_id, eos_id, stop_gradient=True).reshape(-1)
+
+    def calculate(model, example):
+        axes = jax.tree.map(lambda value: None if value is None else 0, example,
+                            is_leaf=lambda value: value is None)
+        return jax.vmap(single, in_axes=(None, axes))(model, example)
     return nnx.jit(calculate)
 
 
@@ -122,6 +139,8 @@ class UtilityRuntime:
         # Do not evaluate F with a different full-batch forward graph than h:
         # per-unit/vmap versus batched AD differed materially in earlier audits.
         self.clean_loss = production_mean_loss(policy_loss)
+        self.unit_logps = production_per_unit_logps(common.compute_per_token_logps, self.pad_id, self.eos_id)
+        self._h_halves = None
 
         @jax.jit
         def average(tree, mask):
@@ -147,23 +166,27 @@ class UtilityRuntime:
         self.dot = dot
 
         @jax.jit
-        def statistics(pg, full, h):
+        def statistics(pg, full, h, h_a, h_b):
             pgl, ful, hl = jax.tree.leaves(pg), jax.tree.leaves(full), jax.tree.leaves(h)
             n = pgl[0].shape[0]
             gram = jnp.zeros((n, n), dtype=jnp.float32)
             u_pg = jnp.zeros(n, dtype=jnp.float32)
             u_full = jnp.zeros(n, dtype=jnp.float32)
+            u_a, u_b = jnp.zeros(n, dtype=jnp.float32), jnp.zeros(n, dtype=jnp.float32)
             dtv = jnp.zeros(n, dtype=jnp.float32)
             width = 4 if args.scope == "group" else n
             reference_norm_squared = jnp.zeros(n // width, dtype=jnp.float32)
             finite = jnp.array(True)
-            for p, f, target_gradient in zip(pgl, ful, hl):
+            for p, f, target_gradient, a, b in zip(
+                    pgl, ful, hl, jax.tree.leaves(h_a), jax.tree.leaves(h_b)):
                 finite = finite & jnp.all(jnp.isfinite(p)) & jnp.all(jnp.isfinite(f))
                 flat = p.astype(jnp.float32).reshape(n, -1)
                 target_flat = target_gradient.astype(jnp.float32).reshape(-1)
                 gram = gram + flat @ flat.T
                 u_pg = u_pg + flat @ target_flat
                 u_full = u_full + f.astype(jnp.float32).reshape(n, -1) @ target_flat
+                u_a = u_a + flat @ a.astype(jnp.float32).reshape(-1)
+                u_b = u_b + flat @ b.astype(jnp.float32).reshape(-1)
                 reference = flat.reshape((n // width, width, -1)).mean(axis=1)
                 reference_norm_squared = reference_norm_squared + jnp.sum(reference * reference, axis=1)
                 # Preserve ordinary DTV's per-leaf reduction, not a hash or
@@ -177,6 +200,7 @@ class UtilityRuntime:
                 dtv = dtv + local
             loo = (_group_loo_statistics(pg, 4) if args.scope == "group" else _batch_loo_statistics(pg))
             return {"gram": gram, "utility_policy": u_pg, "utility_full": u_full,
+                    "utility_half_a": u_a, "utility_half_b": u_b,
                     "score_dtv": dtv, "score_loo": loo["loo_score"],
                     "self_term": loo["standard_self_term"], "cross_term": loo["standard_cross_term"],
                     "reference_norm_squared": reference_norm_squared, "gradients_finite": finite}
@@ -309,6 +333,7 @@ class UtilityRuntime:
                 "correct": np.asarray(correctness), "text": np.asarray(output.text),
                 "answers": np.asarray(answers), "prompt_ids_hash": np.asarray([
                     hashlib.sha256(text.encode()).hexdigest()[:16] for text in prompts]),
+                "prompt_strings": np.asarray(prompts),
                 "source_indices": np.repeat([item["source_index"] for item in examples], 4),
                 "rollout_seed": np.asarray(seed, dtype=np.uint32)}
         example = self.as_example(host)
@@ -323,6 +348,11 @@ class UtilityRuntime:
         if not all(np.isfinite(host[key]).all() for key in (
             "ref_per_token_logps", "old_per_token_logps", "advantages", "observed_rewards")):
             raise FloatingPointError("nonfinite rollout/reward/log probability")
+        self.save_rollout(host, role=role, batch_id=batch_id)
+        self.snapshot_memory(f"{role}_rollout_{batch_id}")
+        return host
+
+    def save_rollout(self, host, *, role, batch_id):
         serializable = dict(host)
         for name in ("ref_per_token_logps", "old_per_token_logps"):
             # NumPy archives cannot portably reconstruct ml_dtypes.bfloat16.
@@ -331,7 +361,43 @@ class UtilityRuntime:
             serializable[name + "_original_dtype"] = np.asarray(str(host[name].dtype))
             serializable[name] = host[name].astype(np.float32)
         np.savez_compressed(self.output / "fixed_rollouts" / f"{role}_{batch_id:03d}.npz", **serializable)
-        self.snapshot_memory(f"{role}_rollout_{batch_id}")
+
+    def replay_prepare(self, path, indices, *, role, batch_id, original_args):
+        from .utility_data import load_rollout
+        from my_example.reward_rank_noise import RewardRankNoiseConfig, apply_reward_rank_noise
+        from tunix.rl.grpo.grpo_learner import compute_advantages
+
+        host = load_rollout(path, indices)
+        for name in ("old_per_token_logps", "ref_per_token_logps"):
+            dtype = str(host.get(name + "_original_dtype", "float32"))
+            if dtype not in {"float32", "float16", "bfloat16"}:
+                raise ValueError(f"unsupported replay log-probability dtype {dtype}")
+            host[name] = np.asarray(self.jax.device_get(self.jnp.asarray(host[name], dtype=getattr(self.jnp, dtype))))
+        if "prompt_strings" in host:
+            prompts = host["prompt_strings"].tolist()
+            if len(prompts) != 16 or any(hashlib.sha256(p.encode()).hexdigest()[:16] != identity
+                                         for p, identity in zip(prompts, host["prompt_ids_hash"])):
+                raise ValueError("replay prompt text/hash mismatch")
+            noise = apply_reward_rank_noise(host["clean_rewards"], prompts, 4, RewardRankNoiseConfig(
+                self.args.candidate_noise if role == "candidate" else 0., self.args.noise_seed))
+            host.update(observed_rewards=noise.corrupted_rewards, noise_selected=noise.selected_groups,
+                        noise_effective=noise.effective_groups)
+            host["advantages"] = compute_advantages(noise.corrupted_rewards, 4).astype(np.float32)
+        else:
+            # v1 archives did not save exact prompt strings. They can be used
+            # for SAME-condition numerical debugging, not new corruption hashes.
+            if role == "candidate" and any(getattr(self.args, name) != original_args.get(name)
+                                            for name in ("candidate_noise", "noise_seed")):
+                raise ValueError("legacy replay lacks prompt strings: cannot change candidate noise/seed")
+            expected = compute_advantages(host["observed_rewards"], 4).astype(np.float32)
+            if not np.array_equal(expected, host["advantages"]):
+                raise ValueError("legacy replay advantages do not match recorded observed rewards")
+        if role == "heldout" and (host["noise_selected"].any() or host["noise_effective"].any() or
+                                   not np.array_equal(host["clean_rewards"], host["observed_rewards"])):
+            raise ValueError("heldout replay contains corrupted rewards")
+        self.save_rollout(host, role=role, batch_id=batch_id)
+        self.snapshot_memory(f"{role}_replay_{batch_id}")
+        print(f"Replayed {role} batch {batch_id}: no generation", flush=True)
         return host
 
     def as_example(self, host):
@@ -364,29 +430,45 @@ class UtilityRuntime:
         return result
 
     def heldout_gradient(self, heldout):
-        h = None
+        sums, counts = [None, None], [0, 0]
         zeros = 0
         for index, host in enumerate(heldout):
             tree = self.gradients(host)
             with self.mesh:
                 mean = self.average(tree, self.jnp.ones(16, dtype=self.jnp.float32))
-                h = mean if h is None else self.add(h, mean)
-                self.jax.block_until_ready(h)
+                half = index % 2  # alternate whole prompt batches, never split responses
+                sums[half] = mean if sums[half] is None else self.add(sums[half], mean)
+                counts[half] += 1
+                self.jax.block_until_ready(sums[half])
             zeros += int(np.count_nonzero(host["advantages"] == 0))
             del tree
             self.snapshot_memory(f"heldout_backward_{index}")
             print(f"Heldout gradients: {(index + 1) * 4}/{len(heldout) * 4} prompts", flush=True)
         with self.mesh:
-            h = self.scale(h, 1. / len(heldout))
+            h = self.scale(sums[0] if sums[1] is None else self.add(sums[0], sums[1]), 1. / len(heldout))
             norm = float(self.jax.device_get(self.dot(h, h))) ** .5
+            halves = [self.scale(s, 1. / count) if count else self.scale(h, 0.)
+                      for s, count in zip(sums, counts)]
+            norms = [float(self.jax.device_get(self.dot(s, s))) ** .5 for s in halves]
+            cosine = (float(self.jax.device_get(self.dot(*halves))) / np.prod(norms)
+                      if min(counts) > 0 and min(norms) > self.args.zero_epsilon else None)
+            self._h_halves = tuple(halves)
         if not np.isfinite(norm):
             raise FloatingPointError("heldout gradient is nonfinite")
+        self.snapshot_memory("heldout_split_means")
         return h, {"l2_norm": norm, "zero_advantage_units": zeros,
-                   "units": len(heldout) * 16, "informative": norm > self.args.zero_epsilon}
+                   "units": len(heldout) * 16, "informative": norm > self.args.zero_epsilon,
+                   "informative_definition": "nonzero norm ONLY, not a reliability guarantee",
+                   "split_half": {"available": min(counts) > 0, "prompts": [n * 4 for n in counts],
+                                  "l2_norms": norms, "cosine": float(np.clip(cosine, -1., 1.)) if cosine is not None else None,
+                                  "positive_alignment": bool(cosine is not None and cosine > 0),
+                                  "definition": "alternating whole four-prompt batches; sensitivity, NOT proof"}}
 
     def batch_statistics(self, pg, full, h):
         with self.mesh:
-            result = self.jax.device_get(self.statistics(pg, full, h))
+            if self._h_halves is None:
+                raise RuntimeError("compute heldout gradients before candidate statistics")
+            result = self.jax.device_get(self.statistics(pg, full, h, *self._h_halves))
         if not bool(result["gradients_finite"]) or not all(np.isfinite(value).all() for value in result.values()):
             raise FloatingPointError("nonfinite exact-gradient statistics")
         return result
@@ -430,6 +512,70 @@ class UtilityRuntime:
             with self.mesh, self.monitor(jax):
                 self.nnx.update(self.actor, self.snapshot)
             self.assert_original_parameters("after_probe_restore")
+
+    def numerical_preflight(self, heldout, h, baseline, baseline_repeat):
+        """Bounded same-rollout +/- self-gradient test, independent of selectors.
+
+        No precision/batch/old-policy rewrite or outcome-dependent step search.
+        A failed gate is a valid diagnostic outcome, not evidence for DTV.
+        """
+        from my_example.audit_grpo_checkpoint_restore import write_report
+
+        args = self.args
+        floor = max(abs(baseline - baseline_repeat),
+                    float(np.finfo(np.float32).eps) * max(1., abs(baseline)))
+        report = {"passed": False, "validated_step_sizes": [], "baseline": baseline,
+                  "same_parameter_repeat_difference": abs(baseline - baseline_repeat),
+                  "minimum_resolution_floor": floor, "pairs": [],
+                  "rtol": args.numerical_rtol, "atol": args.numerical_atol,
+                  "purpose": "measurement validation, NOT method outcome selection",
+                  "forward_contract": []}
+        # Only the first heldout batch: diagnose full16 vs per-unit forward at
+        # identical theta0. Never replace old logps to force this test to pass.
+        host = heldout[0]
+        with self.mesh, self.monitor(self.jax):
+            raw_values = self.jax.device_get(self.unit_logps(self.actor, self.as_example(host)))
+            values = np.asarray(raw_values, dtype=np.float32)
+        old = host["old_per_token_logps"].astype(np.float32)
+        valid = host["completion_mask"].astype(bool)
+        difference = (values - old)[valid]
+        if not difference.size or not np.isfinite(difference).all():
+            raise ValueError("numerical check needs finite valid heldout completion logps")
+        report["forward_contract"].append({
+            "batch_id": 0, "valid_tokens": int(difference.size), "old_dtype": str(host["old_per_token_logps"].dtype),
+            "unit_forward_dtype": str(raw_values.dtype),
+            "full16_vs_unit_logps_max_abs": float(np.max(np.abs(difference))),
+            "full16_vs_unit_logps_mean_abs": float(np.mean(np.abs(difference))),
+            "nonidentical_logps_fraction": float(np.mean(difference != 0)),
+            "importance_ratio_clipped_fraction_at_theta0": float(np.mean(
+                (difference < np.log(1. - args.epsilon)) | (difference > np.log(1. + args.epsilon)))),
+            "note": "reported, not silently recalibrated; can expose mixed-precision/shape differences"})
+        zero = self.probe(h, h, heldout, baseline, 0.)
+        restored = self.clean_value(heldout)
+        report["zero_step"] = zero
+        report["zero_step_restored_loss_difference"] = abs(restored - baseline)
+        noop_ok = (zero["changed_parameter_elements"] == 0 and abs(zero["utility"]) <= args.numerical_atol
+                   and abs(restored - baseline) <= args.numerical_atol)
+        report["zero_step_passed"] = noop_ok
+        write_report(self.output / "numerical_report.json", report)
+        for eta in args.probe_step_sizes:
+            print(f"Numerical control +/- eta={eta}: heldout SELF gradient, no filtering", flush=True)
+            plus = self.probe(h, h, heldout, baseline, eta)
+            restore_a = abs(self.clean_value(heldout) - baseline)
+            minus = self.probe(h, h, heldout, baseline, -eta)
+            restore_b = abs(self.clean_value(heldout) - baseline)
+            check = numerical_pair_check(plus, minus, floor=floor, rtol=args.numerical_rtol, atol=args.numerical_atol)
+            check["restored_loss_max_difference"] = max(restore_a, restore_b)
+            check["passed"] = bool(check["passed"] and noop_ok and
+                                   max(restore_a, restore_b) <= args.numerical_atol)
+            report["pairs"].append({"eta": eta, "positive": plus, "negative": minus, "check": check})
+            if check["passed"]:
+                report["validated_step_sizes"].append(eta)
+            report["passed"] = bool(report["validated_step_sizes"])
+            write_report(self.output / "numerical_report.json", report)
+        self.assert_original_parameters("numerical_preflight_end")
+        self.snapshot_memory("numerical_preflight")
+        return report
 
     def stress(self, heldout, h, baseline):
         """Full configured length, all-valid synthetic masks; never scientific data."""
