@@ -13063,3 +13063,15 @@ This file tracks engineering changes made in this repository.
 - 同步方案：源机先切指定分支并git pull --ff-only，再显式SSH key dtv_transfer，确认目标无my_example训练，rsync --relative精确同步5个功能/日志文件及rl_cluster.py（确保flip路由），--backup留同名文件时间戳备份，不用--delete。checksum dry-run验收六文件；不更新目标.git/环境/数据/运行产物，故目标git log不代表本次源码版本。
 - 验证命令与结果：`git diff --check`通过；上轮25项CPU/真实Orbax测试结果不变，本轮只写日志，不重复算法测试。远端拉取/同步均待用户执行。
 - 风险/待办：源分支有冲突或目标任务运行时停止，不reset、不force；目标需以新checkpoint目录运行10%配额实验。
+
+
+## 2026-11-08 — 一次有预算上限的独立 FP32 utility 数值对照
+
+- 改动范围：仅新增rebuttal数值对照和测试/启动脚本，更新README、utility协议和本日志；原utility v2/生产trainer/config/训练CLI、PODS/DS/flip全部不改。既有rebuttal准备/回复与未跟踪计划文档不纳入。
+- 修改文件列表：新增 `my_example/rebuttal/utility_fp32_control.py`、`run_utility_fp32_control.sh`、`tests/utility_fp32_control_test.py`；更新 `my_example/rebuttal/README.md`、`docs/fixed_checkpoint_utility_protocol.md`、`develop.md`。
+- 实现：只读核对源checkpoint/replay/hash/协议与固定8heldout prompts，重用32回答/mask/dense rewards/advantages，不生成、不计算候选梯度；诊断进程actor浮点state转FP32、matmul highest、实际logps/loss和嵌套JAXPR浮点中间类型验收。NEW FP32 theta0 unit-forward old logps独立保存，原BF16只读；h直接微分同一mean-vmap标量，避免数值自检保留16份逐样本梯度。新目标/执行与生产不同，明确不是恢复原BF16效用或筛选排名等价，也不归因唯一根因。
+- 止损：沿用原1e-6/1e-4、clip.1、rtol.1/atol1e-7和10倍分辨率门槛；无步长搜索/换候选/容差放宽。独立server launcher先CPU回归，再单worker四TPU小测，TPU子进程45分钟上限/TERM后60秒grace；峰值headroom至少5%且完整计数才exit0。失败/超时不排128大扫描，暂停finite-step优先norm-top50训练baseline。不是最坏全valid长度HBM测试，不预先保证FP32能通过/放得下。
+- 测试定义：新增8项server CPU测试，覆盖有界参数/拒绝松绑、清洁reward/A校验、原logps不改、dtype提升保持值与整数state、实际mean loss AD解析/有限差分、嵌套JAXPR中隐蔽BF16识别、失败报告不伪装生产/方法证据。当前仅静态检查，遵用户要求Mac未执行单元/JAX/模型或TPU测试；需服务器实际验收。
+- 验证命令与结果：待最终补充 AST、ruff E9/F、bash -n、git diff --check；未提交推送、未远程启动/中断任务。
+- 已知边界：NNX/TPU trace及新峰值尚待服务器；H的8prompt分半不稳定不会因数值对照通过自动解决。即便通过也不证明batch agreement有用或R2 finite utility已完成，只确认新FP32测量能工作。下一步是否开展科学对齐统计须另外判定。
+- 最终静态验收：所有rebuttal Python AST解析、新8项test定义计数、ruff E9/F、launcher与nohup片段bash -n、git diff --check通过；对tunix/、正式main/train/config及原utility_runtime/audit_grpo_utility的diff为空。本轮没有在Mac或服务器执行单元/JAX/模型/TPU测试；用户需手动提交推送后，在空闲worker0执行新launcher（先服务器CPU回归，再有45分钟预算的FP32数值/HBM对照）。

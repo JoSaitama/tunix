@@ -214,3 +214,13 @@ heldout独立不等于无噪声真梯度：PG surrogate仍受有限rollouts与�
 - 新numerics模式可复用用户成功smoke（20261108_061613）：不跑候选梯度扫描；检查旧full16 logps与per-unit前向差、零步、恢复后的F，以及预声明1e-6/1e-4的+/-heldout自身梯度响应，使用实际delta预测。预设rtol.1/atol1e-7及10倍分辨率门槛，不能据DTV结果挑步长或改精度/old logps。无通过步长则numerics退出2并保留报告；执行完成与数值验收区分。smoke/probe只在自检通过的步长上做method probe，每条仍需一致性，失败时保留raw但finite_step_validated=false；score只交付梯度几何。HBM合成probe仍只作资源压力测试，不作收益数字。
 - 新test_utility_v2.sh只排CPU→metadata→numerics，失败停，不自动大规模probe。当前worker单process/四localTPU沿用，h两半新增聚合树的HBM需重测，不以旧91.53%余量替代；不改变16回答AD来绕过峰值。
 - 新增数据/证据/微型JAX runtime/NumPy假runtime编排测试，现共54项已定义。遵用户要求本机不执行任何单测/模型/JAX计算，仅AST、ruff E9/F、bash -n、diff检查；服务器实际通过尚未获得，也未声称约1097倍偏差根因已消除。先在空闲worker跑小回放自检，回传numerical/heldout报告后再定正式128/128统计，不重新训练seed。
+
+## 12. 一次有止损边界的FP32测量对照（2026-11-08）
+
+用户已回传v2数值失败：零步/恢复通过，但1e-6不分辨、1e-4正反两向loss都增加；原full16与unit前向logps存在差异。不能据此确诊BF16为唯一根因，更不能更换候选到结果为正。
+
+新增独立 `my_example/rebuttal/utility_fp32_control.py` 与 `run_utility_fp32_control.sh`，复用旧smoke的8heldout prompts/32回答，原mask、reward、advantage和token不变。无candidate AD、rollout、训练或模型导出；所有生产路径与原v2保持不变。该进程将actor浮点state扩为FP32并以highest matmul precision运行，核对实际loss/logps dtype与嵌套前向JAXPR的浮点中间类型。
+
+**新目标必须单独标注**：用新FP32 unit forward在theta0生成独立old-policy logps，保存到新目录，原BF16源文件只读。h是探测中同一个mean(vmap(per-unit loss))标量的梯度，不再为这个数值自检保留16份逐样本参数梯度。这改变诊断目标的精度、old-policy与计算口径，既不宣称与生产排名等价，也不能单独归因某一种改动。只测原预声明1e-6/1e-4、zero与正反SELF，原容差/分辨率不放宽。
+
+先服务器CPU回归，再当前物理worker独立四TPU进行一次小对照。TPU子进程45分钟预算，TERM后60秒可强制结束自己的子进程；不停止其他作业。实际HBM至少5%余量且计数完整才允许exit0，原91.53%余量不当作FP32安全保证；这不是全长度全valid合成压力测试。失败/超时不自动重试或排大扫描，先转向gradient-norm top50%训练baseline。通过也只说明FP32测量对照有效，不直接宣称R2问题已解答/长期效用/Assumption成立；后续科学证据仍需另外决定。

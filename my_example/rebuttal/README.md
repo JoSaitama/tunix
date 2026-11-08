@@ -340,3 +340,57 @@ diagnostic does not answer scaling/cost or figure/table evaluation discrepancies
 Memory: h_A/h_B need extra aggregate gradient trees, but no extra backward calls,
 full candidate gradient pool or model exports. Keep original16-response AD;
 do not infer new HBM safety from an older report. Run HBM before larger scans.
+
+## Bounded FP32 measurement control (2026-11-08)
+
+The archived BF16 numerical gate failed. Do not repeat candidate scans hoping
+for a positive utility. `utility_fp32_control.py` is a separate measurement
+control, not an alteration to v2 or any formal training method.
+
+- Replays ONLY the SAME eight heldout prompts / 32 answers, masks, clean dense
+  rewards and advantages. No generation, candidate gradients, selection or
+  optimizer; no new training run or model export.
+- Checks checkpoint LoRA SHA, pinned backbone snapshot, replay contract/source
+  hashes and exact parameter restoration. The original BF16 files remain intact.
+- Widens the diagnostic actor's floating state to FP32, uses `highest` matmul
+  precision, checks FP32 logps/loss, and inspects the nested actual forward JAXPR
+  for non-FP32 floating intermediates. It fails rather than silently casting
+  only the final scalar or claiming unverified FP32 execution.
+- Defines **NEW** FP32 theta0 old-policy logps via the per-unit/vmap forward,
+  saving them under `fp32_control_rollouts/`. It does NOT replace archived BF16
+  logps, re-score candidates, or claim that this objective is the production one.
+- Computes h by differentiating the SAME mean(vmap(per-unit loss)) scalar
+  evaluated by the probe. This avoids 16 per-unit gradient trees for a scalar
+  measurement control. Four prompts x four answers and original lengths remain
+  fixed. This is not an equivalence certificate for production gradient ranking.
+- Zero/+/-SELF controls retain declared steps `[1e-6, 1e-4]`, clip `.1`, rtol `.1`,
+  atol `1e-7`, and the 10x resolution floor. No automatic step search/relaxation.
+- `hbm_report.json` records actual small-control peaks with a 5% minimum observed
+  headroom guard. This is NOT a worst-case synthetic full-length HBM stress test,
+  nor proof that larger FP32 scans fit.
+
+Run on an idle SERVER worker (launcher runs CPU regression first):
+
+```bash
+bash my_example/rebuttal/run_utility_fp32_control.sh \
+  --replay-rollouts logs/rebuttal_grpo_gsm8k_utility_smoke_seed0_mismatch0_step500_20261108_061613 \
+  --backbone-path /home/jason_chia925_gmail_com/.cache/huggingface/hub/models--google--gemma-3-1b-it/snapshots/dcc83ea841ab6100d6b47a070329e1ba4cf78752
+```
+
+The launcher enforces current-worker logical process0 / four local TPU devices,
+refuses another model task, and gives the TPU subprocess a 45-minute timeout
+(60-second TERM grace). It does not touch another worker or existing jobs.
+Output is `logs/rebuttal_grpo_gsm8k_utility_fp32control_seed0_mismatch0_step500_TIMESTAMP/`.
+
+Inspect `control_summary.json`, `numerical_report.json`, `control_manifest.json`,
+`logp_comparison.json`, and `hbm_report.json`. Exit0 requires the numerical gate
+AND verified headroom; exit2 is an unvalidated control or invalid CLI; timeout
+usually exits124 (137 if forced kill); other nonzero is an execution failure.
+`execution_passed` alone is NOT numerical acceptance. Raw +/- results are kept.
+
+Even a pass validates only THIS FP32 measurement. Dtype, old-policy definition
+and scalar-gradient execution change together, so it does not isolate a sole
+BF16 cause, validate prior BF16 finite-step results, establish Assumption1, or
+answer which method is better. No follow-on128 scan is launched. If it fails or
+exceeds budget, pause finite-step work and prioritize the reviewer-requested
+gradient-norm top50% TRAINING baseline; disclose the finite-step limitation.
