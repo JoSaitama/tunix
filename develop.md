@@ -13007,3 +13007,59 @@ This file tracks engineering changes made in this repository.
 - 验证：本机仅13个Python AST解析、ruff check --select E9,F my_example/rebuttal、三个shell bash -n、git diff --check（最终结果补充）；54项测试已定义，遵用户要求全部实际单元/JAX/model/TPU测试仅服务器跑，本机未执行。未访问云端/代提交推送/中断运行作业。先CPU→只读preflight→旧smoke numerical回放的单worker nohup，exit2含义需读report，不直接排大probe；HBM和预定128/128主score扫描等待服务器小测结果。
 - 风险/待办：服务器NNX/JAX/TPU API、真实新峰值及数值门槛尚未验收；heldout非零/两半正cos不等于真方向已知，条件bootstrap不覆盖训练seed与h估计不确定性。Group整组同步反号不变性限制保留，dense反rank不保证严格反号；本诊断不替代norm baseline/PODS/DS、scaling/cost或Figure/Table/R3范围澄清。
 - 最终静态结果：13个Python AST、ruff E9/F、三个shell bash -n及nohup队列片段bash -n、git diff --check均通过；54项测试已定义但未运行，未声称CPU/TPU验收。git确认for_GRPO_8kBaseline；tunix/与正式main/train/config/model、run_grpo_gemma、PODS/DS launcher diff为空。新增test_v2启动前检查当前worker现有模型任务，拒绝而不kill；只给空闲worker0的CPU/preflight/numerics回放nohup，固定HF已有snapshot路径避免解析新revision，分清exit0/2与工程异常。未执行git add/commit/push/服务器pull，最终提供用户显式命令；主128/128 score与新HBM等待小测结果，不自动队列启动。
+- 2026-11-08（服务器utility v2 numerical gate正常拒绝）：无代码改动，仅更新本日志。用户回传20261108_094332 preflight execution=true、数值模式成功回放heldout2/candidate1批、完成8heldout prompts反传及1e-6/1e-4正反SELF控制，execution=true但numerical_check=false、exit2，无异常traceback/OOM。由于test_v2以set-e顺序到达阶段2，按脚本CPU阶段退出0，但用户未贴完整54项单测输出，不逐项冒称已核查。该结果证明门槛生效且两预声明步长未获认证，不证明Assumption1失败/方法有害或根因是BF16；完整numerical_report尚未提供。下一步只读该run的numerical_report.json、audit_summary的independent_gradient/恢复/源未变及HBM计数，无TPU/重试/升环境/松阈值或大probe；读原始控制数据后再决定有限步诊断能否修复，纯梯度证据与真实loss改善保持区分。git diff --check通过，未执行模型或远程测试。
+- 2026-11-08（完整数值报告定位两个独立问题）：无代码改动，仅更新本日志。读取附件047c0e76报告：零步U/delta为0、恢复F差0且theta0逐位恢复/源与replay未变，排除本次快照漂移；eta1e-6真实delta约1e-7而正反U均0，预测3.72e-8小于当前分辨率，不能用来判效用；eta1e-4实际delta约1e-5，沿-h预测+3.72e-6但实测-7.1469e-4，沿+h实测-3.1585e-4，说明该数值路径/步长没有通过一阶解释，不认定唯一原因。相同theta0的full16-vs-per-unit BF16 logps均差.019388、最大1.933105，23.04% token不等且2.618% token在theta0已超importance clip；这是已测的计算路径不一致，不等于证明BF16唯一根因/生产实验无效。h_A/h_B各4prompts、norm.6494/.3724、cos=-.01435近乎正交，8prompts不足以证明外部方向稳定，不能保证扩大样本一定转正。
+- 后续建议（尚未实施/需确认）：停止重复当前BF16 finite probe，不靠调阈值/换候选；仅增加一次固定旧tokens的诊断专用FP32且匹配前向/old-policy定义的对照，保留原BF16记录与生产选择，不改冻结训练/重训seed；dtype与dot精度分开处理（查JAX官方precision文档），不能只把最终loss/梯度cast32当全FP32或覆盖旧logps伪称原协议。先8heldout检查新峰值和数值响应，再按预定128 heldout验证稳定性；若预算/验收不允许则明确仅提交梯度对齐代理、不能完整声称R2 finite improvement已完成。只读检查common.compute_per_token_logps、selective_log_softmax与Gemma3默认dtype/attention，未发现足以确诊全部偏差的静态证据；git diff --check通过，未执行模型/服务器或新代码修改。
+
+
+## 2026-11-08 — 解释 GRPO 四 completion 下过滤/翻转比例的离散性
+
+- 改动范围：无代码改动；只读核查评分、mask、flip、固定比例过滤与样本拼接路径，更新 `develop.md`。
+- 修改文件列表：`develop.md`。
+- 当前能力：普通 DTV 按阈值过滤无比例上限；LOO filter 的 MIN_KEEP_FRACTION=.9 对其 scope 人口实现最多 floor(.1*N) 过滤；dtv-flip/LOO-flip 目前对全部严格负分取反，无比例 cap。Random/Reward fixed_filter 已有随机取整，提供期望比例，不是每group严格上限。
+- 规模核查：默认4prompts×4generations产生16completion，rl_learner按原prompt microbatch边界拆回16样本TrainExample，非每次只有4；group score仍各4独立。额外环境/服务分块需按实际训练日志核验，不混同rollout batch与评分population。
+- 数学边界：group4 的硬操作比例仅0/25/50/75/100%，严格最多10%只能0；batch16 最多1（6.25%），40样本可4（10%）。可保留group score但另设batch/累计quota，并从负分候选选择最低分；负分不足不操作正分凑比例。随机取整4*.1=.4会让40%group操作1个，其余0，期望10%，不是每group10%硬上限或有限样本精确10%。
+- 验证命令与结果：静态读取 self_inf_loo/fixed_filter/dtv_flip trainers、my_example/train.py、grpo_learner.py、rl_learner.py 与 actor迭代路径；`git diff --check -- develop.md` 通过，未新增比例实现、未调整生成数/训练参数。
+- 风险/待办：若需要新增统一cap，须分清score_scope与quota_scope、严格上限与长期期望/累计比例；不要通过把每prompt generation数改10混入GRPO算法与预算变化。
+
+
+## 2026-11-08 — 建议负分候选下的约10%翻转预算
+
+- 改动范围：无代码改动；仅更新 `develop.md`，解释教授要求的实现方案，未新增cap。
+- 修改文件列表：`develop.md`。
+- 建议：保留4completion/group与原DTV/LOO评分，用completion累计取整配额。第t批预算 q_t=floor(r*S_t)-floor(r*S_(t-1))，S为已处理completion数；从当前严格负分候选按score升序选 min(q_t,negative_count)，未用名额作废，仅累计取整的小数余量保留。完整梯度按原N平均；不拿正分补额，不重算取反后score。
+- 例子：每批16、r=.1的前五批配额1/2/1/2/2；负分充足时80样本翻8个，累计实际翻转<=floor(.1*S)。单批可2/16=12.5%，所以这是累计10%上限，不是每批10%硬上限。负分不足时实际率更低且后续不追补欠额。
+- 验证命令与结果：用整数有理数算术核对五批配额与任意前缀累计预算，`git diff --check -- develop.md` 通过；未执行训练或代码修改。
+- 风险/待办：实施需稳定tie-break、记录原始负分率/配额/实际翻转率与累计计数；计数随checkpoint恢复，不能用optimizer update step替代实际completion数。若要求每批严格不超过10%，16样本只能翻1个（6.25%），必须与累计上限明确区分。
+
+
+## 2026-11-08 — 实施 dtv-flip 累计比例配额（默认10%）
+
+- 修改文件：`tunix/rl/dtv_flip_trainer.py`、`my_example/run_dtv_flip.sh`、`develop.md`；测试与文档随后同步。仅改新增flip路径。
+- 实现：累计小数余量精确有理数配额、负分升序稳定选取、未用名额作废、完整梯度按N平均；optimizer附加NNX动态计数，避免JIT捕获Python计数常量。默认.1，可用 TUNIX_DTV_FLIP_MAX_FRACTION 配置0到1；1兼容全部负分flip。
+- 恢复：custom metadata记录已处理/翻转数与余量、比例及评分配置；新trainer局部覆盖最终checkpoint保存以包含metadata。拒绝从无配额状态的已有checkpoint继续及混用比例/评分配置。
+- 验证：待新增测试及既有17项回归；尚未服务器/TPU验证。
+
+- 测试同步：旧17项明确使用ratio1验证旧数学行为；新增累计1/2/1/2/2配额、稳定低分排序、不追补/不翻正分、可变batch每前缀cap、cached JIT计数、多group配额、metadata JSON恢复等价/配置拒绝、final-save metadata与比例校验测试。修改文件加入 `tests/rl/dtv_flip_trainer_test.py`。
+
+- 中间验证：四CPU隔离模式24项全部通过，含cached JIT计数与JSON恢复等价；追加真实生产CheckpointManager/Orbax保存恢复测试（新trainer局部final-save路径），恢复配置额外核对num_generations。
+
+- 文档与核验：更新 `docs/dtv_flip.md` 说明默认10%、累计而非逐batch硬cap、精确比例/不追补规则、配额metadata恢复与旧checkpoint拒绝；新增负分率/本批quota/实际和累计翻转日志。25项四CPU隔离测试已通过，其中实际调用生产CheckpointManager/Orbax完成模型+quota保存恢复；追加launcher自定义0/.2/1与非法比例验证、受cap后的模型数值断言，最终结果待后补。
+- 恢复边界：原框架checkpoint只保存模型不保存Optax动量；本次保证配额状态恢复，SGD测试可比对模型轨迹，不宣称Adam动量完整恢复。
+
+- 最终多设备检查补强：将已有sharded JIT测试改为真实四CPU分片输入下连续五批10%配额，核验1/2/1/2/2、80completion计数及模型数值；先前25项全部通过，此项改动后重跑最终套件。
+
+- 最终结果：`XLA_FLAGS=--xla_force_host_platform_device_count=4 TUNIX_FLIP_TEST_ISOLATED=1 JAX_PLATFORMS=cpu /tmp/dtv-rebuttal-venv/bin/python -m unittest discover -s tests/rl -p dtv_flip_trainer_test.py` 25项全部通过，无skip；含真实四设备分片连续配额、cached JIT、LoRA、完整梯度数值、真实Orbax最终保存/恢复及launcher比例转发。NaN/Inf负例的callback错误日志属预期。
+- 静态结果：Python py_compile、bash -n、ruff --select E9,F、git diff --check全部通过。保护文件与rl_cluster/config/原launcher无本轮diff。最终功能文件为 `tunix/rl/dtv_flip_trainer.py`、`my_example/run_dtv_flip.sh`、`tests/rl/dtv_flip_trainer_test.py`、`docs/dtv_flip.md`、`develop.md`。
+- 已知边界：本机Trainer基类import仍显式隔离以绕过缺metrax，实际JAX/Flax/Optax及生产checkpoint manager/Orbax未替换；完整框架/TPU训练未执行。未提交/push或同步服务器；用户既有rebuttal准备/回复文档和未跟踪计划文件保持原状。启动新10%实验须使用新checkpoint目录。
+
+
+## 2026-11-08 — 准备10% flip配额提交与a9→d0增量同步命令
+
+- 改动范围：无代码改动；仅更新 `develop.md`，检查本地工作树并提供手动commit/push与服务器同步命令，未代执行。
+- 修改文件列表：`develop.md`。
+- 本地检查：当前for_GRPO_8kBaseline，HEAD88a0faf，origin git@github.com:JoSaitama/tunix.git；新增配额功能待提交5文件为trainer、launcher、tests、docs和本日志。既有GRPO_REBUTTAL_PREPARATION.md/rebuttal.md与两个未跟踪rebuttal计划文件不纳入。未fetch核实实时远端。
+- 用户澄清：ziao1→ziao0指前面已打通SSH的t1v-n-a9c72b46-w-0 jason账号→t1v-n-d0f559df-w-0 lhf账号，两端Project_8k/tunix。
+- 同步方案：源机先切指定分支并git pull --ff-only，再显式SSH key dtv_transfer，确认目标无my_example训练，rsync --relative精确同步5个功能/日志文件及rl_cluster.py（确保flip路由），--backup留同名文件时间戳备份，不用--delete。checksum dry-run验收六文件；不更新目标.git/环境/数据/运行产物，故目标git log不代表本次源码版本。
+- 验证命令与结果：`git diff --check`通过；上轮25项CPU/真实Orbax测试结果不变，本轮只写日志，不重复算法测试。远端拉取/同步均待用户执行。
+- 风险/待办：源分支有冲突或目标任务运行时停止，不reset、不force；目标需以新checkpoint目录运行10%配额实验。

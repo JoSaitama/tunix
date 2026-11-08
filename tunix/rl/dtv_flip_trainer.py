@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import os
+from fractions import Fraction
 from typing import Any
 
 from flax import nnx
@@ -50,6 +51,7 @@ def configuration_from_environment(environ):
       num_generations=generations,
       loo=enabled("TUNIX_DBC_SELF_INF_LOO"),
       decisions_path=environ.get("TUNIX_DTV_FLIP_DECISIONS_PATH"),
+      max_flip_fraction=environ.get("TUNIX_DTV_FLIP_MAX_FRACTION", "0.1"),
   )
 
 
@@ -107,22 +109,108 @@ def _reject_nonfinite(scores):
   jax.lax.cond(jnp.all(jnp.isfinite(scores)), lambda _: None, fail, None)
 
 
+def ratio_terms(value):
+  """Use exact rational arithmetic for the cumulative quota, including 0/1."""
+  try:
+    ratio = Fraction(str(value))
+  except (ValueError, ZeroDivisionError) as exc:
+    raise ValueError("max_flip_fraction must be finite and in [0, 1].") from exc
+  if not 0 <= ratio <= 1 or ratio.denominator > 1_000_000:
+    raise ValueError("max_flip_fraction must be in [0, 1], denominator <= 1000000.")
+  return ratio.numerator, ratio.denominator
+
+
+def select_flips(scores, remainder, numerator, denominator):
+  """Issue this batch's quota; unused negative-candidate slots expire.
+
+  Only fractional rounding remainder carries over. Stable sorting resolves
+  equal scores by original completion index. Quota scope is the entire batch,
+  independent of batch/group alignment score scope.
+  """
+  tokens = remainder + int(scores.shape[0]) * numerator
+  quota, next_remainder = tokens // denominator, tokens % denominator
+  order = jnp.argsort(scores, stable=True)
+  ranks = jnp.empty_like(order).at[order].set(jnp.arange(scores.shape[0]))
+  selected = (scores < 0) & (ranks < quota)
+  return jnp.where(selected, -1.0, 1.0), quota, next_remainder
+
+
+class FlipBudget(nnx.Module):
+  """Dynamic JIT state attached to the optimizer, saved in custom metadata."""
+
+  def __init__(self, seen=0, flipped=0, remainder=0):
+    self.seen = nnx.Variable(jnp.asarray(seen, dtype=jnp.int32))
+    self.flipped = nnx.Variable(jnp.asarray(flipped, dtype=jnp.int32))
+    self.remainder = nnx.Variable(jnp.asarray(remainder, dtype=jnp.int32))
+
+
 class DTVFlipTrainer(rl_trainer.Trainer):
   """Use total-loss alignment to flip the same total gradients DTV masks."""
 
   def __init__(self, *args, scope="batch", num_generations=None,
-               loo=False, decisions_path=None, **kwargs):
+               loo=False, decisions_path=None, max_flip_fraction="0.1", **kwargs):
     if scope not in ("batch", "group"):
       raise ValueError(f"Invalid dtv-flip scope: {scope!r}")
     if scope == "group" and int(num_generations or 0) <= int(loo):
       raise ValueError("Insufficient num_generations for dtv-flip group scope.")
+    self.flip_numerator, self.flip_denominator = ratio_terms(max_flip_fraction)
     super().__init__(*args, **kwargs)
     self.scope = scope
     self.num_generations = num_generations
     self.loo = loo
     self.decisions_path = decisions_path
+    self.initialize_budget_state(
+        self.optimizer, self._restored_custom_metadata, self._train_steps
+    )
     if decisions_path:
       os.makedirs(os.path.dirname(os.path.abspath(decisions_path)), exist_ok=True)
+
+  def initialize_budget_state(self, optimizer, metadata, restored_step):
+    """Restore the exact budget; reject legacy or incompatible continuations."""
+    state = (metadata or {}).get("dtv_flip_budget")
+    if state is None:
+      if restored_step:
+        raise ValueError("Checkpoint has no dtv-flip quota state; use a new checkpoint root.")
+      state = dict(seen=0, flipped=0, remainder=0)
+    else:
+      expected = dict(version=1, numerator=self.flip_numerator,
+                      denominator=self.flip_denominator, scope=self.scope, loo=self.loo,
+                      num_generations=self.num_generations)
+      if any(state.get(key) != value for key, value in expected.items()):
+        raise ValueError("Checkpoint dtv-flip ratio or scoring configuration differs.")
+      seen, flipped, remainder = (state.get(key) for key in ("seen", "flipped", "remainder"))
+      if (any(type(x) is not int for x in (seen, flipped, remainder))
+          or not 0 <= seen <= np.iinfo(np.int32).max
+          or not 0 <= flipped <= seen * self.flip_numerator // self.flip_denominator
+          or remainder != seen * self.flip_numerator % self.flip_denominator):
+        raise ValueError("Invalid checkpoint dtv-flip budget counters.")
+    optimizer.dtv_flip_budget = FlipBudget(
+        state["seen"], state["flipped"], state["remainder"]
+    )
+
+  def custom_checkpoint_metadata(self):
+    metadata = dict(self.custom_checkpoint_metadata_fn())
+    budget = self.optimizer.dtv_flip_budget
+    metadata["dtv_flip_budget"] = dict(
+        version=1, numerator=self.flip_numerator, denominator=self.flip_denominator,
+        scope=self.scope, loo=self.loo, num_generations=self.num_generations,
+        seen=int(np.asarray(budget.seen[...])),
+        flipped=int(np.asarray(budget.flipped[...])),
+        remainder=int(np.asarray(budget.remainder[...])),
+    )
+    return metadata
+
+  def _save_last_checkpoint(self):
+    # The base final-save path omits custom metadata. Keep this fix local to
+    # dtv-flip so both interval and final checkpoints carry the quota state.
+    if self._train_steps <= 0:
+      return
+    latest = self.checkpoint_manager.latest_step()
+    if latest is None or latest < self._train_steps:
+      self.checkpoint_manager.save(
+          self._train_steps, self.model, save_only_lora_params=self._lora_enabled,
+          force=True, custom_metadata=self.custom_checkpoint_metadata(),
+      )
 
   def _train_step(self, model, optimizer, inputs):
     inputs = self.gen_model_input_fn(inputs)
@@ -147,8 +235,15 @@ class DTVFlipTrainer(rl_trainer.Trainer):
         grads, scope=self.scope, num_generations=self.num_generations, loo=self.loo
     )
     _reject_nonfinite(scores)
-    weights = jax.lax.stop_gradient(jnp.where(scores < 0, -1.0, 1.0))
+    budget = optimizer.dtv_flip_budget
+    weights, quota, remainder = select_flips(
+        scores, budget.remainder[...], self.flip_numerator, self.flip_denominator
+    )
+    weights = jax.lax.stop_gradient(weights)
     optimizer.update(model, signed_mean(grads, weights))
+    budget.seen[...] += int(scores.shape[0])
+    budget.flipped[...] += jnp.sum(weights < 0).astype(jnp.int32)
+    budget.remainder[...] = remainder
     final_loss = jnp.mean(losses * weights)
     if self._has_aux:
       # Raw reward/KL diagnostics remain ordinary averages, not signed metrics.
@@ -159,8 +254,14 @@ class DTVFlipTrainer(rl_trainer.Trainer):
             "self_inf_dot_mean": jnp.mean(scores),
             "self_inf_dot_std": jnp.std(scores),
             "self_inf_kept_fraction": jnp.asarray(1.0),
-            "dtv_flip_count": jnp.sum(scores < 0),
-            "dtv_flip_fraction": jnp.mean(scores < 0),
+            "dtv_flip_count": jnp.sum(weights < 0),
+            "dtv_flip_fraction": jnp.mean(weights < 0),
+            "dtv_flip_negative_count": jnp.sum(scores < 0),
+            "dtv_flip_negative_fraction": jnp.mean(scores < 0),
+            "dtv_flip_quota": quota,
+            "dtv_flip_seen": budget.seen[...],
+            "dtv_flip_total": budget.flipped[...],
+            "dtv_flip_cumulative_fraction": budget.flipped[...] / budget.seen[...],
             "dtv_flip_raw_loss": jnp.mean(losses),
         })
         if self.decisions_path:
@@ -177,11 +278,21 @@ class DTVFlipTrainer(rl_trainer.Trainer):
             "scope": self.scope, "score_objective": "total",
             "flip_application": "full", "num_generations": self.num_generations,
             "train_step": int(self._train_steps) + 1,
+            "quota_scope": "batch", "quota_policy": "cumulative_floor_no_catchup",
+            "max_flip_fraction": self.flip_numerator / self.flip_denominator,
+            **{key: np.asarray(aux[key]).item() for key in (
+                "dtv_flip_count", "dtv_flip_negative_count", "dtv_flip_quota",
+                "dtv_flip_seen", "dtv_flip_total", "dtv_flip_cumulative_fraction",
+            )},
             "scores": np.asarray(aux.pop("dtv_flip_scores")).tolist(),
             "weights": np.asarray(aux.pop("dtv_flip_weights")).tolist(),
         }
         with open(self.decisions_path, "a", encoding="utf-8") as output:
           output.write(json.dumps(record, allow_nan=False) + "\n")
-      for key in ("dtv_flip_count", "dtv_flip_fraction", "dtv_flip_raw_loss"):
+      for key in (
+          "dtv_flip_count", "dtv_flip_fraction", "dtv_flip_raw_loss",
+          "dtv_flip_negative_count", "dtv_flip_negative_fraction", "dtv_flip_quota",
+          "dtv_flip_seen", "dtv_flip_total", "dtv_flip_cumulative_fraction",
+      ):
         self.rl_metrics_to_log.setdefault(key, np.mean)
     super()._post_process_train_step(aux)
