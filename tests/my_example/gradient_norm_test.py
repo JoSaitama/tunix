@@ -292,6 +292,28 @@ class GradientNormTest(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, 'nonzero policy gradients'):
             validate_records(rows)
 
+    def test_direct_hbm_preparation_initializes_none_service_sizes(self):
+        from my_example.rebuttal.test_gradient_norm_hbm import initialize_direct_preparation
+        for initial in (None, 4):
+            config = SimpleNamespace(mini_batch_size=4, train_micro_batch_size=4)
+            learner = SimpleNamespace(_training_config=config, algo_config=SimpleNamespace(num_generations=4),
+                _rollout_micro_batch_size=initial, _compute_logps_micro_batch_size=initial)
+            recorded = initialize_direct_preparation(learner)
+            self.assertEqual(learner._rollout_micro_batch_size * 4, 16)
+            self.assertEqual(learner._compute_logps_micro_batch_size * 4, 16)
+            self.assertEqual(recorded['service_completions'], 16)
+            self.assertEqual(vars(config), dict(mini_batch_size=4, train_micro_batch_size=4))
+
+    def test_direct_hbm_preparation_rejects_incompatible_explicit_size(self):
+        from my_example.rebuttal.test_gradient_norm_hbm import initialize_direct_preparation
+        learner = SimpleNamespace(_training_config=SimpleNamespace(mini_batch_size=4, train_micro_batch_size=4),
+            algo_config=SimpleNamespace(num_generations=4),
+            _rollout_micro_batch_size=2, _compute_logps_micro_batch_size=None)
+        with self.assertRaisesRegex(ValueError, 'four prompts/four generations'):
+            initialize_direct_preparation(learner)
+        self.assertEqual(learner._rollout_micro_batch_size, 2)
+        self.assertIsNone(learner._compute_logps_micro_batch_size)
+
     def test_cluster_opt_in_preserves_baseline_and_existing_dtv_routes(self):
         source = (ROOT / 'tunix/rl/rl_cluster.py').read_text()
         start = source.index('    actor_trainer_kwargs = {}')

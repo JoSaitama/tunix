@@ -13116,3 +13116,23 @@ This file tracks engineering changes made in this repository.
 - 修复：路由测试替身全部改为具备真实__name__的空类，保留原条件分支执行与逐类身份断言，不跳过用例；只在预期NaN/Inf拒绝测试上下文临时关闭jax._src.debugging logger，正常生产运行日志/异常不受影响，assertRaises仍然有效。
 - 验证命令与结果：本机AST、ruff E9/F和git diff --check静态检查均通过，并复核修改只作用于测试文件和日志；不在Mac运行单元/JAX/模型。服务器需重新CPU通过后继续clean/mismatch smoke与HBM；没有新的TPU或HBM通过证据。
 - 风险/待办：该修复只修测试支架，不证明真实训练/HBM已成功。旧进程应已因CPU测试失败退出，launcher仍会拒绝同worker并行模型任务。未代提交推送、未运行服务器命令；其他dirty rebuttal文档保持原状。
+
+
+## 2026-11-08 — Norm 两个真实 smoke 通过，补齐独立 HBM 准备初始化
+
+- 证据：附件6d0a36e1显示run20261108_131637的clean与mismatch0.2分别完成2实际更新、模型导出、原pre/post eval/schema与选择统计断言，均打印PASS。按test脚本set-e流程CPU阶段也已退出0。随后独立HBM在首次生成前报 `_rollout_micro_batch_size=None` 乘4 TypeError，尚未开始满长度反传，非OOM；不能将两个smoke通过误称HBM通过。
+- 原因：测试为避免异步prefetch干扰阶段标记，直接调用GRPO._generate_and_compute_advantage，漏掉RLLearner.train()初始化rollout/compute-logps微批默认值的两条赋值。正式训练走learner.train，因此两smoke没有这个错误。
+- 修改范围/文件：仅 `my_example/rebuttal/test_gradient_norm_hbm.py`、`tests/my_example/gradient_norm_test.py` 和本 `develop.md`。norm筛选/训练/原生产框架/超参均不变。
+- 修复：测试helper按原train相同mini→train→rollout/logps fallback规则设默认4prompts、G4，显式不兼容的大小拒绝而不偷偷覆盖；记录实际service16completion。新增None/已有4初始化和拒绝显式2且不部分修改的两项回归，CPU现24项定义。
+- 验证命令与结果：本机两文件AST、ruff E9/F、git diff --check静态检查均通过，CPU现24项定义；不运行Mac单元/JAX/模型/TPU测试。服务器只需重跑CPU及HBM阶段，无需重跑已通过的clean/mismatch smoke或重存两份约1.9GB导出模型。
+- 风险/待办：该初始化修复不构成新HBM通过证据；保持691步LR schedule、原16回答反传、256/768压力尺寸和至少5%余量验收。小规模1319以外的eval_total=1的0%仅用于接口测试，不作方法效果判断；缓存Fetching10files的0秒进度不等于重新下载2GB模型。未代提交/推送/服务器启动。
+
+
+## 2026-11-08 — 准备单独 DTV flip10% seed5 正式启动命令
+
+- 改动范围：无代码改动；仅更新 `develop.md`，提供目标lhf账号手动nohup命令；未连接服务器或启动训练。
+- 修改文件列表：`develop.md`。
+- 用户回传：推送/同步/校验已通过；本次仅DTV评分、batch范围、clean GSM8K、seed5，累计flip上限显式.1，不排队LOO，不缩减pre/post1319评测。沿用原Gemma1B、4×4、LR1e-6、beta.08与训练预算。
+- 输出：新根目录 logs/grpo_gsm8k_dtv_batch_flip10%_seed5_clean_<timestamp>，checkpoint/model/tensorboard/results及nohup.log/pid/exit_code均在该目录；config.txt明确seed、score、scope、ratio、quota_policy、noise，百分号作为普通文件名字符。
+- 验证：只读核对新launcher的环境变量及路径覆盖，`git diff --check -- develop.md`通过；不重复已通过测试。命令清除policy/PODS/DS/CPU残留，设置独立四芯片拓扑，使用项目解释器PATH而非复制的activate。
+- 风险/待办：使用全新checkpoint目录；累计10%不是逐batch10%硬上限，负分不足实际率更低。服务器容量、实际训练/评测/退出码待用户执行观察。
