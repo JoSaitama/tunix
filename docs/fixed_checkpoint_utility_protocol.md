@@ -156,3 +156,19 @@ heldout独立不等于无噪声真梯度：PG surrogate仍受有限rollouts与�
 仅修改独立`audit_grpo_checkpoint_restore.py`：与正式`my_example/main.py`一致，`load_model`自己进入mesh，LoRA dummy forward不额外包外层mesh；原`apply_lora`仍在自己的内部mesh中重分片参数，后续restore仍使用4x1 mesh。没有修改dummy/训练batch、LoRA rank、权重、mesh大小或正式model.py。新增静态AST回归测试，防止初始化再次被包进mesh；现13项测试需服务器执行。CPU Gemma的shard函数会直接跳过约束，普通CPU运行无法复现该TPU专属报错。
 
 本机仅语法检查；服务器尚未重新restore。utility计算仍未实现，当前修复只是前置恢复检查。
+
+### 8.4 服务器恢复已通过（用户反馈）
+
+用户回传修复后命令`bash my_example/audit_grpo_checkpoint_restore.sh restore`的摘要：`passed=true`、`mode=restore`、`utility_audit_completed=false`。报告为服务器`logs/utility_checkpoint_checks/restore_seed0_step500_20261108_040038/restore_report.json`。按当前脚本，这支持参数恢复/结构与有限值/应用后digest/输入源未变等既定检查成功；本机未读取完整报告，不填造参数维度或headroom数字。
+
+这解除首个clean Vanilla step500作为audit输入的恢复阻碍，不需为获得模型重训或重下载。后续同模型候选rollout、独立heldout梯度、score→utility和finite-step更新仍未实现/验收；恢复期间的内存检查不代表反传或rollout HBM压力。用户这次只提供restore摘要，不据此声称13项单元测试或utility已通过。输入目录和成功报告保留，不要求另外方法checkpoint；正式训练代码/参数保持冻结。
+
+## 9. Utility诊断独立实现（2026-11-08，待服务器测试）
+
+按用户要求，新代码全部放`my_example/rebuttal/`，不改生产trainer、model/config/CLI、checkpoint保存、旧恢复自检。完整算法定义/假设/命令/限制见该目录`README.md`。新增入口`audit_grpo_utility.py`及launcher `run_utility_audit.sh`，NumPy统计/对照`utility_math.py`，TPU执行`utility_runtime.py`和两份CPU测试文件/launcher。
+
+已实现preflight、smoke、hbm、score、probe五种模式：独立TFDS train/heldout、共享固定回答、原dense reward分支与原prompt-hash mismatch、原GRPO loss/advantage、policy/full梯度区分、精确LoRA tree点积、生产风格DTV/LOO分数与cap、同保留数random控制、reference辅助cosine、unit相关性及分层、有限步SGD-direction surrogate改善/参数恢复、零delta与数值分辨率、源hash/阶段HBM。clean F的forward采用同样per-unit/vmap形状，避免不同batch AD路径混用。没有梯度压缩、不写全梯度池、不创建optimizer/trainer、不运行正式benchmark test或保存模型。
+
+输入模型来自clean；candidate-noise0.2仅为此状态敏感性，不替代mismatch训练模型证据。强制显式reward-mode，保存数据版本及未认证历史split/config/HF revision警告。matched random的mask不读取heldout h/clean audit标签。统计按prompt/batch聚类，但区间条件于当前h/checkpoint，不伪装训练seed不确定性。stress全长数据不进入科学汇总。程序完成不自动宣称assumption/实用性已验证。
+
+本机仅AST、bash -n、diff检查；按用户要求所有CPU/JAX toy、真实smoke及满长度HBM必须在服务器执行，当前不能声称通过。正式数字须恢复/CPU/smoke/HBM和配置核对后产生、检查，先勿启动大规模probe或据此写结论。
