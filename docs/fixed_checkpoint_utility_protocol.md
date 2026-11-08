@@ -123,3 +123,36 @@ bash my_example/audit_grpo_checkpoint_restore.sh restore
 ```
 
 PASS必须带mode解读：metadata PASS不等于restore PASS；restore PASS也不等于utility有效或梯度程序不OOM。`restore_report.json`始终带`utility_audit_completed=false`，恢复内存结果明确不代表rollout/backward峰值。报告目录存在即拒绝覆盖，默认带mode/seed/step/时间戳；默认input/commit只对应本次归档，其他run需显式override。
+
+## 8. R2原文核对、诊断主次与恢复bug修复（2026-11-08）
+
+已完整阅读`../ICLR2027.pdf`四页并视觉核对p2。R2不仅问reference是否同向，明确要求fixed-checkpoint filtering decisions能否predict improvement on a separate clean objective。R2还点出same-prompt reference与whole-group rank reversal、IF reference替换不保证utility ranking。R1要求assumption条件和minority信号，R3要求区分算法/参数化/任务协议与收窄一般RL外推。本文实验只能直接支持前两者的局部机制，不能独自解决跨模型/泛化和论文呈现问题。
+
+### 8.1 三种方向不能混用
+
+- `r_B`：当前候选batch或同prompt group的内部policy梯度reference。LOO还需对每个unit去自身，不能把DTV/LOO说成完全相同reference。
+- `d_V(B)`：同一候选batch上Vanilla的实际更新方向；若包含KL/AdamW，不必等于`r_B`。
+- `h_H`：独立clean heldout目标在共同theta上的梯度，不是候选batch的Vanilla方向。由Vanilla训练所得的checkpoint只是共同模型状态，不将外部检查变成与Vanilla自己的比较。
+
+`cos(r_B,h_H)`支持reference质量，但不能单独回答score ranking和筛选后utility。主要证据应为如下两层，第一层alignment仅辅助：
+
+1. 每单元score与独立一阶utility相关：`u_i^PG=<h_H,g_i^PG>`（纯policy attribution）与`u_i^full=<h_H,g_i^full>`（full-mask variant的实际loss梯度方向）分别命名；finite-step更新按真实variant聚合policy/KL，不把policy utility冒称full-update utility。
+2. 同checkpoint、同候选tokens/rewards/advantages、共享old/ref logps，各方法从theta0独立出发的一步clean objective变化`U_M=F_H(theta0)-F_H(theta0+Delta_M)`；恢复参数并核验，不串行累计训练。缺optimizer时仍是显式SGD-direction probe，不称历史AdamW。
+
+在Vanilla/DTV/LOO外，加入按各方法同样scope/每组实际保留数的random keep匹配对照（独立多个mask seed，提前固定），区分选择质量与仅减少数据/改变范数的效果。实际聚合归一化一致，并报告retained count/update norm；若有equal-norm sensitivity，标成额外方向控制，不冒称原算法。norm对照可作为offline方向诊断扩展，不据此改变仍暂停的norm训练baseline开发状态。
+
+summary应至少包括score/utility的全量与非近零Spearman和计数、kept/dropped的正utility比例、matched-random的utility、finite-step U及DTV-LOO配对差，分clean/noisy groups与正/负/零advantage。conflict单位的utility符号以及唯一正确回答误删率用于解释差异；不预设GSM8K必然DTV较好。
+
+heldout独立不等于无噪声真梯度：PG surrogate仍受有限rollouts与稀疏reward影响，NLL若另用只能称supervised utility proxy。需要零方向辨识力检查、prompt-cluster不确定性，后续扩checkpoints。独立clean数据仅用于audit，不能接入正式filter或选取最有利结果。单clean step500可行性不等于验证污染训练全过程。
+
+### 8.2 整组污染的结构限制
+
+作为数学构造，若同一group所有`g_i`同时变成`-g_i`，DTV与LOO的内部内积不变，而对固定外部h的utility反号。这说明组内agreement不可能无条件识别所有whole-group方向反转。实际dense reward rank reversal不一定恰等于逐advantage取反；不能把构造当作已测数据事实。诊断必须允许不支持排序的结果，不能为证明assumption而挑checkpoint或外部目标。
+
+### 8.3 用户restore失败的原因及最小修复
+
+异常在`qwix.apply_lora_to_model`的dummy forward：Gemma `get_model_input()`的batch=2，被自检脚本外层`with mesh`置于fsdp=4物理mesh下，activation `(2,1,1152)`无法按第一维4分片；尚未执行Orbax参数恢复，不是已发现checkpoint损坏或HBM OOM。
+
+仅修改独立`audit_grpo_checkpoint_restore.py`：与正式`my_example/main.py`一致，`load_model`自己进入mesh，LoRA dummy forward不额外包外层mesh；原`apply_lora`仍在自己的内部mesh中重分片参数，后续restore仍使用4x1 mesh。没有修改dummy/训练batch、LoRA rank、权重、mesh大小或正式model.py。新增静态AST回归测试，防止初始化再次被包进mesh；现13项测试需服务器执行。CPU Gemma的shard函数会直接跳过约束，普通CPU运行无法复现该TPU专属报错。
+
+本机仅语法检查；服务器尚未重新restore。utility计算仍未实现，当前修复只是前置恢复检查。

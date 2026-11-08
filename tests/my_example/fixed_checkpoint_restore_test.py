@@ -1,5 +1,7 @@
 """Standard-library preflight tests. No JAX, TPU, or model initialization."""
 
+import ast
+import inspect
 import json
 from pathlib import Path
 import subprocess
@@ -108,6 +110,25 @@ class CheckpointPreflightTest(unittest.TestCase):
         report = audit.read_json(output / "restore_report.json")
         self.assertFalse(report["passed"])
         self.assertEqual(report["error"]["type"], "ValueError")
+
+    def test_lora_dummy_forward_not_wrapped_in_fsdp_mesh(self):
+        # Static regression for the TPU-only 2-vs-4 activation failure. A CPU
+        # Gemma run would bypass shard() and therefore not reproduce that bug.
+        tree = ast.parse(inspect.getsource(audit.restore_checkpoint))
+        lora_calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call)
+                      and isinstance(node.func, ast.Name) and node.func.id == "apply_lora"]
+        self.assertEqual(len(lora_calls), 1)
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.With):
+                continue
+            has_mesh = any(isinstance(item.context_expr, ast.Name)
+                           and item.context_expr.id == "mesh" for item in node.items)
+            if has_mesh:
+                self.assertNotIn(lora_calls[0], list(ast.walk(node)))
+        mesh_keywords = [item for item in lora_calls[0].keywords if item.arg == "mesh"]
+        self.assertEqual(len(mesh_keywords), 1)
+        self.assertIsInstance(mesh_keywords[0].value, ast.Name)
+        self.assertEqual(mesh_keywords[0].value.id, "mesh")
 
 
 if __name__ == "__main__":

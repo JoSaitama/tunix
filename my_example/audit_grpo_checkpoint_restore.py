@@ -220,9 +220,17 @@ def restore_checkpoint(args, checkpoint, output, report):
                        "lora_rank": args.lora_rank, "lora_alpha": args.lora_alpha,
                        "backbone_revision_verified_against_historical_run": False}
     mesh, _ = make_mesh((4, 1))
-    with mesh, suppress_monitoring_scalars(jax):
+    # Match my_example.main: load_model enters its mesh internally; apply_lora's
+    # Qwix dummy forward runs BEFORE its internal parameter-resharding context.
+    # Gemma's dummy batch is 2. Wrapping that forward in fsdp=4 constrains its
+    # activation dimension 0 to an impossible 2/4 split, before any restore.
+    # Do not change the training batch, model implementation or checkpoint.
+    with suppress_monitoring_scalars(jax):
         base = load_model(model_path, resolve_model_config(args.model_id), mesh)
-        actor = apply_lora(base, LoraConfig(rank=args.lora_rank, alpha=args.lora_alpha), mesh)
+        actor = apply_lora(base, LoraConfig(rank=args.lora_rank, alpha=args.lora_alpha), mesh=mesh)
+    report["model"]["lora_initialization_context"] = "outside_active_mesh_same_as_training_main"
+    write_report(output / "restore_report.json", report)
+    with mesh, suppress_monitoring_scalars(jax):
         initial_state = nnx.state(actor, nnx.LoRAParam)
         initial_summary = parameter_summary(jax, initial_state)
         target = jax.tree.map(
