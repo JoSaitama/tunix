@@ -13136,3 +13136,257 @@ This file tracks engineering changes made in this repository.
 - 输出：新根目录 logs/grpo_gsm8k_dtv_batch_flip10%_seed5_clean_<timestamp>，checkpoint/model/tensorboard/results及nohup.log/pid/exit_code均在该目录；config.txt明确seed、score、scope、ratio、quota_policy、noise，百分号作为普通文件名字符。
 - 验证：只读核对新launcher的环境变量及路径覆盖，`git diff --check -- develop.md`通过；不重复已通过测试。命令清除policy/PODS/DS/CPU残留，设置独立四芯片拓扑，使用项目解释器PATH而非复制的activate。
 - 风险/待办：使用全新checkpoint目录；累计10%不是逐batch10%硬上限，负分不足实际率更低。服务器容量、实际训练/评测/退出码待用户执行观察。
+
+
+## 2026-11-08 — Norm top50 HBM 服务器预检通过
+
+- 改动范围：无代码改动；只读核对测试PASS条件与用户日志，更新本 `develop.md`。
+- 证据：run20261108_135412/hbm/hbm_report.json打印PASS，随后NORM TEST STAGE PASSED；源脚本仅在3个实际actor updates、每次四组各保留2/4且norm排名正确、合成压力非零梯度、全valid256+768形状、全部4设备峰值计数可用且余量>=默认5%时打印PASS。用户尚未贴原始余量数值，不编造更精确余量。旧run20261108_131637的clean/mismatch两个真实smoke和原eval导出已通过，现可进入首个正式seed。
+- 进度条说明：日志显示2/691属于显示刷新，结束前代码明确断言train_steps==3；691是保留原LR schedule预算，不表示此次压力测试实际训练691步。前三步含编译，不能拿该ETA推完整seed耗时。
+- 验证命令与结果：静态读取test_gradient_norm_hbm.py/test_gradient_norm.sh的验收分支；`git diff --check -- develop.md`通过。本机无新测试、无服务器操作、无算法/参数改动。
+- 边界/下一步：通过的是小规模执行/保存/接口与实测HBM预检，不是性能收益或任意未来输入永不OOM的保证。建议先正式mismatch20/seed5，再检查完整pre/post与选择记录后决定剩余seeds；不自动启动训练，不重跑已经通过的smoke/utility。
+
+
+## 2026-11-08 — 提供 norm top50 mismatch20/seed5 正式 nohup 命令
+
+- 改动范围：无代码改动；只读核对norm单次/suite启动脚本与PODS/DS命名规则，更新本 `develop.md`，未实际启动或操作服务器。
+- 修改文件列表：`develop.md`。
+- 启动范围：仅当前worker的四本地TPU、单逻辑process0；suite --seeds5 --mismatch0.2，不排队其他seed。清除CPU/PODS/DS和norm smoke目录/结果目录覆盖，保留原.env奖励模式；不传入缩短训练/跳过评测参数，仍按当前冻结launcher默认完整训练与pre/post1319保存，不对正式训练设置utility45分钟timeout。
+- 命名：正式结果为 `logs/rebuttal_grpo_gsm8k_gradient_norm_top50_seed5_mismatch0.2_<YYYYMMDD_HHMMSS>/`；launch日志/退出码/PID在logs/launch，suite状态记录单独目录；只有时间戳，无随机后缀。内含原checkpoint/model/results/tensorboard及norm selection和实际runtime_config。
+- 验证命令与结果：nohup片段bash -n与git diff --check通过；前述服务器smoke/HBM通过记录沿用，没有重跑。正式生成长度继续与当前PODS/DS launcher一致，不把768压力长度作为新正式覆写。
+- 风险/待办：同worker现有模型任务时launcher拒绝而不kill；首seed结束后核对退出码、pre/post metrics与50%选择记录，再决定后续四seed，当前未启动五seed。
+
+
+## 2026-11-09 — 准备 DTV flip10% 剩余四个 seed 的启动命令
+
+- 改动范围：无代码改动。仅更新 `develop.md`，提供在 seed5 同一服务器、仓库和环境执行的 nohup 队列命令。
+- 修改文件列表：`develop.md`。
+- 用户回传：seed5 效果不错。未取得具体指标，未据单 seed 改动实验参数。补跑 0、13、21、42，沿用 clean GSM8K、batch DTV、accuracy reward、累计翻转上限 .1、原训练预算和完整 1319 条 pre/post 评测。
+- 输出和运行：四个 seed 顺序执行，每个使用含 flip10% 和 seed 的独立新目录。模型、checkpoint、TensorBoard、结果、config.txt、nohup.log 和 exit_code 各自保存。队列记录当前目录、PID、退出码和每个 seed 的开始/结束状态，训练失败时停止。
+- 验证命令与结果：静态核对原 flip 和 GRPO launcher、既有五 seed 设置及路径参数。`bash -n` 检查外层命令和后台 heredoc 内容均通过，`git diff --check -- develop.md` 通过。
+- 风险/待办：尚未运行服务器命令或核验结果。保留四轮模型与 checkpoint 需要按 seed5 实际占用检查可用空间。
+
+
+## 2026-11-09 — 提供 Norm top50 mismatch20 剩余四个 seed 的启动命令
+
+- 改动范围：无代码改动；仅更新 `develop.md`。沿用 seed5 的正式配置，在同一空闲 worker 上顺序补跑 0、13、21、42，mismatch0.2，不重跑 seed5。
+- 输出：各 seed 独立保存至原 `logs/rebuttal_grpo_gsm8k_gradient_norm_top50_seedN_mismatch0.2_<YYYYMMDD_HHMMSS>/` 格式；保留完整训练、pre/post 评测和原产物。后台队列记录日志、PID 和退出码，单轮训练失败后停止。
+- 验证：`run_gradient_norm_suite.sh --seeds 0 13 21 42 --mismatch 0.2 --dry-run` 核对四条命令的 seed、噪声比例、四芯片拓扑和输出路径；后台命令 `bash -n`、`git diff --check -- develop.md` 通过。
+- 风险/待办：未连接服务器或启动训练；启动前确认当前 worker 空闲，并以 seed5 的实际产物占用检查四轮所需磁盘空间。
+
+
+## 2026-11-09 — ziao2 worker 1 同步 PODS 代码并准备 clean 五 seed
+
+- 改动范围：无代码改动；仅更新 `develop.md`。PODS 在 `for_GRPO_8kBaseline`；worker 0 只 fetch 并打包该提交的指定源码路径，不切换工作树或合并当前分支；worker 1 不需要 Git。
+- 同步：`gcloud ... scp --worker=1` 只传源码归档及其 SHA256，不传训练结果、数据、`.env`、虚拟环境或 `.git`。worker 1 校验压缩包、备份被覆盖文件后覆盖式安装，不删除其他文件；安装后校验归档内逐文件 SHA256。
+- 启动：ziao2 worker 1 空闲且空间充足时，顺序跑 PODS clean `5 0 13 21 42`，mismatch=0，每题生成4/保留2，保留原训练与评测预算；现有 suite 强制使用当前 worker 的四颗本地 TPU，命名沿用 `rebuttal_grpo_gsm8k_pods_seedN_mismatch0_<timestamp>`。
+- 验证：检查归档内容及分支路径；PODS suite 五 seed dry-run、launcher shell 语法和 `git diff --check -- develop.md` 通过。未访问服务器、同步或启动，worker 1 的环境、容量和完成状态待用户确认。
+- 命令细节：归档只选 `my_example`、`tunix`、`pyproject.toml`；已核对本地远端跟踪分支的归档含 PODS launcher，无 `.env`、`logs` 或 venv。worker 0 的工作树保持原状，worker 1 的已有数据、环境和日志不随代码覆盖。
+
+## 2026-11-09 — 提供 PODS mismatch20 四 seed 评测结果提取命令
+
+- 改动范围：无代码改动；仅更新 `develop.md`。按 ziao1 worker 1 已列出的 seed 0、13、21、42 目录和时间戳读取评测 JSON，每 seed 一行，完整保留 pre/post 的 accuracy、partial accuracy、format accuracy、num_correct 和 total，不计算汇总。
+- 验证：只读核对 `my_example/save_results_to_my_result.py` 的 `__eval_accuracy__meta.json` 文件名和用户提供的 JSON 结构；`git diff --check -- develop.md` 通过。未访问远端文件，实际数值待服务器运行命令输出。
+- 复用方式：命令接受 method、mismatch 和可选 seed 列表（不指定则扫描现有匹配目录），可切换 `pods`/`ds` 或单取 seed 5；按 JSON 数字原文生成 TSV，缺失、非零退出和重复完整记录显式提示，不擅自合并或选择重跑结果。
+
+## 2026-11-09 — 核对 PODS 五 seed mismatch20 结果与原文比较口径
+
+- 改动范围：无代码改动；仅更新 `develop.md`。根据用户贴出的五 seed 评测和本地 rebuttal 计划中的投稿表 1 数值拟定回复；未访问服务器、未启动训练。
+- 验证：从用户的 1319 题正确数复算 PODS post accuracy 均值 47.081122%、样本 SD 1.049155 pp，pre 47.232752%；投稿同条件 vanilla 47.31%、DTV 54.13%。核对 PODS TMLR §4.1、Fig. 3、Appendix A.2/Table 2（https://openreview.net/pdf?id=MfHOmgqVXM），以及本地 PODS launcher、选择/advantage 路径、组内 reward rank reversal。`git diff --check -- develop.md` 通过。
+- 范围与待办：固定生成预算 Gemma 3 1B 的 n=4/m=2 对比不是原文单卡 3B 的 n=64/m=16 时间曲线复现。rank reversal 保留分数多重集与可达最大方差，唯一极值时保留同一对但对其 advantage 反号；这是机制性质，不是已证实的最终分数原因。补 clean 后优先按各条件同 seed 比较 PODS−Vanilla；不依据汇总均值断言显著性或纯模型/TPU效应。
+
+## 2026-11-09 — Clean GSM8K Vanilla/DTV/DTV-Loo 墙钟与 HBM 实测设计审计
+
+- 改动范围：无代码改动；仅更新 `develop.md`。用户要求先审计与提案、同意后再实现；未初始化 JAX/TPU、连接服务器、访问 Cloud Storage、提交或推送。
+- 只读核对：`run_seeded_full.sh` 三路 wrapper、`run_grpo_gemma.sh`、`main.py`/`train.py`/`config.py`、`RLLearner.train`、`GRPOLearner._generate_and_compute_advantage`、actor 路由与三种 `_train_step`、`PeftTrainer` 计时/metric/存盘、sampler token 长度、旧结果导出和 HBM 诊断。当前 CLI 路径为 4 prompts×4 completions、μ=1、默认不累积、691 更新；须在实际运行断言配置并核对历史 override，CLI 生成上限是 768，dataclass 独立默认 512。Vanilla 不走 valuation/逐样本梯度；DTV/LOO 额外 old-policy logps 与融合 valuation+update 保留。
+- 发现：actor step_time 在已准备好的 batch 之后计时，计时点在 throttle 最终等待、aux 日志及 checkpoint 前；tqdm 不是严格完整迭代窗口。DTV 无原逐样本 JSONL；LOO 路径在 decisions_path 开启时逐步搬运/序列化/写出，关 path 跳过 host 端但不裁剪 JIT 返回的诊断数组。TensorBoard 标量转 host 与缓冲、CSV/图训练后导出、Orbax 周期和 close 强制存盘须分别处理。
+- 待批准：只在 opt-in benchmark 接完整 RL iteration 边界；保持 691 原调度，独立 15+50（可配）停止；统一关正式 I/O 和 eval，按现有 host rollout 输出计 token，边界同步与记录编译，内存缓冲后导出。另用单独进程/同配置采 XProf 与可用的运行时内存计数，验证常驻与设备覆盖，窗口峰值与累计计数/快照分列；可选原诊断开关对照、旧五 seed 全作业时长另列。未提供或填入任何实测时间/内存数值。
+- 验证：本轮仅代码阅读与对照 JAX/XProf 公开文档，`git diff --check -- develop.md` 通过；运行时计数支持、编译事件、初始 LoRA 一致性及历史时间边界均须实测/核验。
+
+## 2026-11-09 — 实现 clean GSM8K 三路 wall-clock / HBM benchmark（默认关闭）
+
+- 新增 `my_example/rebuttal/grpo_benchmark.py`、`run_grpo_benchmark.sh`、`grpo_benchmark.md` 与 `tests/my_example/grpo_benchmark_test.py`。修改 `my_example/main.py`、`tunix/rl/rl_learner.py`、`tunix/rl/grpo/grpo_learner.py`、`tunix/sft/peft_trainer.py`、`tunix/rl/self_inf_trainer.py`、`tunix/rl/self_inf_loo_trainer.py`、本日志。原 shell launcher、配置/CLI、trainer 路由、模型初始化、RobustTrainer 及训练公式不改。
+- 测量：新 runner 调用原 `run_grpo_gemma.sh`，复用正式 `baseline/group_policy/group_loo_policy` 的 actor；clean seed13、shuffle55、Gemma3-1B 4×4/256–768、原 691 步调度保持。完整外层 iteration 独立停止，检查每轮 4×4 与边界 Optax MultiSteps/NNX/actor 三个计数一致；窗口首尾 drain、内部无新同步；按 sampler 已在 host 的非 padding completion tokens 计吞吐。初始 LoRA SHA256、模型 revision、环境/拓扑、prompt 顺序、分段 annotation、窗口内 JAX 编译日志与含/不含标记步摘要均保留。
+- 关输出：训练模式不加载测试集、无周期 eval、无 Orbax manager/最终保存、无 merged export、无旧 CSV/图。quiet 不创建 TensorBoard backend、不计算/搬运纯日志 aux、不写 selection JSONL；真实 rollout/reward/gradient/update 不变。可选 timing/on 恢复各自原诊断（仅 LOO 有 JSONL），关闭 checkpoint/eval 不变，结束 flush 单独计时。
+- HBM：memory 模式独立新进程，窗口内采 XPlane/阶段标记，记录每设备初始化、首尾 runtime allocator counters；累计高水位不当窗口总 HBM。只有人工核对 XProf Memory Profile 的窗口、四设备和常驻分配后，`xprof-peaks` 才汇总经核对的 per-device/max；未验证项为 null。无实测时间/显存数字。
+- 验证：本机 JAX_PLATFORMS=cpu 的 benchmark 单测 9 项通过（含真实小型 NNX/Optax counter 和 barrier），Ruff E9/F、launcher/文档 shell 语法、三方法×timing/memory + LOO diagnostics-on dry-run、`git diff --check` 通过。旧 `self_inf*trainer_test.py` 本机 import 被未安装的 `metrax` 阻断，需在已有 TPU 虚拟环境以 CPU-only 复核；TPU 1+2 smoke、XProf 覆盖和所有正式实测未运行。
+- 待用户执行：精准暂存 benchmark 文件及本条 develop 日志，提交推送，TPU 同一空闲 worker pull 后核对 SHA、CPU 检查、六个 1+2 smoke 和 report cross-check。确认烟测与 HBM 能力后才跑 15+50 主实验；旧五 seed 的完整 691 步作业时间另列。未初始化 TPU、未连接服务器或 Cloud Storage、未提交/推送/拉取。
+
+## 2026-11-09 — 准备 ziao1 worker 1 的 GRPO+DS clean 五 seed 队列
+
+- 改动范围：无代码改动；仅更新 `develop.md`。复用此前在该 worker 跑 mismatch20% 的 DS checkout 和环境，不要求同步 wall-clock benchmark 改动，不改变已有奖励模式。
+- 启动参数：`--seeds 5 0 13 21 42 --mismatch 0 --ds-max-generation-batches 20`，保持原训练与 pre/post 评测预算；只在物理 worker 1 的四颗本地 TPU 上运行，逻辑 TASK_ID 仍为 0。产物按原 `rebuttal_grpo_gsm8k_ds_seedN_mismatch0_<timestamp>` 命名。
+- 验证：现有 suite 五 seed dry-run、nohup 片段 `bash -n`、`git diff --check -- develop.md` 通过。启动前检查同 worker 无训练、磁盘空间足够；任一 seed 训练非零退出则队列停止。未连接 TPU、未启动或同步训练。
+
+
+## 2026-11-09 — 核对 A1 的 GSM8K Group Policy-DTV / DTV-Loo 计算逻辑
+
+- 改动范围：无代码改动。仅更新 `develop.md`。核对 A1 英文草稿中的评分、mask、KL、优化器与 reward rank reversal。
+- 修改文件列表：`develop.md`。
+- 计算核对：投稿配置记录对应 group_policy/group_loo_policy。每组4个，GRPO advantage 用全部4个 observed rewards 计算一次。LoRA policy gradient 用 beta=0 评分。DTV 分数 (self+cross)/4，LOO 分数 cross/3，LOO 不重算 advantage。默认 DTV 非负保留，LOO 非负保留且每组25% minimum retention，低于保留数时按最高有限分数补足。最终在该更新保留的完整 policy+beta*KL 梯度上按保留数平均，再做全局梯度裁剪和 AdamW。独立 flip10% 运行的 batch/full-gradient 定义与投稿 group/policy-score 分开记录。
+- 一阶表述：固定 rollout、原组 advantages、old-policy log-probabilities（缺省 stop_gradient 路径取 checkpoint 值）与参数位置。在可微点对评分用 policy 梯度走微小负梯度步，参考集合平均 policy loss 的一阶变化为 -eta*score。DTV 参考含自己，LOO 参考只含另外3个。该导数不能替代对真正 mask 后 policy+KL/AdamW 更新及独立 clean objective 的测量。
+- 验证命令与结果：静态核对 seeded launcher、GRPO learner、self-inf trainers、reward_rank_noise.py 与 optimizer。用 Python 逐行解析本地五份 group_loo_policy JSONL 的 3455 条记录（13820 个 group），断言分数分母、self/cross 关系和 cap 后 mask 均匹配，807 组触发最低保留。读取本地 ICLR2027.pdf 确认文件为评审汇总，不能作为投稿 Table 1/Figure 1 原件；未独立复核正式结果表或重跑训练。`git diff --check -- develop.md` 通过。
+- 风险/待办：最终发表数字与 Appendix E.2 原文需对照投稿稿件。上面日志统计不用于推断全部论文 run 或任一 Clean/Mismatch 子条件的触发率。
+
+## 2026-11-10 — Norm top-50% mismatch20 五 seed 结果扫描
+
+- 改动范围：无代码改动；仅更新 `develop.md`。沿用已有 `grpo_eval_table` 函数，方法名从 `norm` 改为 launcher 的实际目录字段 `gradient_norm_top50`，输出到独立 TSV，保留原 pre/post 表结构和精度。
+- 验证：只读核对 `run_gradient_norm_baseline.sh` 的 run 目录和结果标签、`save_results_to_my_result.py` 的 JSON 后缀；`git diff --check -- develop.md` 通过。未读取服务器产物或复算指标。
+- 风险/待办：函数只扫描当前 worker 的本地 logs；检查表头加五行，缺 seed 时核对该 worker 是否保存完整 eval JSON。原命令使用 `>` 指向 PODS TSV，若已有同名文件，可能已被覆盖。
+
+
+## 2026-11-10 — 修正 Jason 新 v5p-8 节点的 flip10% 重跑命令
+
+- 改动范围：无代码改动。仅更新 `develop.md`，提供 seed0/13 的手动启动命令，未连接新节点。
+- 修改文件列表：`develop.md`。
+- 定位：用户粘贴的外层 cd 已换 Jason，后台仍 cd 到 lhf，可能在创建 seed 日志之前以 1 退出。原 `test -d data/train` / `test -d data/test` 也是静默失败点。`my_example/data.py` 会创建目录并使用 TFDS download=True。
+- 修正：通过参数传入外层仓库路径，保留可直接核查的 queue/launch.sh，首行记录节点/路径，ERR trap 记录失败行，EXIT trap 记录退出码。移除数据缓存存在性硬检查，使用 JAX_PLATFORMS=tpu 并在实际启动前打印导入路径及设备。保持 clean GSM8K、batch DTV、累计 flip10%、原训练和完整评测参数，顺序重跑 0/13。
+- 验证命令与结果：官方 Cloud TPU v5p 规格核对 2x2x1/4 chips/1 host。外层与后台脚本 bash -n 均通过。模拟仓库目录缺失，验证 stderr 有错误和失败行且 exit_code=1。`git diff --check -- develop.md` 通过。
+- 风险/待办：服务器 Python/libtpu、数据下载、模型凭据和实际四设备枚举仍待远端启动验证。启动前错误看 queue.log，训练内错误看该 seed 的 nohup.log。
+
+## 2026-11-10 — 准备 ziao2 worker 1 的 Norm top50 clean 五 seed 队列
+
+- 改动范围：无代码改动；仅更新 `develop.md`。在空闲 worker0 拉取 `for_GRPO_8kBaseline`，按拉取后的提交只归档 `my_example`、`tunix`、`pyproject.toml`；复制归档、源 SHA 及校验清单到 worker1，备份覆盖文件并校验安装文件，不同步 .env、环境、数据、日志或模型。
+- 启动：复用 Norm 正式 launcher，clean `--mismatch 0`，顺序 seed 5、0、13、21、42，保持原训练和完整评测。只用物理 worker1 的四颗本地 TPU（逻辑 TASK_ID=0）；命名 `rebuttal_grpo_gsm8k_gradient_norm_top50_seedN_mismatch0_<timestamp>`。
+- 验证：静态核对本地远端跟踪分支的归档、两个 launcher 的 Shell 语法和五 seed clean dry-run，确认实际 variant 和噪声参数；`git diff --check -- develop.md` 通过。未连接、拉取、同步或启动远端任务。
+- 风险/待办：worker0 更新与 worker1 安装/训练前分别确认空闲；检查 worker1 的现有 .env 权限、日志可写和磁盘容量。需保留同 mismatch 实验的奖励模式；本机未提交 benchmark 文件不属于拉取后的提交。
+
+
+## 2026-11-10 — 核对 PODS / GRPO+DS 实现和四篇方法的干预位置
+
+- 改动范围：无代码改动。仅更新 `develop.md`，检查实现与正式 opt-in 入口，对照四篇原文。
+- 修改文件列表：`develop.md`。
+- PODS：`train.py` 读取 TUNIX_PODS_KEEP_COUNT，连接 PODSMixin，默认同题 n=4/m=2，按 observed reward 在每组选择最大方差子集并重算子集 advantage。reference/old logps 在全 n 生成后随字段 gather，actor update 使用 m。等 reward 组仍保留 m，不补采样。
+- GRPO+DS：TUNIX_DYNAMIC_SAMPLING=1 接入 DynamicSamplingMixin，以 observed dense reward std>0 筛完整组，从训练分区继续生成凑足 4 组，保留原组 advantage，最多 20 个候选生成批次，失败不提交部分更新。代码独立于 dapo_learner.py 的 TODO flag，仅适配 DAPO dynamic sampling。
+- 文献核对：arXiv:2001.06782v4 PCGrad §2.3/§5、2110.14048v1 CAGrad §3/§5、2504.13818v5 PODS §3、2503.14476v1 DAPO §3.2。PCGrad 与 CAGrad 是梯度处理，原文已有 multi-task RL。当前生产源码和 launcher 未发现两者实现。可以把同题 completion loss 当局部目标做适配，需定义 KL、聚合尺度、PCGrad 顺序以及 CAGrad c/solver；固定多任务目标的收敛条件不能直接套到 on-policy GRPO。
+- 验证命令与结果：两个 baseline launcher `bash -n`/`--dry-run` 通过，显示 PODS keep2 与 DS cap20。`JAX_PLATFORMS=cpu /tmp/dtv-rebuttal-venv/bin/python -m unittest discover -s tests/my_example -p dynamic_sampling_test.py` 23 项通过。PODS 在该 venv 发现缺 metrax 导致导入失败，改用 bundled Python `unittest discover -s tests/my_example -p 'pods*test.py'` 11 通过/2 个 JAX/Flax 集成项跳过。`git diff --check -- develop.md` 通过。
+- 风险/待办：本轮未重跑 TPU，也未独立验收完整多 seed 实验结果。DS 额外 rollout/token 预算应与 update 数分别报告，PODS 少 actor 样本不等于生成与 reference 推理同比减少。
+
+
+## 2026-11-10 — 核对 PCGrad / CAGrad 原文目标与 DTV 平均参考的区别
+
+- 改动范围：无代码改动。仅更新 `develop.md`。
+- PCGrad 原文：arXiv:2001.06782v4 §2.1/§2.3 Algorithm 1，总目标是任务分布下 loss 期望，有限任务写作 loss 和。每次投影判据为已经逐步修正的 g_i^PC 与另一任务未修正的 g_j 的内积。参考随 j 更换，原算法按随机顺序遍历其他任务，最后对修正向量求和。
+- CAGrad 原文：arXiv:2110.14048v1 Eq.(1)-(3)，总体目标为任务平均 loss。每步在平均梯度 g0 周围半径 c||g0|| 的球中选 d 最大化 min_i g_i·d。g0 是约束中心，判定局部改善的向量是待求解的 d；最差内积仍可能为负。
+- DTV 对照：若使用完全相同的一组 policy 梯度，DTV 逐项 score=g_i·g0 对应 CAGrad 在候选 d=g0 时的局部改善量。DTV 固定参考以决定 mask，CAGrad 用全部局部目标寻找新方向；LOO 改为逐候选排除自身，PCGrad 则逐个配对。当前 batch/full-gradient flip 仍以固定平均方向评分，再按配额翻转。
+- 验证命令与结果：查阅两篇原文的公式及 PCGrad Algorithm 1，沿用上一轮已经核对的本地 DTV group score/mask 路径。`git diff --check -- develop.md` 通过。
+- 风险/待办：这里是单步几何对照，尚未进行 PCGrad/CAGrad 的 GSM8K 适配或性能测量。
+
+
+## 2026-11-10 — 定义 GSM8K per-completion PCGrad / CAGrad baseline 的决策项
+
+- 改动范围：无代码改动。仅更新 `develop.md`，解释原算法与适配口径。
+- 修改文件列表：`develop.md`。
+- PCGrad：原文 Algorithm 1 对每个 i 均匀打乱其余任务后遍历，逐步修正的 g_i 与固定原始 g_j 配对。GSM8K group 适配中其余3条都作为潜在参考。建议为可复现顺序固定 seed/迭代/组/样本键，保留所有样本，并用原组大小归一化以匹配 Vanilla 的平均梯度尺度。
+- CAGrad：论文 Eq.(3) 定义 d 为 g0 周围球内最大化最小内积的解。用4维 simplex dual 与 Gram 矩阵求解，非退化时按 g0+c||g0||g_w/||g_w|| 恢复 d。实现前冻结 c、solver、容差、输出缩放与零/退化分支，不能假设零 g_w 可无条件用 g0 代替。
+- 适配决策：可以操作 policy 或 policy+KL。对齐投稿 group policy 评分口径时，建议每题4条、固定原 advantage，在 LoRA policy 梯度上做组内变换，再加全样本平均 KL 一次，按原 clipping/AdamW 更新。现有 DTV 使用 full mask，故 KL 保留范围需透明报告，或增加一致 KL 口径的消融。若比较 batch/full-gradient flip，单独定义 batch/full-gradient 版本并匹配 scope。
+- 验证命令与结果：复读 PCGrad §2.3 Algorithm 1 及 CAGrad §3.1 Eq.(3) 和 dual，`rg` 核对本地 beta=0 score 和完整梯度 mask、GRPO loss reduction、AdamW/clip 入口，`git diff --check -- develop.md` 通过。
+- 风险/待办：此处是 baseline 定义建议，未实施或运行。固定 c 应基于事前设定或验证集，不在 GSM8K test 上选参。
+
+
+## 2026-11-10 — 核对 PCGrad / CAGrad 原文数据与模型及 GSM8K 贴合度
+
+- 改动范围：无代码改动。仅更新 `develop.md`，按原论文和作者代码核对实验设定。将用户所说 GS 按上下文理解为 GRPO+DS。
+- 修改文件列表：`develop.md`。
+- PCGrad：arXiv:2001.06782v4 §5、附录 C/E/F/J。监督任务为 CIFAR-100 coarse groups、CelebA 40 属性、NYUv2/CityScapes dense prediction、MultiMNIST。对应 CNN/routing、共享 ResNet 属性头、SegNet+MTAN 和 MultiLeNet（后两份继承模型按 Sener/Koltun model_selector.py 核对）。Meta-World MT10/MT50 和 pushing goal-conditioned RL 使用 off-policy SAC，actor/critic 为六层全连接，宽度分别160/300/200。按 task replay buffer 分层抽样并处理每 task 的 actor/critic 梯度。
+- CAGrad：arXiv:2110.14048v1 §5、附录B。Multi-Fashion+MNIST 用缩小 LeNet，NYUv2/CityScapes 用 SegNet+MTAN，CIFAR-10 半监督用 ARML 和 WRN-28-2；Meta-World MT10/MT50 用 CARE/MTRL 的 state-SAC。作者脚本/YAML 核实 state-SAC 及 identity encoder，附录未逐层给出网络宽度，不套用 PCGrad 数字。
+- 贴合度：PODS 原文含 GSM8K GRPO（Qwen2.5/Llama3.2 3B 等）；DAPO 为 Qwen2.5-32B、DAPO-Math-17K、AIME24，但 DS 直接处理 GRPO prompt group。PCGrad/CAGrad 原文梯度以持久任务的多样本 loss 定义，GSM8K 同题 completion 是短期、组归一化耦合的 rollout，需额外定义局部目标、scope、KL 和梯度聚合。因此适合梯度改写对照，直接 rollout 选择可比性低于 PODS/DS。
+- 验证命令与结果：查阅上述论文及作者配置，`git diff --check -- develop.md` 通过。无训练执行或新实验结论。
+
+
+## 2026-11-10 — 澄清 PCGrad / CAGrad 原文的 RL 设定
+
+- 改动范围：无代码改动。仅更新 `develop.md`。
+- 修改文件列表：`develop.md`。
+- 核对结论：原文监督实验同时覆盖图像分类与分割/深度等密集预测。原文 Meta-World RL 实验采用 off-policy SAC 和 replay buffer，PPO 是另一种 on-policy 算法。与当前 GRPO GSM8K 的主要区别是任务梯度来自持久机器人技能的多条交互数据，而非同 prompt 的单条 completion。
+- 验证命令与结果：沿用已查阅的 PCGrad §5.2/附录 C、CAGrad §5.3/附录 B.3 及原文引用。`git diff --check -- develop.md` 通过。
+- 风险/待办：无新增实验；per-completion 适配仍属待定义对照。
+
+## 2026-11-10 — 核对 wall-clock smoke 找不到 launcher 的提交状态
+
+- 改动范围：无代码改动；仅更新 `develop.md`。本机暂存区已有 10 个 benchmark 实现、说明和测试文件，`develop.md` 及其他 rebuttal 文档未暂存；本机 HEAD 与本地记录的远端跟踪分支均为 `ed99b8b`，不包含 benchmark launcher。
+- 定位：`git add -p -- develop.md` 是逐块暂存交互，不是提交或推送；Ctrl+C 退出时仍保留已暂存的 benchmark 文件。远端 smoke 在调用首个 launcher 前因文件不存在退出，未开始训练。
+- 验证：`git status --short --branch`、`git diff --cached --name-status`、`git ls-tree` 与 `git diff --check`；未执行 commit、push、pull 或服务器操作。
+- 待办：用户确认暂存清单后仅提交这些 benchmark 文件并推送；待 worker0 快进拉取、核对完整 SHA 和 launcher 存在后再做 CPU 检查及原 1+2 smoke，不纳入无关文档。
+
+## 2026-11-10 — 提供 wall-clock smoke 只读检查与 nohup 队列
+
+- 改动范围：无代码改动；仅更新 `develop.md`。本机 HEAD 与远端跟踪引用已是 benchmark 提交 `530a1d0`；未查询 TPU 或读取远端 smoke 产物。
+- 用法：先查看六组 `exit_code`，全为零才用既有 offline checker 核对 1 warmup + 2 measured、实际更新、prompt/LoRA 一致性和 trace 文件。如果未启动，在空闲 worker 用 `nohup bash -s` 顺序运行六个短 smoke，保存队列 PID、日志和退出码，避免重启已运行的队列。
+- 验证：只读核对 launcher 和 checker；检查/启动片段 `bash -n`、`git diff --check -- develop.md` 通过。smoke 只做执行和采集验收；正式 15+50 墙钟与独立 HBM 仍待实测，不能把短 smoke 或 trace 文件存在解释成主表结果。
+
+## 2026-11-10 — wall-clock / HBM 六组 TPU smoke 通过
+
+- 改动范围：无代码改动；仅更新 `develop.md`。依据用户贴出的 `20261110_053348` 检查输出，timing/memory 各三方法均 exit=0 且 PASS，按原 691 调度，各完成 1 warmup + 2 measured 的实际 optimizer 更新，报告结构与跨组可比性检查通过。
+- 观测：六组均在第 2 迭代（测量首步）记录 XLA 编译；仅第 3 步未标编译，timing 中 Vanilla/DTV/DTV-Loo 为 1.551/2.653/2.522 秒，不能外推或写 reviewer 主表。各方法的 timing 和 memory 两步生成 token 分别均为 5111/5149/5122。memory 窗口外 teardown 约 171–195 秒，不计入主墙钟。
+- 验证与待办：只读核对用户附件和 checker/HBM 字段，`git diff --check -- develop.md` 通过；建议先后台运行正式 timing/off 三组，独立检查现有 smoke 的 XProf 四设备和常驻分配覆盖后再开长 memory profile。未读取远端 trace 或 memory.json，不能报告窗口峰值；未启动训练。
+
+## 2026-11-10 — 提供 wall-clock 正式 timing-only nohup 命令
+
+- 改动范围：无代码改动；仅更新 `develop.md`。在 ziao1 worker0 空闲时，由用户顺序运行 Vanilla、DTV、DTV-Loo，clean seed13、`timing/off`、各 15 warmup + 50 measured，保持原 691 步 LR 调度，不排队 memory。
+- 输出与验收：独立带时间戳的 benchmark 目录；队列 PID、日志、退出码与每组原始报告保留。训练失败则停止，三组完成后自动运行现有报告可比性检查。
+- 验证：核对 launcher 的 seed/噪声/单 worker 拓扑与退出码，nohup 片段 `bash -n` 和 `git diff --check -- develop.md` 通过。未连接远端或启动；HBM 仍待单独核实。
+
+
+## 2026-11-10 — 选择 PCGrad/CAGrad 对照的 GRPO 或 PPO 落点
+
+- 改动范围：无代码改动。仅更新 `develop.md`，给出 baseline 设计建议。用户明确冻结现有 DTV 口径，不增加 policy-only mask 消融作为实施前提。
+- 修改文件列表：`develop.md`。
+- 建议：为当前 GSM8K rebuttal 优先在同一 GRPO 路径做 groupwise per-completion PCGrad/CAGrad。固定同题4条、原 rollout/advantage 与 LoRA，变换 policy 梯度后补全样本 KL，再走原 AdamW/clip。两种新方法保留 all-sample KL，而已发表 DTV score-policy/full-mask 保持历史定义，按方法级对比披露区别。
+- 对照理由：当前 PPO 路径用 critic/GAE，普通 on-policy PPO 本身不提供持久多任务划分。若已有真实多任务 PPO，可作为独立 task-gradient 实验，但不能替代同 GRPO 目标的直接对照。
+- 实现顺序建议：先 PCGrad，复用逐 completion 梯度，随机投影次序可复现、按原4条求平均。CAGrad 复用同样输入，通过4×4 Gram 求组方向，冻结 c/solver/缩放和退化处理；c=0/no-op 校验退化 Vanilla。
+- 验证命令与结果：读取本地 PPO critic/GAE 路径及现有 policy-only LOO 的 KL 分解，复核 DeepSeekMath 与两篇梯度论文，`git diff --check -- develop.md` 通过。尚未实施或运行新 baseline。
+
+
+## 2026-11-10 — 澄清 PCGrad/CAGrad 对 GRPO KL 的可选处理
+
+- 改动范围：无代码改动。仅更新 `develop.md`。
+- 修改文件列表：`develop.md`。
+- 结论：两种算法均可直接接收逐 completion 的 policy+beta*KL 完整梯度。此时 KL 参与冲突判断和更新方向变换，聚合后不能再次加 KL。policy-only 变换再加全样本 KL 是另一种适配，便于对齐投稿 DTV 的评分信号。两篇原文均未规定 GRPO reference-policy KL 的拆分口径。
+- 对照边界：用户冻结 DTV。full-gradient PCGrad/CAGrad 是合理的独立 baseline，需披露其冲突依据含 KL，与 DTV policy-score/full-mask 的判据不同。PCGrad 修改各局部梯度的冲突分量，CAGrad 联合寻找靠近平均的一个更新方向。
+- 验证命令与结果：按此前已核对的 PCGrad Algorithm 1、CAGrad Eq.(3) 与本仓库 GRPO loss 分解复述，`git diff --check -- develop.md` 通过。未实施新 baseline。
+
+
+## 2026-11-10 — 核对 PCGrad 当前/参考梯度及 GRPO KL 影响的可测性
+
+- 改动范围：无代码改动。仅更新 `develop.md`。
+- 修改文件列表：`develop.md`。
+- 算法口径：PCGrad 对每条完成的当前投影副本，按随机排列逐次对照另外三条的原始梯度。CAGrad 以组平均为中心，优化一个共同方向，最差目标可随候选方向变化。DTV 对负分 completion 做本次更新的完整梯度 mask，LOO 有最低保留规则。
+- 本地实证边界：Python 解析五份现有 policy-only LOO selection JSONL，记录的 policy self norm² 为零的 completion 21727/55280（39.30%），四条均零的组 5416/13820（39.19%）。日志未记录同 rollout 的 total/KL 梯度，不能推断实际冲突翻号率。解析示例验证 3% 相对 KL 梯度即可在近正交 pair 把 -0.02 内积变为 +0.01，仅为说明。
+- 配对诊断设计：同 checkpoint/rollout/advantage 固定，复用 `utility_runtime.gradients(host, full=...)` 取 p 与 t，k=t-p 已含 beta。分别比较组内六 pair 符号、KL/Policy 范数和两种最终方向 `F(p)+mean(k)` 对 `F(t)`，固定 PCGrad permutation 或 CAGrad c/solver。可用独立 clean 固定 rollout loss 做局部同起点更新评估。
+- 验证命令与结果：读现有 utility runtime 及日志字段、运行 Python 只读计数与合成例；`git diff --check -- develop.md` 通过。未执行模型/TPU 或实施新 trainer。
+- 风险/待办：真实 KL 影响仍需服务器同 checkpoint 配对测量，且局部方向变化不能单独代表最终 accuracy。
+
+
+## 2026-11-10 — 确认 PCGrad 随机性与 rebuttal KL 口径
+
+- 改动范围：无代码改动。仅更新 `develop.md`。用户本轮仅需理论解释和一套可说明的 baseline 定义，不做 KL 额外实验。
+- 修改文件列表：`develop.md`。
+- 理论核对：PCGrad Algorithm 1 随机遍历其他原始梯度，最终方向由依序投影和聚合计算；顺序可影响结果。GRPO 的 KL 是训练策略相对 reference policy 的分布偏离惩罚，beta 加权其梯度，既可能改变方向也可能改变大小，不等价于学习率或参数步长约束。
+- 推荐口径：对组内 policy-only 梯度做 PCGrad/CAGrad，聚合后加一次原 batch 平均 beta*KL 梯度，再执行原 clipping/AdamW。原因是冲突信号与当前 DTV 的 policy-score 一致，KL 作为原 GRPO 正则保留。按方法级对比披露 DTV 现有 full-mask 与新 baseline 的 all-sample KL 范围。若选择 full-gradient 版本，KL 会参与冲突判据和向量变换。
+- 验证命令与结果：核对 PCGrad 原文 Algorithm 1 及 DeepSeekMath §4.1 的 reference KL loss，`git diff --check -- develop.md` 通过。
+- 风险/待办：本条是理论口径建议，无实证优劣结论。
+
+## 2026-11-10 — 澄清四条 completion 的 PCGrad 比较次数
+
+- 改动范围：无代码改动，仅更新 `develop.md`。四条 completion 各自作为当前项，按随机顺序与其余三条原始梯度比较，共 12 次有向检查。负内积才触发投影。
+- 验证：按此前查阅的 PCGrad Algorithm 1 核对双层循环，`git diff --check -- develop.md` 通过。无新增实验。
+
+
+## 2026-11-10 — 新增 GSM8K PCGrad / CAGrad opt-in baselines
+
+- 改动范围：同 prompt 四条 completion，新增独立 PCGrad 投影与 CAGrad 求解模块、共享 actor trainer 和 opt-in 路由。默认只处理 policy 梯度，保留完整 batch KL；include-KL 可选。
+- 当前修改文件：`tunix/rl/pcgrad.py`、`tunix/rl/cagrad.py`、`tunix/rl/gradient_conflict_trainer.py`、`tunix/rl/rl_cluster.py`、`my_example/config.py`、`develop.md`。
+- 验证与待办：启动器、数值/集成验证待补。默认路径使用普通全 batch 梯度加 policy 修正量，避免两份 per-completion gradient tree。CAGrad 在四条候选的低维 Gram 空间枚举原问题活动约束，待与独立参考求解器对照。
+
+- 完成文件：`tunix/rl/pcgrad.py`、`tunix/rl/cagrad.py`、`tunix/rl/gradient_conflict_trainer.py`、`tunix/rl/rl_cluster.py`、`my_example/config.py`、`my_example/rebuttal/run_gradient_conflict_baseline.sh`、`tests/rl/gradient_conflict_test.py`、`develop.md`。原 DTV、flip、RobustTrainer、RLTrainingConfig 和原 CLI/launcher 未变。
+- 算法与入口：每题四条保持原 rollout/advantage。PCGrad 以每个原始梯度为参考、按可复现随机顺序在 Gram 系数中投影，再按四条平均。CAGrad 在归一化 FP32 4×4 Gram 中枚举 15 个 active sets 求 Eq.(3) 原问题，默认 c=.5、无额外缩放。使用最小范数活动梯度作为等值面的计算基准，缓解弱梯度被相消。独立 launcher 参数 `pcgrad|cagrad`、`--include-kl`、`--cagrad-c`、`--dry-run`。include-KL 完整梯度直接变换；默认普通 batch full 梯度加 policy 修正，保留全 KL。
+- 验证命令与结果：`XLA_FLAGS=--xla_force_host_platform_device_count=4 JAX_PLATFORMS=cpu TUNIX_CONFLICT_TEST_ISOLATED=1 /tmp/dtv-rebuttal-venv/bin/python -m unittest discover -s tests/rl -p gradient_conflict_test.py` 9 项通过。含 PCGrad 直接向量对照、CAGrad 独立 SciPy primal oracle、弱梯度回归、四设备 NNX LoRA 两种 KL 更新、c=0、实际 opt-in/Vanilla/Robust 路由、launcher 参数。额外 100 组归一化随机/近重复/弱/零梯度压力复核，最大目标差 4.59e-8、半径超出 2.03e-8。初次压力中独立 SLSQP 过紧容差导致 line search 失败，放宽到 1e-9 后全量比较，并修复 CAGrad 大梯度基准的 FP32 相消。既有 DTV-flip 四CPU隔离回归 25 项通过。`bash -n`、两方法 `--dry-run`、py_compile、ruff E9/F、`git diff --check` 通过。
+- 风险/待办：本地测试使用 JAX 0.12/Flax 0.12 和显式隔离 trainer 基类导入。真实服务器 JAX 0.8.1/TPU 编译、显存及端到端训练尚未运行。CAGrad 活动集求解受 FP32 和 rank 容差影响。未提交/推送，未动用户既有 rebuttal 改动。
+
+## 2026-11-10 — 准备 GSM8K PCGrad / CAGrad 单 worker smoke
+
+- 改动范围与文件：新增 `my_example/rebuttal/test_gradient_conflict_smoke.sh`，同步 `develop.md`。复用正式 baseline launcher，在空闲 worker 核对单 JAX process、4 个本地 TPU 设备后顺序运行 PCGrad、CAGrad。两者均为 clean seed5、默认 policy-only 处理并保留全量 KL，CAGrad c=0.5；保留 4×4 rollout 和 256/768 长度，各做 2 次 actor 更新，训练前后各评测 4 题。
+- 验收：两步 TensorBoard actor loss 和冲突诊断均有限，未跳过样本，PCGrad 有投影次数指标。校验 step-2 LoRA checkpoint、训练后 restore 路径、合并模型产物和 pre/post 评测 JSON；任一失败退出，`--check-only` 复查已通过队列。投影次数和 accuracy 可为零，测试只验证执行链。
+- 验证命令与结果：新旧 launcher 分别 `bash -n`，两种方法按 smoke 参数 `--dry-run`，`git diff --check` 通过。使用模拟 TensorBoard 读入的合成产物验证 `--check-only` 通过完整目录并拒绝未结束队列、非有限指标。四设备 CPU 隔离 `gradient_conflict_test.py` 9 项复跑通过。
+- 风险与待办：本机未运行真实 TPU smoke，需检查服务器磁盘能保留两份合并模型、两套 checkpoint 及模型缓存。服务器真实 TensorBoard 写出、JAX/TPU 编译及 HBM 由 smoke 验收。未提交或推送，待用户运行并回传两个 PASS，再准备正式实验。

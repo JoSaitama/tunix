@@ -201,6 +201,13 @@ def config_from_args(argv: Optional[Sequence[str]] = None) -> Config:
         )
         os.environ["TUNIX_GRPO_NUM_GENERATIONS"] = str(args.num_generations)
 
+    if (
+        use_dynamic_batch_curation
+        and os.environ.get("TUNIX_DBC_VARIANT") == "gradient_conflict"
+        and args.num_generations != 4
+    ):
+        parser.error("PCGrad/CAGrad require four completions per prompt")
+
     model = ModelConfig(
         model_id=args.model_id,
         tokenizer_path=args.tokenizer_path,
