@@ -345,6 +345,7 @@ class PeftTrainer:
     self._mode: sft_metrics_logger.Mode = sft_metrics_logger.Mode.TRAIN
     self._has_aux = False
     self._pbar = None
+    self._benchmark_quiet = False
     self._flops_measured: bool = False
 
     self._train_steps, self._restored_custom_metadata = (
@@ -445,7 +446,7 @@ class PeftTrainer:
     optimizer.update(model, grads)
     if self._has_aux:
       loss, aux = out
-      return loss, aux
+      return loss, None if self._benchmark_quiet else aux
     else:
       return out, None
 
@@ -784,7 +785,7 @@ class PeftTrainer:
   ) -> None:
     """Training loop."""
     train_step, eval_step = self.jit_train_and_eval_step(skip_jit)
-    if not skip_jit:
+    if not skip_jit and not self._benchmark_quiet:
       logging.info(
           "Training with mesh: %s. Compiled train_step cache size: %s",
           pxla.thread_resources.env.physical_mesh,
@@ -808,7 +809,11 @@ class PeftTrainer:
     if eval_ds:
       self._run_eval(eval_ds, partial_eval_step)
 
-    if self.config.max_steps is not None and self._pbar is None:
+    if (
+        not self._benchmark_quiet
+        and self.config.max_steps is not None
+        and self._pbar is None
+    ):
       self._pbar = progress_bar.ProgressBar(
           metrics_prefix=self.metrics_prefix,
           metrics_logger=self.metrics_logger,
@@ -827,7 +832,7 @@ class PeftTrainer:
     actor_grad_acc_steps = self.config.get_with_default(
         "gradient_accumulation_steps", 1
     )
-    with utils.time_measure("Train loop"):
+    with utils.time_measure("Train loop", suppress_logging=self._benchmark_quiet):
       while True:
         self._prof.maybe_activate(self._iter_steps)
         with jax.profiler.StepTraceAnnotation(
@@ -930,14 +935,15 @@ class PeftTrainer:
           last_step_completion_time = current_time
 
           self._throttler.add_computation(train_loss)
-          self._buffered_train_metrics = self._buffer_metrics(
-              self._buffered_train_metrics,
-              loss=train_loss,
-              step=self._train_steps,
-              step_time_delta=step_time_delta,
-          )
-          # NB: put this after self._buffer_metrics is important
-          self._post_process_train_step(aux)
+          if not self._benchmark_quiet:
+            self._buffered_train_metrics = self._buffer_metrics(
+                self._buffered_train_metrics,
+                loss=train_loss,
+                step=self._train_steps,
+                step_time_delta=step_time_delta,
+            )
+            # NB: put this after self._buffer_metrics is important
+            self._post_process_train_step(aux)
           self._iter_steps += 1
           self._maybe_log_actor_heartbeat(
               status="done",
@@ -958,7 +964,8 @@ class PeftTrainer:
           ):
             self._train_steps += 1
             write_train_metrics_start = time.perf_counter()
-            self._write_train_metrics()
+            if not self._benchmark_quiet:
+              self._write_train_metrics()
             self._log_actor_phase_timing(
                 "actor_write_train_metrics_time",
                 time.perf_counter() - write_train_metrics_start,
@@ -1035,7 +1042,8 @@ class PeftTrainer:
     and closing the checkpoint manager and metrics logger.
     """
     close_write_train_metrics_start = time.perf_counter()
-    self._write_train_metrics()
+    if not self._benchmark_quiet:
+      self._write_train_metrics()
     self._log_actor_phase_timing(
         "actor_close_write_train_metrics_time",
         time.perf_counter() - close_write_train_metrics_start,

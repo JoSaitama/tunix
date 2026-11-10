@@ -3,6 +3,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 import os
 import shutil
+import time
 
 from flax import nnx
 import jax
@@ -80,6 +81,12 @@ def _suppress_jax_monitoring():
 
 
 def main() -> None:
+    benchmark = None
+    if os.environ.get("TUNIX_GRPO_BENCHMARK"):
+        from .rebuttal.grpo_benchmark import Benchmark
+
+        benchmark = Benchmark.from_env()
+
     try:
         import jax
         jax.monitoring.clear_event_listeners()
@@ -111,11 +118,13 @@ def main() -> None:
         train_micro_batch_size,
         max_train_examples,
     )
-    test_dataset = batch_dataset(
-        get_dataset(cfg.data.test_data_dir, "test", cfg.data.source),
-        cfg.data.test_micro_batch_size,
-        max_eval_examples,
-    )
+    test_dataset = None
+    if benchmark is None:
+        test_dataset = batch_dataset(
+            get_dataset(cfg.data.test_data_dir, "test", cfg.data.source),
+            cfg.data.test_micro_batch_size,
+            max_eval_examples,
+        )
 
     def _safe_len(dataset):
         try:
@@ -169,11 +178,16 @@ def main() -> None:
     if train_split_len is not None or val_split_len is not None:
         print(f"Split sizes: train={train_split_len}, val={val_split_len}")
 
+    if benchmark:
+        benchmark.check_config(cfg, max_steps)
+    load_start = time.perf_counter() if benchmark else None
     model_path = download_model(cfg.model)
     model_config = resolve_model_config(cfg.model.model_id)
 
     mesh, mesh_counts = make_mesh(cfg.runtime.mesh_counts)
     print(f"Using mesh counts: {mesh_counts}")
+    if benchmark:
+        benchmark.check_topology(jax, mesh)
 
     gemma3 = load_model(model_path, model_config, mesh)
     lora_policy = apply_lora(gemma3, cfg.lora, mesh=mesh)
@@ -184,16 +198,16 @@ def main() -> None:
         eos_tokens.append(tokenizer.eos_id())
         print(f"Using EOS token IDs: {eos_tokens}")
 
-    sampler = build_sampler(
-        lora_policy,
-        tokenizer,
-        model_config,
-        cfg.grpo.max_prompt_length,
-        cfg.grpo.total_generation_steps,
-        eos_tokens,
-    )
-
-    if cfg.runtime.eval_before_train:
+    if benchmark is None:
+        sampler = build_sampler(
+            lora_policy,
+            tokenizer,
+            model_config,
+            cfg.grpo.max_prompt_length,
+            cfg.grpo.total_generation_steps,
+            eos_tokens,
+        )
+    if benchmark is None and cfg.runtime.eval_before_train:
         num_correct, total, accuracy, partial_accuracy, format_accuracy = evaluate(
             test_dataset,
             sampler,
@@ -222,6 +236,11 @@ def main() -> None:
         cfg.runtime.use_wandb,
     )
 
+    if benchmark:
+        cluster_config.training_config.checkpoint_root_directory = None
+        if benchmark.quiet:
+            cluster_config.training_config.metrics_logging_options = None
+
     rl_cluster = rl_cluster_lib.RLCluster(
         actor=lora_policy,
         reference=gemma3,
@@ -230,6 +249,12 @@ def main() -> None:
     )
 
     trainer = build_trainer(rl_cluster, cfg.grpo)
+    if benchmark:
+        benchmark.run(
+            jax, nnx, mesh, trainer, train_dataset, cfg, model_path, eos_tokens,
+            load_start,
+        )
+        return
     maybe_init_wandb(cfg.runtime.use_wandb)
 
     try:

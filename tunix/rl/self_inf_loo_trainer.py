@@ -347,6 +347,8 @@ class SelfInfLooTrainer(rl_trainer.Trainer):
     )
     optimizer.update(model, final_grads)
 
+    if getattr(self, "_benchmark_quiet", False):
+      return final_loss, None
     if self._has_aux:
       final_aux = self._aggregate_update_aux(
           per_sample_aux, mask, masked_mean

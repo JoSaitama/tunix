@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import abc
 from concurrent import futures
+import contextlib
 import itertools
 import math
 from typing import Any, Callable, Dict, Iterable, Iterator, List, Sequence
@@ -25,7 +26,6 @@ from typing import Generic, TypeVar
 
 from absl import logging
 import jax
-import jax.numpy as jnp
 from jax.typing import ArrayLike  # pylint: disable=g-importing-member
 import numpy as np
 from tunix.rl import algorithm_config as algo_config_lib
@@ -208,6 +208,9 @@ class RLLearner(abc.ABC, Generic[TConfig]):
 
     # Sum rewards across all reward functions for each prompt.
     sum_rewards = np.nansum(rewards, axis=1)
+    benchmark = getattr(self.rl_cluster, "_training_benchmark", None)
+    if benchmark is not None and benchmark.quiet:
+      return sum_rewards
 
     # Log all metrics in a single loop
     for j, (prompt, completion) in enumerate(zip(prompts, completions)):
@@ -415,10 +418,14 @@ class RLLearner(abc.ABC, Generic[TConfig]):
           if self._iter_steps == self._last_iter_step:
             logging.info("Fast forwarded %d micro-batches.", self._iter_steps)
 
-        with self.rl_cluster.perf.span("data_loading"):
+        benchmark = getattr(self.rl_cluster, "_training_benchmark", None)
+        phase = benchmark.phase("data_loading") if benchmark else contextlib.nullcontext()
+        with phase, self.rl_cluster.perf.span("data_loading"):
           # Fetch one training micro-batch
           example = next(iterator)
           cur_batch_size = len(example["prompts"])
+        if benchmark is not None and mode == rl_cluster_lib.Mode.TRAIN:
+          benchmark.note_prompts(example["prompts"])
 
         # Buffer the fetched micro-batch. We accumulate micro-batches and track
         # their sizes and the total number of samples. This allows us to form a
@@ -444,13 +451,12 @@ class RLLearner(abc.ABC, Generic[TConfig]):
         assert "trajectory_ids" not in example
         example["trajectory_ids"] = trajectory_ids
 
-        for t_id in trajectory_ids:
-          self.rl_cluster.buffer_metrics(
-              {
-                  "trajectory_ids": (t_id, None),
-              },
-              mode=mode,
-          )
+        if benchmark is None or not benchmark.quiet:
+          for t_id in trajectory_ids:
+            self.rl_cluster.buffer_metrics(
+                {"trajectory_ids": (t_id, None)},
+                mode=mode,
+            )
 
         with jax.profiler.StepTraceAnnotation(
             "sampler",
@@ -597,11 +603,21 @@ class RLLearner(abc.ABC, Generic[TConfig]):
           full_batch_iterator, train_micro_batch_size
       )
 
+    benchmark = getattr(self.rl_cluster, "_training_benchmark", None)
+    if benchmark is not None:
+      benchmark.configure_loop(
+          self, full_batch_size, mini_batch_size, train_micro_batch_size,
+          service_target_batch_size, grad_acc_steps,
+      )
+
     while True:  # loop over M
       try:
         initial_steps = self._iter_steps
 
-        with self.rl_cluster.perf.span_group("global_step"):
+        if benchmark is not None:
+          benchmark.before_iteration()
+        phase = benchmark.phase("iteration") if benchmark else contextlib.nullcontext()
+        with phase, self.rl_cluster.perf.span_group("global_step"):
           self._run_global_step(
               full_batch_size,
               mini_batch_size,
@@ -618,7 +634,8 @@ class RLLearner(abc.ABC, Generic[TConfig]):
                 f" {self.rl_cluster.global_steps} mini batch step"
                 f" {self._iter_steps}"
             )
-            with self.rl_cluster.perf.span(
+            phase = benchmark.phase("weight_sync") if benchmark else contextlib.nullcontext()
+            with phase, self.rl_cluster.perf.span(
                 "weight_sync", self.rl_cluster.perf.all_devices
             ):
               with jax.profiler.StepTraceAnnotation(
@@ -630,10 +647,14 @@ class RLLearner(abc.ABC, Generic[TConfig]):
                 1  # manually increment the global steps.
             )
 
-        self.rl_cluster.buffer_metrics(
-            self.rl_cluster.perf.export(),
-            mode=rl_cluster_lib.Mode.TRAIN,
-        )
+        if benchmark is None or not benchmark.quiet:
+          self.rl_cluster.buffer_metrics(
+              self.rl_cluster.perf.export(),
+              mode=rl_cluster_lib.Mode.TRAIN,
+          )
+
+        if benchmark is not None and benchmark.after_iteration():
+          break
 
         if (
             self.rl_cluster.actor_trainer.train_steps
@@ -763,11 +784,14 @@ class RLLearner(abc.ABC, Generic[TConfig]):
               mode=rl_cluster_lib.Mode.EVAL,
           )
           curr_eval_ds = eval_data_queue.get(block=True)
-        self.rl_cluster.update_actor(
-            curr_train_ds,
-            curr_eval_ds,
-            skip_jit,
-        )  # loop over μ num_iterations
+        benchmark = getattr(self.rl_cluster, "_training_benchmark", None)
+        phase = benchmark.phase("actor_update") if benchmark else contextlib.nullcontext()
+        with phase:
+          self.rl_cluster.update_actor(
+              curr_train_ds,
+              curr_eval_ds,
+              skip_jit,
+          )  # loop over μ num_iterations
         if hasattr(self.rl_cluster, "critic_trainer"):
           self.rl_cluster.update_critic(
               curr_train_ds,

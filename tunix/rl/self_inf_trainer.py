@@ -154,6 +154,8 @@ class SelfInfTrainer(rl_trainer.Trainer):
     )
     optimizer.update(model, final_grads)
 
+    if getattr(self, "_benchmark_quiet", False):
+      return final_loss, None
     if self._has_aux:
       final_aux = masked_mean(per_sample_aux, mask)
       if isinstance(final_aux, dict):

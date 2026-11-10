@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import os
 from typing import Iterable, List, Sequence, TypeVar
@@ -251,16 +252,23 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
       probabilities from the reference and policy models.
     """
     training_input["prompts"] = list(training_input["prompts"])
+    benchmark = getattr(self.rl_cluster, "_training_benchmark", None)
+    phase = benchmark.phase if benchmark else lambda _: contextlib.nullcontext()
     pad_value = self.rl_cluster.rollout.pad_id()
     eos_value = self.rl_cluster.rollout.eos_id()
-    rollout_output = self.rl_cluster.generate(
-        prompts=training_input["prompts"],
-        mode=mode,
-        micro_batch_size=(
-            self._rollout_micro_batch_size * self.algo_config.num_generations
-        ),
-    )
+    with phase("rollout"):
+      rollout_output = self.rl_cluster.generate(
+          prompts=training_input["prompts"],
+          mode=mode,
+          micro_batch_size=(
+              self._rollout_micro_batch_size * self.algo_config.num_generations
+          ),
+      )
     completion_ids = rollout_output.tokens
+    if benchmark is not None and mode == rl_cluster_lib.Mode.TRAIN:
+      benchmark.note_rollout(
+          len(completion_ids), int(np.count_nonzero(completion_ids != pad_value))
+      )
     prompt_ids = jnp.array(rollout_output.left_padded_prompt_tokens)
     completion_text = rollout_output.text
 
@@ -284,7 +292,9 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
     if need_ref_logps and self.algo_config.beta != 0.0:
       devices = self.rl_cluster.r2m[rl_cluster_lib.Role.REFERENCE].devices
       # TODO(yangmu): use function decorator to trace this part, same below.
-      with self.rl_cluster.perf.span("refer_inference", devices) as interval:
+      with phase("reference_logps"), self.rl_cluster.perf.span(
+          "refer_inference", devices
+      ) as interval:
         ref_per_token_logps = self.rl_cluster.get_ref_per_token_logps(
             prompt_tokens=prompt_ids,
             completion_tokens=jax_completion_ids,
@@ -305,7 +315,7 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
     need_old_logps = self.algo_config.num_iterations > 1 or force_logps
     if need_old_logps:
       devices = self.rl_cluster.r2m[rl_cluster_lib.Role.ACTOR].devices
-      with self.rl_cluster.perf.span(
+      with phase("old_policy_logps"), self.rl_cluster.perf.span(
           "old_actor_inference", devices
       ) as interval:
         old_per_token_logps = self.rl_cluster.get_old_per_token_logps(
@@ -320,7 +330,7 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
     else:
       old_per_token_logps = None
 
-    with self.rl_cluster.perf.span("advantage_computation"):
+    with phase("reward_advantage"), self.rl_cluster.perf.span("advantage_computation"):
       # Compute rewards and advantages
       rewards = self._compute_rewards(
           prompts=training_input["prompts"],
@@ -335,10 +345,11 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
           rewards=rewards, num_generations=self.algo_config.num_generations
       )
 
-    # Log completion lengths.
-    agg_completion_mask = completion_mask.sum(axis=-1)
-    self.rl_cluster.buffer_metrics(
-        {
+    if benchmark is None or not benchmark.quiet:
+      # Log completion lengths.
+      agg_completion_mask = completion_mask.sum(axis=-1)
+      self.rl_cluster.buffer_metrics(
+          {
             "completions/mean_length": (
                 np.mean(agg_completion_mask),
                 np.mean,
@@ -351,18 +362,18 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
                 np.min(agg_completion_mask),
                 np.min,
             ),
-        },
-        mode=mode,
-    )
-    for m_fn in self.metric_fns:
-      user_defined_metric = m_fn(
-          prompts=training_input["prompts"],
-          completions=completion_text,
-          advances=advantages,
-          rewards=rewards,
-          **{k: v for k, v in training_input.items() if k != "prompts"},
+          },
+          mode=mode,
       )
-      self.rl_cluster.buffer_metrics(user_defined_metric, mode=mode)
+      for m_fn in self.metric_fns:
+        user_defined_metric = m_fn(
+            prompts=training_input["prompts"],
+            completions=completion_text,
+            advances=advantages,
+            rewards=rewards,
+            **{k: v for k, v in training_input.items() if k != "prompts"},
+        )
+        self.rl_cluster.buffer_metrics(user_defined_metric, mode=mode)
 
     return TrainExample(
         prompt_ids=prompt_ids,
