@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import math
 from collections.abc import Iterator, Sequence
+from contextlib import nullcontext
 from typing import Any
 
 import numpy as np
 
 from .artifacts import SelectionArtifactWriter, prompt_id
-from .data_utils import Example, batch_examples, cyclic_batches
+from .data_utils import Example, cyclic_batches
 from .scoring import (
     cosine_scores,
     learnability,
@@ -60,7 +61,7 @@ class _BaseCurriculum:
         train_batch_size: int,
         total_update_steps: int,
         estimator,
-        writer: SelectionArtifactWriter,
+        writer: SelectionArtifactWriter | None,
         rl_cluster,
     ):
         if not training_examples:
@@ -281,20 +282,27 @@ class GradAlignCurriculum(_BaseCurriculum):
             ]
             source_cursor = (source_cursor + candidate_count) % len(self.examples)
 
-            validation_estimate = self.estimator.estimate(
-                self.validation_examples,
-                num_rollouts=self.validation_rollouts,
-                apply_mismatch=False,
-            )
-            validation_gradient = validation_estimate.features.mean(axis=0)
-            candidate_estimate = self.estimator.estimate(
-                candidates,
-                num_rollouts=self.candidate_rollouts,
-                apply_mismatch=True,
-            )
-            scores = cosine_scores(candidate_estimate.features, validation_gradient)
-            selected_local = stable_top_indices(scores, selected_count)
-            selected = [candidates[index] for index in selected_local]
+            benchmark = getattr(self.rl_cluster, "_training_benchmark", None)
+            with (benchmark.selector_round() if benchmark else nullcontext()):
+                validation_estimate = self.estimator.estimate(
+                    self.validation_examples,
+                    num_rollouts=self.validation_rollouts,
+                    apply_mismatch=False,
+                )
+                validation_gradient = validation_estimate.features.mean(axis=0)
+                candidate_estimate = self.estimator.estimate(
+                    candidates,
+                    num_rollouts=self.candidate_rollouts,
+                    apply_mismatch=True,
+                )
+                scores = cosine_scores(candidate_estimate.features, validation_gradient)
+                selected_local = stable_top_indices(scores, selected_count)
+                selected = [candidates[index] for index in selected_local]
+            if benchmark is not None:
+                yield from cyclic_batches(selected, batch_size=self.train_batch_size,
+                                          num_batches=round_steps)
+                update_step += round_steps
+                continue
             selected_local_set = set(int(index) for index in selected_local)
 
             ids = [prompt_id(str(example["prompts"])) for example in candidates]

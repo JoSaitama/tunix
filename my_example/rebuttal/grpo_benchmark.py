@@ -14,6 +14,7 @@ import json
 import logging
 import os
 from pathlib import Path
+import shutil
 import statistics
 import subprocess
 import threading
@@ -23,10 +24,22 @@ METHODS = {
     "vanilla": "Trainer",
     "dtv": "PolicySelfInfTrainer",
     "dtv-loo": "PolicySelfInfLooTrainer",
+    "pods": "Trainer",
+    "grpo-ds": "Trainer",
+    "norm-top50": "GradientNormTop50Trainer",
+    "pcgrad": "GradientConflictTrainer",
+    "cagrad": "GradientConflictTrainer",
+    "gradalign": "Trainer",
 }
+GRADALIGN_INTERVAL = 10
+VALUATION_ACTORS = {"dtv", "dtv-loo", "norm-top50", "pcgrad", "cagrad"}
 STEP_FIELDS = (
     "iteration", "window", "seconds", "prompts", "completions",
-    "generated_tokens", "prompt_order_sha256", "compile_event",
+    "generated_tokens", "update_completions", "candidate_batches",
+    "ds_zero_variance_groups", "ds_excess_eligible_groups", "selector_rounds",
+    "selector_seconds", "selector_completions", "selector_tokens",
+    "selector_reference_tokens", "selector_candidate_tokens",
+    "prompt_order_sha256", "compile_event",
 )
 
 
@@ -57,14 +70,25 @@ def _hash_parts(parts):
 def summarize(rows, elapsed):
     _require(bool(rows) and elapsed > 0, "Empty measurement window")
     tokens = sum(r["generated_tokens"] for r in rows)
-    return {
+    selector_tokens = sum(r.get("selector_tokens", 0) for r in rows)
+    result = {
         "iterations": len(rows),
         "elapsed_seconds": elapsed,
         "mean_seconds_per_iteration": elapsed / len(rows),
         "median_iteration_boundary_seconds": statistics.median(r["seconds"] for r in rows),
-        "generated_tokens": tokens,
-        "generated_tokens_per_wall_second": tokens / elapsed,
+        "generated_tokens": tokens + selector_tokens,
+        "generated_tokens_per_wall_second": (tokens + selector_tokens) / elapsed,
+        "training_rollout_tokens": tokens,
+        "selector_tokens": selector_tokens,
+        "all_generated_tokens": tokens + selector_tokens,
+        "training_rollout_tokens_per_wall_second": tokens / elapsed,
     }
+    for key in ("completions", "update_completions", "candidate_batches",
+                "ds_zero_variance_groups", "ds_excess_eligible_groups", "selector_rounds",
+                "selector_seconds", "selector_completions", "selector_reference_tokens",
+                "selector_candidate_tokens"):
+        result[key] = sum(r.get(key, 0) for r in rows)
+    return result
 
 
 class _CompileLog(logging.Handler):
@@ -97,8 +121,18 @@ class Benchmark:
         _require(method in METHODS, f"Unsupported method: {method}")
         _require(mode in ("timing", "memory"), f"Unsupported mode: {mode}")
         _require(diagnostics in ("on", "off"), "Diagnostics must be on or off")
-        _require(warmup >= 1 and steps >= 1, "Both warmup and steps must be positive")
+        _require((warmup >= 1 or (method == "gradalign" and mode == "memory" and warmup == 0))
+                 and steps >= 1, "Invalid warmup/measurement step count")
         _require(mode != "memory" or diagnostics == "off", "Memory profile requires diagnostics off")
+        _require(diagnostics == "off" or method in {"vanilla", "dtv", "dtv-loo"},
+                 "New baseline benchmarks require diagnostics off")
+        if method == "gradalign":
+            if mode == "timing":
+                _require(warmup % GRADALIGN_INTERVAL == 0 and steps % GRADALIGN_INTERVAL == 0,
+                         "GradAlign timing requires complete ten-update cycles")
+            else:
+                _require((warmup, steps) == (0, 1),
+                         "GradAlign memory captures the first selector and update (0 + 1)")
         self.method, self.mode, self.diagnostics = method, mode, diagnostics
         self.quiet = diagnostics == "off"
         self.warmup, self.steps = warmup, steps
@@ -110,6 +144,9 @@ class Benchmark:
         self.thread = threading.local()
         self.trace_active = False
         self.memory = {}
+        # The ordinary learner peeks at item 1 to infer its batch size. That
+        # would execute GradAlign's first selector before timing/tracing starts.
+        self.first_batch_size = 4 if method == "gradalign" else None
 
     @classmethod
     def from_env(cls):
@@ -222,6 +259,7 @@ class Benchmark:
         return result
 
     def _start_trace(self):
+        check_disk(self.out, float(os.environ.get("TUNIX_BENCH_MIN_FREE_GIB", "6")))
         options_type = getattr(self.jax.profiler, "ProfileOptions", None)
         options = options_type() if options_type else None
         kwargs = {}
@@ -262,6 +300,10 @@ class Benchmark:
         self.prompt_count = 0
         self.rollouts = 0
         self.tokens = 0
+        self.ds_batches = self.ds_zero_variance = self.ds_excess_eligible = 0
+        self.selector_rounds = self.selector_completions = 0
+        self.selector_reference_tokens = self.selector_candidate_tokens = 0
+        self.selector_seconds = 0.0
 
     def note_prompts(self, prompts):
         _require(self.prompt_hash is None, "Expected one input batch per iteration")
@@ -271,6 +313,39 @@ class Benchmark:
     def note_rollout(self, count, tokens):
         self.rollouts += count
         self.tokens += tokens
+
+    def check_actor_input(self, examples):
+        count = sum(example.completion_ids.shape[0] for example in examples)
+        expected = 8 if self.method == "pods" else 16
+        _require(count == expected, f"{self.method}: expected {expected} actor rows, got {count}")
+
+    def note_ds_candidate(self, prompts, eligible, selected):
+        _require(self.method == "grpo-ds" and len(prompts) == 4
+                 and 0 <= selected <= eligible <= 4, "Unexpected DS candidate batch")
+        if self.ds_batches == 0:
+            self.note_prompts(prompts)
+        self.ds_batches += 1
+        self.ds_zero_variance += 4 - eligible
+        self.ds_excess_eligible += eligible - selected
+
+    @contextmanager
+    def selector_round(self):
+        _require(self.method == "gradalign" and self.active_iteration is not None,
+                 "GradAlign selector ran outside a measured or warmup iteration")
+        start = time.perf_counter()
+        with self.phase("gradalign_selector"):
+            yield
+        self.selector_seconds += time.perf_counter() - start
+        self.selector_rounds += 1
+
+    def note_selector_rollout(self, count, tokens, *, candidate):
+        _require(self.method == "gradalign" and self.active_iteration is not None,
+                 "Selector rollout ran outside an iteration")
+        self.selector_completions += count
+        if candidate:
+            self.selector_candidate_tokens += tokens
+        else:
+            self.selector_reference_tokens += tokens
 
     @contextmanager
     def phase(self, label):
@@ -289,8 +364,17 @@ class Benchmark:
 
     def after_iteration(self):
         step = self.active_iteration
-        _require(self.prompt_count == 4 and self.rollouts == 16 and self.tokens > 0,
+        candidate_batches = self.ds_batches if self.method == "grpo-ds" else 1
+        _require(self.prompt_count == 4 and candidate_batches > 0
+                 and self.rollouts == 16 * candidate_batches and self.tokens > 0,
                  f"Iteration {step} did not produce a full nonempty 4x4 rollout")
+        if self.method == "gradalign":
+            expected = int((step - 1) % GRADALIGN_INTERVAL == 0)
+            # The last round can be partial at the unchanged 691-step budget.
+            candidates = 16 * min(GRADALIGN_INTERVAL, 692 - step)
+            _require(self.selector_rounds == expected
+                     and self.selector_completions == expected * 4 * (30 + candidates),
+                     "Unexpected GradAlign selector cycle or rollout count")
         _require(self.actor.train_steps == self.cluster.global_steps == step,
                  f"Iteration {step} actor/global counters disagree")
         final = step == self.warmup + self.steps
@@ -302,6 +386,15 @@ class Benchmark:
             "iteration": step, "window": "warmup" if step <= self.warmup else "measure",
             "seconds": end - self.previous_boundary, "prompts": self.prompt_count,
             "completions": self.rollouts, "generated_tokens": self.tokens,
+            "update_completions": 8 if self.method == "pods" else 16,
+            "candidate_batches": candidate_batches,
+            "ds_zero_variance_groups": self.ds_zero_variance,
+            "ds_excess_eligible_groups": self.ds_excess_eligible,
+            "selector_rounds": self.selector_rounds, "selector_seconds": self.selector_seconds,
+            "selector_completions": self.selector_completions,
+            "selector_reference_tokens": self.selector_reference_tokens,
+            "selector_candidate_tokens": self.selector_candidate_tokens,
+            "selector_tokens": self.selector_reference_tokens + self.selector_candidate_tokens,
             "prompt_order_sha256": self.prompt_hash,
         })
         self.previous_boundary = end
@@ -316,7 +409,8 @@ class Benchmark:
                      "Final actor and optimizer counters disagree")
         return final
 
-    def run(self, jax, nnx, mesh, learner, dataset, cfg, model_path, eos_tokens, load_start):
+    def run(self, jax, nnx, mesh, learner, dataset, cfg, model_path, eos_tokens, load_start,
+            *, selector_config=None):
         import numpy as np
 
         self.jax, self.nnx = jax, nnx
@@ -325,13 +419,30 @@ class Benchmark:
         self.cluster._training_benchmark = self
         self.actor._benchmark_quiet = self.quiet
         actor_name = type(self.actor).__name__
-        _require(type(learner).__name__ == "GRPOLearner", "Expected the clean GRPO learner")
+        learner_name = {"pods": "PODSLearner", "grpo-ds": "DynamicSamplingLearner"}.get(
+            self.method, "GRPOLearner"
+        )
+        _require(type(learner).__name__ == learner_name, f"Expected {learner_name}")
         _require(actor_name == METHODS[self.method], f"Unexpected actor trainer: {actor_name}")
         _require(self.actor.train_steps == 0, "A fresh run is required")
         _require(self.actor.config.checkpoint_root_directory is None, "Checkpointing must be disabled")
-        if self.method != "vanilla":
+        if self.method in {"dtv", "dtv-loo"}:
             _require(self.actor.scope == "group" and self.actor._score_loss_fn is not None,
                      "Expected group-scoped policy valuation")
+        if self.method == "norm-top50":
+            _require(self.actor.num_generations == 4 and self.actor._score_loss_fn is not None
+                     and self.actor.artifact_dir is None, "Unexpected norm top50 route")
+        if self.method in {"pcgrad", "cagrad"}:
+            _require(self.actor.method == self.method and not self.actor.include_kl
+                     and self.actor.c == 0.5, "Unexpected gradient conflict route")
+        if self.method == "pods":
+            _require(learner.pods_keep_count == 2 and learner._pods_dir is None,
+                     "Expected PODS keep-two without artifacts")
+        if self.method == "grpo-ds":
+            _require(learner._ds_cap == 20 and learner._ds_dir is None,
+                     "Expected DS cap twenty without artifacts")
+        _require((selector_config is not None) == (self.method == "gradalign"),
+                 "Unexpected selector configuration")
         if self.method == "dtv-loo":
             _require(self.actor.min_keep_fraction == 0.25, "Expected formal DTV-Loo retention floor")
             path = self.actor.decisions_path
@@ -375,11 +486,13 @@ class Benchmark:
             "jax_enable_x64": jax.config.jax_enable_x64,
             "jax_enable_compilation_cache": jax.config.jax_enable_compilation_cache,
             "actor_trainer": actor_name,
+            "learner": learner_name,
+            "selector_config": selector_config,
             "diagnostics": self.diagnostics,
             "valuation": self.method != "vanilla",
             "phases": {"actor_update": (
-                "optimizer and batch GRPO gradient"
-                if self.method == "vanilla" else "fused valuation + update"
+                "fused scoring/manipulation + update" if self.method in VALUATION_ACTORS
+                else "optimizer and batch GRPO gradient"
             )},
         }
         self.metadata["main_setup_seconds"] = time.perf_counter() - self.main_start
@@ -426,6 +539,10 @@ class Benchmark:
         elapsed = sum(r["seconds"] for r in sensitivity)
         stats = summarize(measured, self.window_seconds)
         stats["optimizer_updates"] = self.end_optimizer_step - self.start_optimizer_step
+        if self.method == "gradalign":
+            stats["window_seconds_outside_selector"] = self.window_seconds - stats["selector_seconds"]
+        if self.method == "grpo-ds":
+            stats["rejected_groups"] = stats["ds_zero_variance_groups"] + stats["ds_excess_eligible_groups"]
         with (self.out / "iterations.csv").open("w", newline="", encoding="utf-8") as file:
             writer = csv.DictWriter(file, STEP_FIELDS)
             writer.writeheader()
@@ -447,7 +564,7 @@ class Benchmark:
             "excluding_logged_compile_steps": (
                 summarize(sensitivity, elapsed) if sensitivity and elapsed > 0 else None
             ),
-            "token_definition": "non-padding completion tokens returned by vanilla sampler, excluding stop EOS",
+            "token_definition": "non-padding completion tokens, excluding stop EOS; includes rejected DS rollouts and GradAlign selector tokens in all_generated_tokens",
             "timing_scope": "full outer iterations; only window boundaries explicitly drained",
             "reviewer_timing_eligible": self.mode == "timing" and self.quiet
             and self.steps == 50 and self.warmup >= 10,
@@ -491,6 +608,13 @@ def _load(path):
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def check_disk(path, minimum_gib):
+    _require(0 < minimum_gib < float("inf"), "Disk threshold must be finite and positive")
+    free = shutil.disk_usage(path).free / 2**30
+    _require(free >= minimum_gib, f"{path}: {free:.2f} GiB free; need {minimum_gib:g} GiB before trace")
+    return free
+
+
 def check_run(path):
     """Offline smoke/report invariants. Never opens JAX or initializes TPU."""
     path = Path(path)
@@ -498,6 +622,7 @@ def check_run(path):
     summary = _load(path / "summary.json")
     metadata = _load(path / "metadata.json")
     compiler = _load(path / "compiler_events.json")
+    method = summary["method"]
     with (path / "iterations.csv").open(newline="", encoding="utf-8") as file:
         rows = list(csv.DictReader(file))
     warmup = summary["warmup_iterations"]
@@ -512,15 +637,33 @@ def check_run(path):
     _require(metadata["valuation"] == (summary["method"] != "vanilla"),
              f"{path}: wrong valuation route")
     for i, row in enumerate(rows, 1):
+        candidate_batches = int(row.get("candidate_batches") or 1)
         _require(
-            (int(row["iteration"]), int(row["prompts"]), int(row["completions"])) == (i, 4, 16)
+            (int(row["iteration"]), int(row["prompts"]), int(row["completions"]))
+            == (i, 4, 16 * candidate_batches)
+            and (candidate_batches >= 1 if method == "grpo-ds" else candidate_batches == 1)
             and row["window"] == ("warmup" if i <= warmup else "measure")
             and int(row["generated_tokens"]) > 0
             and float(row["seconds"]) > 0
             and len(row["prompt_order_sha256"]) == 64,
             f"{path}: bad iteration {i}",
         )
-    _require(sum(int(row["generated_tokens"]) for row in rows[warmup:]) ==
+        if method == "grpo-ds":
+            rejected = int(row["ds_zero_variance_groups"]) + int(row["ds_excess_eligible_groups"])
+            _require(rejected == 4 * (candidate_batches - 1), f"{path}: bad DS accounting")
+        if method == "pods":
+            _require(int(row["update_completions"]) == 8, f"{path}: bad PODS count")
+        if method == "gradalign":
+            expected = int((i - 1) % GRADALIGN_INTERVAL == 0)
+            candidates = 16 * min(GRADALIGN_INTERVAL, 692 - i)
+            _require(int(row["selector_rounds"]) == expected
+                     and int(row["selector_completions"]) == expected * 4 * (30 + candidates)
+                     and int(row["selector_tokens"]) == int(row["selector_reference_tokens"])
+                     + int(row["selector_candidate_tokens"])
+                     and (float(row["selector_seconds"]) > 0) == bool(expected),
+                     f"{path}: bad GradAlign selector accounting")
+    _require(sum(int(row["generated_tokens"]) + int(row.get("selector_tokens") or 0)
+                 for row in rows[warmup:]) ==
              measured["generated_tokens"], f"{path}: inconsistent token count")
     _require(abs(sum(float(row["seconds"]) for row in rows[warmup:]) -
                  measured["elapsed_seconds"]) < 1e-6, f"{path}: inconsistent window timing")
@@ -531,7 +674,7 @@ def check_run(path):
     for unused in ("checkpoints", "model"):
         _require(not (path / unused).exists(), f"{path}: unexpected {unused} output")
     if summary["diagnostics"] == "off":
-        for unused in ("tensorboard", "selection.jsonl"):
+        for unused in ("tensorboard", "selection.jsonl", "selection"):
             _require(not (path / unused).exists(), f"{path}: unexpected {unused} output")
     else:
         _require(any((path / "tensorboard").rglob("events.out.tfevents*")),
@@ -546,18 +689,69 @@ def check_run(path):
 
 
 def check_comparable(runs):
-    _, reference, reference_prompts = runs[0]
+    _, reference, _ = runs[0]
     compare_keys = (
         "commit_sha", "versions", "topology", "config", "schedule_optimizer_steps",
         "base_model_revision", "initial_lora_sha256", "batching", "eos_tokens",
         "actor_parameter_dtypes", "jax_default_matmul_precision", "jax_enable_x64",
         "jax_enable_compilation_cache",
     )
-    for _, meta, prompts in runs[1:]:
+    for _, meta, _ in runs[1:]:
         different = [k for k in compare_keys if meta[k] != reference[k]]
         _require(not different, f"Incompatible benchmark metadata: {different}")
-        common = min(len(reference_prompts), len(prompts))
-        _require(reference_prompts[:common] == prompts[:common], "Prompt order differs")
+    by_stream = {}
+    for summary, meta, prompts in runs:
+        method = summary.get("method")
+        key = method if method in {"gradalign", "grpo-ds"} else "fixed_stream"
+        if key in by_stream:
+            reference_meta, reference_prompts = by_stream[key]
+            _require(meta.get("selector_config") == reference_meta.get("selector_config"),
+                     "Selector budget differs")
+            common = min(len(reference_prompts), len(prompts))
+            _require(reference_prompts[:common] == prompts[:common], "Prompt order differs")
+        if key not in by_stream or len(prompts) > len(by_stream[key][1]):
+            by_stream[key] = meta, prompts
+
+
+def observed_xprof_peaks(run):
+    """Extract XProf's window peaks without certifying resident-buffer coverage."""
+    summary, metadata, _ = check_run(run)
+    _require(summary["mode"] == "memory", "Expected a memory run")
+    traces = sorted(Path(run).glob("trace/plugins/profile/*/*.xplane.pb"))
+    _require(len(traces) == 1, "Expected exactly one local-worker XPlane file")
+    from xprof.convert import raw_to_tool_data
+
+    raw, _ = raw_to_tool_data.xspace_to_tool_data(
+        [str(traces[0])], "memory_profile", {"use_saved_result": False}
+    )
+    data = json.loads(raw) if raw else {}
+    profiles = data.get("memoryProfilePerAllocator", {})
+    ids = {str(device["id"]) for device in metadata["topology"]["devices"]}
+    _require(len(ids) == 4 and ids <= set(profiles),
+             f"Incomplete XProf coverage; memory IDs: {sorted(profiles)}")
+    devices = {}
+    for device in sorted(ids):
+        profile = profiles[device]["profileSummary"]
+        peak = profile["peakStats"]
+        used = int(peak["peakBytesInUse"])
+        stack = int(peak.get("stackReservedBytes", 0))
+        heap = int(peak.get("heapAllocatedBytes", 0))
+        capacity = int(profile["memoryCapacity"])
+        _require(0 < used <= capacity and used == stack + heap,
+                 f"Invalid stack + heap XProf peak on TPU {device}")
+        devices[device] = {"peak_hbm_bytes": used, "peak_hbm_gib": used / 2**30,
+                           "stack_reserved_bytes": stack, "heap_allocated_bytes": heap,
+                           "capacity_bytes": capacity,
+                           "peak_time_ps": int(profile.get("peakStatsTimePs", 0))}
+    return {
+        "collector": "XProf Memory Profile", "method": summary["method"],
+        "source_run": str(Path(run).resolve()), "trace_file": str(traces[0]),
+        "commit_sha": metadata["commit_sha"], "devices": devices,
+        "iterations_inclusive": [summary["warmup_iterations"] + 1, summary["actor_optimizer_end"]],
+        "max_device_peak_hbm_gib": max(d["peak_hbm_gib"] for d in devices.values()),
+        "resident_allocations_verified": False,
+        "qualification": "Observed window stack + heap; resident buffers not independently verified.",
+    }
 
 
 def verified_xprof_peaks(run, evidence):
@@ -598,9 +792,20 @@ def main():
     xprof = sub.add_parser("xprof-peaks", help="Print a per-device/maximum report from verified XProf evidence")
     xprof.add_argument("run", type=Path)
     xprof.add_argument("evidence", type=Path)
+    observed = sub.add_parser("xprof-observed", help="Extract all four observed peaks with XProf")
+    observed.add_argument("run", type=Path)
+    disk = sub.add_parser("disk-check", help="Refuse capture with inadequate free space")
+    disk.add_argument("path", type=Path)
+    disk.add_argument("--min-free-gib", type=float, default=6)
     args = parser.parse_args()
     if args.command == "xprof-peaks":
         print(json.dumps(verified_xprof_peaks(args.run, args.evidence), indent=2, allow_nan=False))
+        return
+    if args.command == "xprof-observed":
+        print(json.dumps(observed_xprof_peaks(args.run), indent=2, allow_nan=False))
+        return
+    if args.command == "disk-check":
+        print(f"Free space before capture: {check_disk(args.path, args.min_free_gib):.2f} GiB")
         return
     runs = [check_run(path) for path in args.runs]
     check_comparable(runs)

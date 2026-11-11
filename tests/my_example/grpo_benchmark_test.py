@@ -3,11 +3,13 @@ import importlib.util
 import json
 import logging
 from pathlib import Path
+import subprocess
+import sys
 import tempfile
 from types import SimpleNamespace
 import time
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from my_example.rebuttal import grpo_benchmark as bench
 
@@ -50,6 +52,118 @@ class BenchmarkTest(unittest.TestCase):
             b.note_prompts(["a"])
         with self.assertRaisesRegex(ValueError, "full nonempty"):
             b.after_iteration()
+
+    def test_ds_counts_rejected_rollouts_and_one_update(self):
+        b = self.bench
+        b.method = "grpo-ds"
+        b.actor = SimpleNamespace(train_steps=1)
+        b.cluster = SimpleNamespace(global_steps=1)
+        b.before_iteration()
+        b.note_rollout(16, 30)
+        b.note_ds_candidate(["a", "b", "c", "d"], eligible=3, selected=3)
+        b.note_rollout(16, 20)
+        b.note_ds_candidate(["e", "f", "g", "h"], eligible=4, selected=1)
+        self.assertFalse(b.after_iteration())
+        row = b.rows[0]
+        self.assertEqual((row["generated_tokens"], row["update_completions"]), (50, 16))
+        self.assertEqual((row["ds_zero_variance_groups"], row["ds_excess_eligible_groups"]), (1, 3))
+
+    def test_pods_requires_eight_actor_rows(self):
+        self.bench.method = "pods"
+        self.bench.check_actor_input([SimpleNamespace(completion_ids=SimpleNamespace(shape=(8, 4)))])
+        with self.assertRaisesRegex(ValueError, "expected 8 actor rows"):
+            self.bench.check_actor_input([SimpleNamespace(completion_ids=SimpleNamespace(shape=(16, 4)))])
+
+    def test_gradalign_cycle_validation_and_first_selector_memory(self):
+        with self.assertRaisesRegex(ValueError, "complete ten-update cycles"):
+            bench.Benchmark("gradalign", "timing", "off", 15, 50, self.path, "v5p-16")
+        b = bench.Benchmark("gradalign", "memory", "off", 0, 1, self.path, "v5p-16")
+        self.assertEqual(b.first_batch_size, 4)
+        b.metadata = {}
+        b.learner_entry = time.perf_counter()
+        b.actor = SimpleNamespace(train_steps=0)
+        b.cluster = SimpleNamespace(global_steps=0)
+        b._drain = Mock()
+        b._optimizer_steps = lambda: b.actor.train_steps
+        b._memory_snapshot = Mock()
+        b._start_trace = Mock()
+        b._stop_trace = Mock()
+        with self.assertRaisesRegex(ValueError, "outside"):
+            with b.selector_round():
+                pass
+        b.before_iteration()
+        b._start_trace.assert_called_once()
+        with b.selector_round():
+            b.note_selector_rollout(120, 200, candidate=False)
+            b.note_selector_rollout(640, 800, candidate=True)
+        b.note_prompts(["a", "b", "c", "d"])
+        b.note_rollout(16, 100)
+        b.actor.train_steps = b.cluster.global_steps = 1
+        self.assertTrue(b.after_iteration())
+        result = bench.summarize(b.rows, 2)
+        self.assertEqual((result["selector_rounds"], result["selector_completions"]), (1, 760))
+        self.assertEqual((result["training_rollout_tokens"], result["generated_tokens"]), (100, 1100))
+        self.assertEqual(result["generated_tokens_per_wall_second"], 550)
+
+    @unittest.skipUnless(importlib.util.find_spec("numpy"), "NumPy not installed")
+    def test_gradalign_curriculum_preserves_lazy_cycles_without_artifacts(self):
+        import numpy as np
+        from my_example.alignment_baselines.curriculum import GradAlignCurriculum
+
+        b = bench.Benchmark("gradalign", "timing", "off", 10, 10, self.path, "v5p-16")
+        calls = []
+
+        def estimate(examples, *, num_rollouts, apply_mismatch):
+            calls.append((b.active_iteration, len(examples), apply_mismatch))
+            count = len(examples) * num_rollouts
+            b.note_selector_rollout(count, count, candidate=apply_mismatch)
+            return SimpleNamespace(features=np.ones((len(examples), 2)))
+
+        prompts = [{"prompts": str(i)} for i in range(190)]
+        curriculum = GradAlignCurriculum(
+            training_examples=prompts[:160], validation_examples=prompts[160:],
+            train_batch_size=4, total_update_steps=20, estimator=SimpleNamespace(estimate=estimate),
+            writer=None, rl_cluster=SimpleNamespace(_training_benchmark=b), candidate_rollouts=4,
+            validation_rollouts=4, selection_ratio=4, selection_interval=10,
+        )
+        b.metadata, b.learner_entry = {}, time.perf_counter()
+        b.actor = SimpleNamespace(train_steps=0)
+        b.cluster = SimpleNamespace(global_steps=0)
+        b._drain = Mock()
+        b._optimizer_steps = lambda: b.actor.train_steps
+        batches = iter(curriculum)
+        self.assertEqual(calls, [])
+        for i in range(1, 21):
+            b.before_iteration()
+            b.note_prompts(next(batches)["prompts"])
+            b.note_rollout(16, 100)
+            b.actor.train_steps = b.cluster.global_steps = i
+            b.after_iteration()
+        self.assertEqual(calls, [(1, 30, False), (1, 160, True), (11, 30, False), (11, 160, True)])
+        self.assertEqual(bench.summarize(b.rows[10:], b.window_seconds)["selector_rounds"], 1)
+        self.assertEqual(list(self.path.iterdir()), [])
+
+    def test_launch_routes_and_budgets(self):
+        launcher = Path(bench.__file__).with_name("run_grpo_benchmark.sh")
+        markers = {"pods": "pods_keep=2", "grpo-ds": "ds=1", "norm-top50": "actor_variant=gradient_norm_top50",
+                   "pcgrad": "conflict_method=pcgrad", "cagrad": "conflict_method=cagrad",
+                   "gradalign": "-m my_example.alignment_main"}
+        for method, marker in markers.items():
+            for mode in ("timing", "memory"):
+                warmup, steps = ((20, 50) if mode == "timing" else (0, 1)) if method == "gradalign" else (
+                    (15, 50) if mode == "timing" else (1, 2))
+                cmd = ["bash", str(launcher), method, mode, str(self.path / "never-create"),
+                       str(warmup), str(steps), "off", "--dry-run"]
+                with self.subTest(method=method, mode=mode):
+                    plan = subprocess.check_output(cmd, text=True)
+                    self.assertIn(marker, plan)
+                    self.assertIn("--skip-eval-before --skip-eval-after", plan)
+        self.assertFalse((self.path / "never-create").exists())
+
+    def test_disk_guard_rejects_small_volume(self):
+        with patch.object(bench.shutil, "disk_usage", return_value=SimpleNamespace(free=5 * 2**30)):
+            with self.assertRaisesRegex(ValueError, "need 6 GiB"):
+                bench.check_disk(self.path, 6)
 
     def test_compilation_attributed_but_not_conflated_with_cache_hits(self):
         b = self.bench
@@ -101,8 +215,9 @@ class BenchmarkTest(unittest.TestCase):
                 label: {str(i): {"stats": None} for i in range(4)}
                 for label in ("window_start", "window_end")
             }
-            (self.path / "trace").mkdir()
-            (self.path / "trace/test.xplane.pb").touch()
+            trace = self.path / "trace/plugins/profile/test/test.xplane.pb"
+            trace.parent.mkdir(parents=True)
+            trace.touch()
         b._write_reports()
         (self.path / "exit_code").write_text("0\n")
         return b
@@ -130,6 +245,21 @@ class BenchmarkTest(unittest.TestCase):
         evidence.write_text(json.dumps(payload))
         with self.assertRaisesRegex(ValueError, "every mesh device"):
             bench.verified_xprof_peaks(self.path, evidence)
+
+    def test_observed_xprof_extracts_stack_heap_without_certifying_residency(self):
+        self._fixture("memory")
+        profiles = {str(i): {"profileSummary": {"memoryCapacity": "1000", "peakStats": {
+            "peakBytesInUse": str(100 + i), "stackReservedBytes": "90",
+            "heapAllocatedBytes": str(10 + i)}}} for i in range(4)}
+        convert = SimpleNamespace(raw_to_tool_data=SimpleNamespace(xspace_to_tool_data=lambda *_: (
+            json.dumps({"memoryProfilePerAllocator": profiles}), "json")))
+        with patch.dict(sys.modules, {"xprof.convert": convert}):
+            observed = bench.observed_xprof_peaks(self.path)
+            self.assertEqual(observed["devices"]["3"]["peak_hbm_bytes"], 103)
+            self.assertFalse(observed["resident_allocations_verified"])
+            del profiles["3"]
+            with self.assertRaisesRegex(ValueError, "Incomplete XProf coverage"):
+                bench.observed_xprof_peaks(self.path)
 
     def test_comparable_rejects_different_initial_model_or_order(self):
         keys = (

@@ -4,7 +4,8 @@ Use a single idle worker on a v5p-16 node. Run all three methods on the
 **same worker**, sequentially, in fresh processes, and use the same environment,
 checkout, and data. No benchmark is enabled in an ordinary launch.
 
-The new launcher calls `my_example/run_grpo_gemma.sh`; it mirrors the exact
+The launcher calls the same Python entrypoint as `my_example/run_grpo_gemma.sh`
+(or the standalone GradAlign entrypoint). It mirrors the exact
 `baseline`, `group_policy`, and `group_loo_policy` route flags from
 `run_seeded_full.sh`, without invoking its post-training exporters. Python
 asserts the actual route. Vanilla uses the ordinary actor trainer and no
@@ -126,6 +127,59 @@ prints per-device values and the max across devices. It does not independently
 verify the analyst's reading of the trace. If the installed TPU stack cannot
 provide this coverage, report the supported allocator metric separately or
 leave runtime peak unreported. No missing data are set to zero.
+
+### Additional baseline cost measurements
+
+The same opt-in launcher accepts `pods`, `grpo-ds`, `norm-top50`, `pcgrad`,
+`cagrad`, and `gradalign`. They use clean seed 13, the same accuracy reward
+mode and 256/768 limits as the existing benchmark, not necessarily the reward
+environment or overrides of a historical full training run. Ordinary training
+launchers are unchanged. All six require `diagnostics=off`; neither checkpoint
+nor model is saved. GradAlign still uses its held-out **selector reference**;
+this is not periodic training evaluation.
+
+| Method | Default timing (warmup + measured updates) | Default memory |
+| --- | --- | --- |
+| PODS, GRPO+DS, Norm Top-50%, PCGrad, CAGrad | 15 + 50 | 1 + 2 |
+| GradAlign | 20 + 50 (five complete selector/update cycles) | 0 + 1 (first selector and first update) |
+
+The GradAlign round uses q=4, 160 candidates and 30 held-out reference
+prompts for a full round, each with four selector rollouts. The first selector
+is not executed by the learner's batch-size probe. `selector_seconds` measures
+reference/candidate estimation and ranking together, with audit output disabled;
+`window_seconds_outside_selector` is a residual, not a kernel-only update time.
+The short GradAlign HBM run measures the combined early window and includes
+initial compilation; it is not the same iteration range as 1+2 or a whole-run
+peak. Trace annotations distinguish selector and actor-update dispatch.
+
+`iterations.csv` counts training rollout tokens in `generated_tokens`, and
+GradAlign selector tokens separately. `summary.json` counts both in
+`generated_tokens` and `generated_tokens_per_wall_second`, and reports the
+training-only count/rate separately. DS training rollout counts include all
+candidate batches, even rejected or excess groups; its actor still gets 16
+rows. PODS generates 16 rows and the actor receives 8, verified at runtime.
+Cross-method prompt hashes are checked only for methods with a shared input
+stream. DS and GradAlign change that stream; their repeated runs are checked
+within their method, rather than against the fixed stream. The checker still
+rejects different commits and runtime configurations; rerun a Vanilla anchor
+on the new checkout if a same-commit comparison is needed.
+
+For limited space, queue `timing` first and capture `memory` one method at a
+time or use a larger output filesystem. The launcher and trace start require
+6 GiB free by default (`TUNIX_BENCH_MIN_FREE_GIB`); this is a preflight check,
+not an upper bound on XPlane size. Raw traces are never removed automatically.
+Extract a small JSON with an isolated XProf Python from the repo root:
+
+```bash
+"$XPROF_PY" -m my_example.rebuttal.grpo_benchmark xprof-observed "$RUN" \
+  > "$RUN/xprof_observed.json"
+```
+
+An empty/incomplete device map fails extraction rather than reporting zero.
+These are observed per-chip stack-plus-heap peaks, with their stack/heap
+breakdowns and timestamps, not an automatic resident-buffer qualification.
+Preserve or transfer raw traces for provenance. The extraction does not
+initialize TPU and may be run on another compatible machine after transfer.
 
 Historical 691-step logs are separate: report complete-job wall time only from
 verified launch/finish timestamps for each run and state which phases are

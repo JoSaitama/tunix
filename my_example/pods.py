@@ -160,12 +160,13 @@ class PODSMixin:
                 advantages=jax.device_put(advantages.reshape(-1))
             )
         self._record_pods(grouped, chosen, local, advantages, prompts)
-        self.rl_cluster.buffer_metrics({
-            "pods/generated_completions": (len(rewards), np.sum),
-            "pods/selected_completions": (len(flat), np.sum),
-            "pods/kept_fraction": (m / n, np.mean),
-            "pods/selected_reward_variance": (chosen.var(axis=1).mean(), np.mean),
-        }, mode=mode)
+        if getattr(self.rl_cluster, "_training_benchmark", None) is None:
+            self.rl_cluster.buffer_metrics({
+                "pods/generated_completions": (len(rewards), np.sum),
+                "pods/selected_completions": (len(flat), np.sum),
+                "pods/kept_fraction": (m / n, np.mean),
+                "pods/selected_reward_variance": (chosen.var(axis=1).mean(), np.mean),
+            }, mode=mode)
         return result
 
     def _process_accumulated_batches(self, micro_batches, micro_batch_sizes, mode):

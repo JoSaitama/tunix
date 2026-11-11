@@ -253,6 +253,12 @@ class PromptGradientEstimator:
         pad_id = self.rl_cluster.rollout.pad_id()
         eos_id = self.rl_cluster.rollout.eos_id()
         completion_ids_np = np.asarray(rollout_output.tokens)
+        benchmark = getattr(self.rl_cluster, "_training_benchmark", None)
+        if benchmark is not None:
+            benchmark.note_selector_rollout(
+                len(completion_ids_np), int(np.count_nonzero(completion_ids_np != pad_id)),
+                candidate=apply_mismatch,
+            )
         prompt_ids = jnp.asarray(rollout_output.left_padded_prompt_tokens)
         completion_padding_mask = completion_ids_np != pad_id
         completion_mask = common.np_make_completion_mask(

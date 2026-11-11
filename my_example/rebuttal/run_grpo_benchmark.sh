@@ -4,23 +4,44 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT"
 if [[ ${1:-} == --help || $# -lt 3 ]]; then
-  echo "usage: bash $0 {vanilla|dtv|dtv-loo} {timing|memory} OUT [WARMUP=15] [STEPS=50] [off|on] [--dry-run]"
+  echo "usage: bash $0 {vanilla|dtv|dtv-loo|pods|grpo-ds|norm-top50|pcgrad|cagrad|gradalign} {timing|memory} OUT [WARMUP] [STEPS] [off|on] [--dry-run]"
   [[ ${1:-} == --help ]] && exit 0
   exit 2
 fi
 METHOD="$1"
 MODE="$2"
 OUT="$3"
-WARMUP="${4:-15}"
-STEPS="${5:-50}"
+DEFAULT_WARMUP=15 DEFAULT_STEPS=50
+if [[ "$METHOD" == gradalign ]]; then
+  if [[ "$MODE" == memory ]]; then DEFAULT_WARMUP=0 DEFAULT_STEPS=1
+  else DEFAULT_WARMUP=20; fi
+elif [[ "$MODE" == memory ]]; then
+  DEFAULT_WARMUP=1 DEFAULT_STEPS=2
+fi
+WARMUP="${4:-$DEFAULT_WARMUP}"
+STEPS="${5:-$DEFAULT_STEPS}"
 DIAGNOSTICS="${6:-off}"
 DRY_RUN="${7:-}"
 [[ -n "$OUT" && $# -le 7 && ( -z "$DRY_RUN" || "$DRY_RUN" == --dry-run ) ]] || exit 2
 [[ "$MODE" == timing || "$MODE" == memory ]] || exit 2
 [[ "$DIAGNOSTICS" == off || ( "$DIAGNOSTICS" == on && "$MODE" == timing ) ]] || exit 2
-[[ "$WARMUP" =~ ^[1-9][0-9]{0,2}$ && "$STEPS" =~ ^[1-9][0-9]{0,2}$ ]] || exit 2
+[[ "$WARMUP" =~ ^(0|[1-9][0-9]{0,2})$ && "$STEPS" =~ ^[1-9][0-9]{0,2}$ ]] || exit 2
 (( WARMUP + STEPS <= 691 )) || exit 2
+if [[ "$METHOD" == gradalign ]]; then
+  if [[ "$MODE" == memory ]]; then
+    [[ "$WARMUP" == 0 && "$STEPS" == 1 ]] || { echo 'GradAlign memory uses 0 + 1.' >&2; exit 2; }
+  else
+    (( WARMUP >= 10 && WARMUP % 10 == 0 && STEPS % 10 == 0 )) || {
+      echo 'GradAlign timing needs aligned ten-update cycles.' >&2; exit 2;
+    }
+  fi
+else
+  (( WARMUP > 0 )) || exit 2
+fi
 [[ "$OUT" == /* ]] || OUT="$ROOT/$OUT"
+if [[ "$DRY_RUN" != --dry-run && -f my_example/.env ]]; then
+  set -a; source my_example/.env; set +a
+fi
 
 unset JAX_PLATFORMS JAX_PLATFORM_NAME
 unset TUNIX_PODS_KEEP_COUNT TUNIX_DYNAMIC_SAMPLING TUNIX_FIXED_FILTER_METHOD
@@ -30,8 +51,12 @@ unset TUNIX_DBC_SELF_INF_LOO_POLICY_ONLY TUNIX_DBC_SELF_INF_FLIP
 unset TUNIX_DBC_SELF_INF_DECISIONS_PATH TUNIX_ACTOR_GRAD_ACC_FACTOR
 unset TUNIX_ACTOR_PROMPT_GROUP_COALESCE TUNIX_ENABLE_ACTOR_PHASE_TIMING
 unset TUNIX_ENABLE_ACTOR_HEARTBEAT TUNIX_ENABLE_ACTOR_PROGRESS_METRICS
+unset TUNIX_PODS_ARTIFACT_DIR TUNIX_DS_ARTIFACT_DIR TUNIX_NORM_ARTIFACT_DIR
+unset TUNIX_GRADIENT_CONFLICT_METHOD TUNIX_GRADIENT_CONFLICT_INCLUDE_KL TUNIX_CAGRAD_C
+unset TUNIX_LEARNALIGN_EQUIVALENCE_REPORT
 
 METHOD_ARGS=()
+MODULE=my_example.main
 case "$METHOD" in
   vanilla) ;;
   dtv)
@@ -45,8 +70,26 @@ case "$METHOD" in
       export TUNIX_DBC_SELF_INF_DECISIONS_PATH="$OUT/selection.jsonl"
     fi
     ;;
+  pods) export TUNIX_PODS_KEEP_COUNT=2 ;;
+  grpo-ds) export TUNIX_DYNAMIC_SAMPLING=1 TUNIX_DS_MAX_GENERATION_BATCHES=20 ;;
+  norm-top50)
+    export TUNIX_DBC_VARIANT=gradient_norm_top50 TUNIX_GRPO_NUM_GENERATIONS=4
+    METHOD_ARGS=(--use-dynamic-batch-curation)
+    ;;
+  pcgrad|cagrad)
+    export TUNIX_DBC_VARIANT=gradient_conflict TUNIX_GRADIENT_CONFLICT_METHOD="$METHOD"
+    export TUNIX_GRADIENT_CONFLICT_INCLUDE_KL=0 TUNIX_CAGRAD_C=0.5
+    METHOD_ARGS=(--use-dynamic-batch-curation)
+    ;;
+  gradalign)
+    MODULE=my_example.alignment_main
+    METHOD_ARGS=(--alignment-method gradalign --gradalign-selection-ratio 4
+      --gradalign-validation-prompts 30 --gradalign-candidate-rollouts 4
+      --gradalign-validation-rollouts 4 --gradalign-selection-interval 10)
+    ;;
   *) echo "Unsupported benchmark method: $METHOD" >&2; exit 2 ;;
 esac
+[[ "$DIAGNOSTICS" == off || "$METHOD" =~ ^(vanilla|dtv|dtv-loo)$ ]] || exit 2
 export TUNIX_EXPERIMENT_SEED=13 TUNIX_REWARD_RANK_NOISE_FRACTION=0
 export TUNIX_REWARD_RANK_NOISE_SEED=13 TUNIX_REWARD_MODE=accuracy
 export TUNIX_DISABLE_TFLOPS_MEASUREMENT=1 PYTHONUNBUFFERED=1
@@ -60,7 +103,12 @@ export TUNIX_BENCH_RESOURCE="${TUNIX_BENCH_RESOURCE:-v5p-16}"
 HOST="$(hostname -s)"
 export TUNIX_BENCH_PHYSICAL_WORKER="${TUNIX_BENCH_PHYSICAL_WORKER:-${HOST##*-w-}}"
 
-COMMAND=(bash my_example/run_grpo_gemma.sh --skip-eval-before --skip-eval-after
+COMMAND=(python -m "$MODULE" --skip-eval-before --skip-eval-after
+  --source tfds --train-data-dir ./data/train --test-data-dir ./data/test
+  --train-fraction 0.9 --train-micro-batch-size 4 --test-micro-batch-size 1
+  --num-generations 4 --max-train-examples 3072 --max-eval-examples 1319
+  --num-epochs 1 --learning-rate 1e-6 --no-wandb
+  --model-id google/gemma-3-1b-it --mesh-counts 4,1
   --metrics-log-dir "$OUT/tensorboard"
   --checkpoint-root "$OUT/checkpoints" --output-dir "$OUT/model")
 COMMAND+=( ${METHOD_ARGS[@]+"${METHOD_ARGS[@]}"} )
@@ -70,6 +118,9 @@ if [[ "$DRY_RUN" == --dry-run ]]; then
   printf 'score_policy=%s loo=%s loo_policy=%s selection=%s\n' \
     "${TUNIX_DBC_SELF_INF_POLICY:-off}" "${TUNIX_DBC_SELF_INF_LOO:-off}" \
     "${TUNIX_DBC_SELF_INF_LOO_POLICY:-off}" "${TUNIX_DBC_SELF_INF_DECISIONS_PATH:-off}"
+  printf 'actor_variant=%s conflict_method=%s pods_keep=%s ds=%s\n' \
+    "${TUNIX_DBC_VARIANT:-off}" "${TUNIX_GRADIENT_CONFLICT_METHOD:-off}" \
+    "${TUNIX_PODS_KEEP_COUNT:-off}" "${TUNIX_DYNAMIC_SAMPLING:-off}"
   printf '%q ' "${COMMAND[@]}"; printf '\n'
   exit 0
 fi
@@ -83,6 +134,11 @@ git diff --quiet HEAD -- my_example tunix || {
 }
 [[ ! -e "$OUT" && ! -L "$OUT" ]] || { echo "Refusing existing output: $OUT" >&2; exit 2; }
 mkdir -p "$(dirname "$OUT")"
+if [[ "$MODE" == memory ]]; then
+  export TUNIX_BENCH_MIN_FREE_GIB="${TUNIX_BENCH_MIN_FREE_GIB:-6}"
+  python -m my_example.rebuttal.grpo_benchmark disk-check "$(dirname "$OUT")" \
+    --min-free-gib "$TUNIX_BENCH_MIN_FREE_GIB"
+fi
 mkdir "$OUT"
 export TUNIX_BENCH_LAUNCH_MONOTONIC="$(python -c 'import time; print(time.perf_counter())')"
 set +e

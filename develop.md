@@ -13532,3 +13532,28 @@ This file tracks engineering changes made in this repository.
 - 改动范围与文件：无代码改动，仅更新 `develop.md`。提供本地显式提交清单与推送命令，以及在已登录的 Eric v5p-8 单 worker 上快进拉取并 nohup 启动的命令。服务器仓库按 `$HOME/Project_8k/tunix`，复用 `.venv_jax081` 或 `.venv`。
 - 启动配置：沿用最近 clean seed5 的 `dtv batch`、accuracy reward、4×4、691 更新、完整 1319 题 pre/post 与 launcher 默认长度 256/768。新 `TUNIX_DTV_FLIP_BATCH_FRACTION=0.1`、`TUNIX_DTV_FLIP_FREQUENCY=2`，全新目录。第 1、3、5 步启用，每步最多翻 2 条负分；偶数步普通更新。独立保存提交 SHA、PID、退出码和产物。
 - 验证与待办：本地提交片段、服务器片段及其 nohup 内层均通过 `bash -n`，`git diff --check` 通过。未执行提交、推送或连接节点。首次真实 TPU 运行需核对 JSONL 的启用序列和 2/0/2 配额。
+
+## 2026-11-11 — 盘点 GSM8K baseline 梯度路径与成本测量优先级
+
+- 改动范围：无代码改动，仅更新 `develop.md`。原表 7 个 baseline 配置（Vanilla、Random/Reward 各 5%/10%、LearnAlign、GradAlign），rebuttal 新增 5 个（PODS、GRPO+DS、Norm Top-50%、PCGrad、CAGrad），共 12 个配置、10 个 baseline 家族；加 DTV 和 DTV-Loo 为 14 个正式对比配置。DTV-flip 和历史消融不计入，不代表全部正式种子已完成。
+- 核对结果：Random/Reward 虽不依赖梯度评分，当前 FixedFilterTrainer 会临时生成一棵完整 per-completion 梯度树。Norm 与正式 DTV/LOO 的源码分别计算 full 和 policy 两棵逐条梯度树；PCGrad/CAGrad 默认使用逐条 policy 梯度、一个聚合 full batch 梯度与小 Gram 矩阵；LearnAlign/GradAlign 仅在选择阶段临时分块求逐条梯度，长期保存的是低维投影特征。Vanilla/PODS/DS 无额外逐条梯度树。源码逻辑不能确定 XLA 实际缓冲峰值，旧压力测试不与 XProf 窗口峰值混用。
+- 验证与待办：静态核对正式路径、launcher、selector/curriculum 和现有 benchmark 白名单；`git diff --check -- develop.md` 通过。成本补测优先 Norm、PCGrad、CAGrad、DS；DS 须含被拒生成，alignment 须跨选择阶段。未改 benchmark、未运行 TPU 或生成新实测。
+
+## 2026-11-11 — 澄清 group 梯度、PODS/DS 与 alignment 计时边界
+
+- 改动范围：无代码改动，仅更新 `develop.md`。group 与 batch 是评分/选择范围，不是 DTV/LOO 的两种梯度；正式 group 版按回答用 policy 梯度评分、聚合入选回答的 full 梯度更新。Norm Top-50% 按 policy 梯度平方范数每题留二，同样以入选 full 梯度更新。
+- 代码核对：PODS 按观测奖励选高方差子集并重算组内 advantage，普通聚合反传与训练 mismatch 排名反转是两回事。DS 在现有密集奖励上判断 `std>0`，不足四组时生成下一个完整 4×4 候选批，不追加 actor 更新；不凭无逐条梯度推断墙钟开销很小。
+- 计时建议与验证：复核 curriculum 默认 LearnAlign 预热 300 prompts（4 prompts/步即 75 步）后一次全池选择、GradAlign 每 10 个 update 前选择。历史完整墙钟先标明 seed/评测/保存边界；补测 LearnAlign 一次完整选择阶段、GradAlign 对齐 5 个完整选择周期，并分别报 selector/更新、额外 rollout token 与阶段 HBM。对照共享 loss hook、两个 trainer、PODS/DS 和 alignment 源码，`git diff --check -- develop.md` 通过。未启动或修改训练。
+
+## 2026-11-11 — 确认六 baseline 补测范围与 LearnAlign 摊销口径
+
+- 改动范围：无代码改动，仅更新 `develop.md`。不补 Random/Reward filter；优先 GradAlign、PODS、GRPO+DS、Norm Top-50%、PCGrad、CAGrad。旧 benchmark 进入 `main.py` 的 benchmark 分支后禁用 checkpoint 并在模型导出前返回；仍保留日志/计量报告及 memory 模式的 XPlane。六方法尚未接入，尤其普通 alignment 入口仍保存模型；不能用原训练 launcher 代替 benchmark。
+- LearnAlign 只按完整算法成本事后摊销：50×75/691≈5.427 个预热更新等效量，50×616/691≈44.573 个选择后更新等效量，还应计 50/691×一次完整 selector 耗时。不能实际缩为 5/45 步后称同口径实测，也不对 HBM 峰值做加权。优先使用用户保留的同口径完整墙钟，必要时另量全池选择阶段。
+- 验证与待办：核对 `main.py` 提前返回、现有 launcher 与 Python 白名单、`alignment_main.py` 正常训练产物路径及 LearnAlign curriculum；复算系数，`git diff --check -- develop.md` 通过。六项可在接入和 smoke 验证后同 worker 串行排队，单独检查 trace 大小和显存事件覆盖；未修改训练或启动任务。
+
+## 2026-11-11 — 接入六种 GSM8K baseline 的无 checkpoint 成本 benchmark
+
+- 改动范围：`my_example/rebuttal/{grpo_benchmark.py,run_grpo_benchmark.sh,grpo_benchmark.md,gradient_norm_trainer.py}`、`my_example/{pods.py,dynamic_sampling.py,alignment_main.py}`、`my_example/alignment_baselines/{curriculum.py,gradient_features.py}`、`tunix/rl/{rl_learner.py,gradient_conflict_trainer.py}`、`tests/my_example/grpo_benchmark_test.py` 及 `develop.md`。仅 opt-in profiling，普通训练算法、超参、保存流程与 launcher 不变。
+- 新测量：PODS、DS、Norm、PCGrad、CAGrad 的 timing 15+50、memory 1+2。GradAlign timing 20+50（5 完整周期），memory 0+1（首轮 selector 和首次更新）；绕过首 batch 形状探测对 lazy selector 的提前执行，分开统计 selector 和训练 token/时间。DS 含被拒与超额组的全部生成，PODS 验证 16 条生成/8 条更新。统一 clean seed13、原 691 步 LR schedule 和已有 benchmark accuracy reward 口径；旧记录的 reward override 不作假定。
+- 磁盘与 HBM：两次检查所在卷默认至少 6 GiB 可用；不是 trace 上限，原 trace 不自动删除。XProf 离线工具强制四设备并分列 stack+heap，但不自动认定常驻覆盖。建议 9 GB 时先排 timing，再逐个采集并转移 trace。GradAlign 的首轮窗口与其他方法 1+2 分开标注。
+- 验证与待办：16 项本地 CPU benchmark 单测（含六方法双模式 dry-run、DS/PODS 工作量、GradAlign lazy 周期、磁盘和 XProf 覆盖）、23 项 DS、2 项 alignment curriculum、9 项隔离 PCGrad/CAGrad、Ruff E9/F、shell 语法与 `git diff --check` 通过。完整 alignment/PODS 框架回归被本机缺 `metrax` 阻断。未连接 TPU、推送或实际训练；真实首轮 trace 大小、覆盖和 TPU 集成待服务器 smoke。LearnAlign 历史启动间隔 6:20:51 除 691≈33.07 秒/更新，属于含加载/评测/选择/保存导出的整次作业摊销，非纯训练或 50 步实测。

@@ -556,9 +556,16 @@ class RLLearner(abc.ABC, Generic[TConfig]):
   ) -> None:
     """Main entry point for the training loop."""
     full_batch_iterator = iter(train_ds)
-    first_item = next(full_batch_iterator)
-    full_batch_size = len(first_item["prompts"])
-    full_batch_iterator = itertools.chain([first_item], full_batch_iterator)
+    benchmark = getattr(self.rl_cluster, "_training_benchmark", None)
+    benchmark_batch_size = getattr(benchmark, "first_batch_size", None)
+    if benchmark_batch_size is None:
+      first_item = next(full_batch_iterator)
+      full_batch_size = len(first_item["prompts"])
+      full_batch_iterator = itertools.chain([first_item], full_batch_iterator)
+    else:
+      # Lazy selector curricula must not execute their first selector during
+      # the shape probe, outside the benchmark iteration and HBM trace.
+      full_batch_size = benchmark_batch_size
     # Initialize batch sizes.
     mini_batch_size = self._training_config.mini_batch_size or full_batch_size
     train_micro_batch_size = (
@@ -603,7 +610,6 @@ class RLLearner(abc.ABC, Generic[TConfig]):
           full_batch_iterator, train_micro_batch_size
       )
 
-    benchmark = getattr(self.rl_cluster, "_training_benchmark", None)
     if benchmark is not None:
       benchmark.configure_loop(
           self, full_batch_size, mini_batch_size, train_micro_batch_size,
@@ -786,6 +792,8 @@ class RLLearner(abc.ABC, Generic[TConfig]):
           curr_eval_ds = eval_data_queue.get(block=True)
         benchmark = getattr(self.rl_cluster, "_training_benchmark", None)
         phase = benchmark.phase("actor_update") if benchmark else contextlib.nullcontext()
+        if benchmark is not None:
+          benchmark.check_actor_input(curr_train_ds)
         with phase:
           self.rl_cluster.update_actor(
               curr_train_ds,

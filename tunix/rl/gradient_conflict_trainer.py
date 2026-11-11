@@ -142,6 +142,8 @@ class GradientConflictTrainer(rl_trainer.Trainer):
     _check_finite(loss, gram, direction)
     optimizer.update(model, direction)
 
+    if getattr(self, "_benchmark_quiet", False):
+      return loss, None
     if isinstance(aux, dict):
       aux["skipped_samples"] = jnp.asarray(0.0)
       aux["gradient_conflict_negative_pairs"] = jnp.mean(

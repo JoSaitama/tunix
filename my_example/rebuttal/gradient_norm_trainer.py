@@ -133,7 +133,7 @@ class GradientNormTop50Trainer(rl_trainer.Trainer):
         final_grads = masked_mean(full, mask)
         final_loss = jnp.sum(losses * mask) / jnp.clip(jnp.sum(mask), 1.)
         optimizer.update(model, final_grads)
-        if not self._has_aux:
+        if not self._has_aux or getattr(self, "_benchmark_quiet", False):
             return final_loss, None
         final_aux = masked_mean(aux, mask)
         if not isinstance(final_aux, dict):

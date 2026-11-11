@@ -156,6 +156,7 @@ class DynamicSamplingMixin:
         from tunix.rl import rl_cluster as cluster_lib
 
         selected, kept = [], 0
+        benchmark = getattr(self.rl_cluster, "_training_benchmark", None)
         target = int(self._training_config.train_micro_batch_size)
         started = time.monotonic()
         initial_actor_step = int(self.rl_cluster.actor_trainer.train_steps)
@@ -190,6 +191,8 @@ class DynamicSamplingMixin:
             grouped = rewards.reshape(target, group_size)
             eligible = eligible_groups(grouped)
             chosen = np.flatnonzero(eligible)[:target-kept]
+            if benchmark is not None:
+                benchmark.note_ds_candidate(prompts[::group_size], int(eligible.sum()), len(chosen))
             self._ds_rounds += 1
             self._ds_generated += target
             self._ds_nonconstant += int(eligible.sum())
@@ -207,13 +210,14 @@ class DynamicSamplingMixin:
                 combined = concatenate_examples(selected, self.rl_cluster.rollout.pad_id())
                 self._ds_updates += 1
                 self._write_summary(status="prepared", generation_batches=generation_batch)
-                self.rl_cluster.buffer_metrics({
-                    "ds/generation_batches": (generation_batch, np.mean),
-                    "ds/generated_groups": (target * generation_batch, np.sum),
-                    "ds/selected_groups": (target, np.sum),
-                    "ds/selected_fraction": (1 / generation_batch, np.mean),
-                    "ds/refill_seconds": (time.monotonic() - started, np.sum),
-                }, mode=cluster_lib.Mode.TRAIN)
+                if benchmark is None:
+                    self.rl_cluster.buffer_metrics({
+                        "ds/generation_batches": (generation_batch, np.mean),
+                        "ds/generated_groups": (target * generation_batch, np.sum),
+                        "ds/selected_groups": (target, np.sum),
+                        "ds/selected_fraction": (1 / generation_batch, np.mean),
+                        "ds/refill_seconds": (time.monotonic() - started, np.sum),
+                    }, mode=cluster_lib.Mode.TRAIN)
                 return combined
         self._write_summary(status="refill_cap_exceeded", generation_batches=self._ds_cap)
         raise RuntimeError(f"DS refill cap exceeded: {kept}/{target} eligible groups after {self._ds_cap} batches; no partial actor update")

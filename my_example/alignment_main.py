@@ -6,6 +6,7 @@ import json
 import os
 import shutil
 import sys
+import time
 from pathlib import Path
 
 from flax import nnx
@@ -135,6 +136,20 @@ def main(argv: list[str] | None = None) -> None:
     alignment, frozen_argv = parse_alignment_args(raw_argv)
     cfg = config_from_args(frozen_argv)
     alignment.validate(train_batch_size=cfg.data.train_micro_batch_size)
+    benchmark = None
+    if os.environ.get("TUNIX_GRPO_BENCHMARK"):
+        from .rebuttal.grpo_benchmark import Benchmark
+
+        benchmark = Benchmark.from_env()
+        if (alignment.method, benchmark.method) != ("gradalign", "gradalign"):
+            raise ValueError("Only GradAlign is supported by the alignment benchmark entrypoint")
+        if (
+            alignment.gradalign_selection_interval, alignment.selection_ratio,
+            alignment.gradalign_validation_prompts,
+            alignment.gradalign_candidate_rollouts, alignment.gradalign_validation_rollouts,
+            alignment.selection_micro_batch_size, alignment.projection_dim,
+        ) != (10, 4, 30, 4, 4, 4, 4096):
+            raise ValueError("Benchmark requires the standard GradAlign selector budget")
 
     if cfg.training.use_dynamic_batch_curation:
         raise ValueError(
@@ -185,12 +200,16 @@ def main(argv: list[str] | None = None) -> None:
         if not alignment.learnalign_warmup_counts_toward_budget:
             effective_max_steps += warmup_steps
 
-    test_dataset = batch_dataset(
-        get_dataset(cfg.data.test_data_dir, "test", cfg.data.source),
-        cfg.data.test_micro_batch_size,
-        cfg.data.max_eval_examples,
-    )
-    val_dataset = _batched(heldout_examples, train_batch_size)
+    test_dataset = val_dataset = None
+    if benchmark:
+        benchmark.check_config(cfg, effective_max_steps)
+    else:
+        test_dataset = batch_dataset(
+            get_dataset(cfg.data.test_data_dir, "test", cfg.data.source),
+            cfg.data.test_micro_batch_size,
+            cfg.data.max_eval_examples,
+        )
+        val_dataset = _batched(heldout_examples, train_batch_size)
 
     print(
         "Alignment baseline:",
@@ -203,9 +222,12 @@ def main(argv: list[str] | None = None) -> None:
         sep=" | ",
     )
 
+    load_start = time.perf_counter() if benchmark else None
     model_path = download_model(cfg.model)
     model_config = resolve_model_config(cfg.model.model_id)
     mesh, mesh_counts = make_mesh(cfg.runtime.mesh_counts)
+    if benchmark:
+        benchmark.check_topology(jax, mesh)
     print(f"Using mesh counts: {mesh_counts}")
     gemma3 = load_model(model_path, model_config, mesh)
     lora_policy = apply_lora(gemma3, cfg.lora, mesh=mesh)
@@ -214,14 +236,15 @@ def main(argv: list[str] | None = None) -> None:
     if tokenizer.eos_id() not in eos_tokens:
         eos_tokens.append(tokenizer.eos_id())
 
-    sampler = build_sampler(
-        lora_policy,
-        tokenizer,
-        model_config,
-        cfg.grpo.max_prompt_length,
-        cfg.grpo.total_generation_steps,
-        eos_tokens,
-    )
+    if benchmark is None:
+        sampler = build_sampler(
+            lora_policy,
+            tokenizer,
+            model_config,
+            cfg.grpo.max_prompt_length,
+            cfg.grpo.total_generation_steps,
+            eos_tokens,
+        )
     if cfg.runtime.eval_before_train:
         result = evaluate(
             test_dataset,
@@ -250,6 +273,9 @@ def main(argv: list[str] | None = None) -> None:
         eos_tokens,
         cfg.runtime.use_wandb,
     )
+    if benchmark:
+        cluster_config.training_config.checkpoint_root_directory = None
+        cluster_config.training_config.metrics_logging_options = None
     rl_cluster = rl_cluster_lib.RLCluster(
         actor=lora_policy,
         reference=gemma3,
@@ -259,13 +285,15 @@ def main(argv: list[str] | None = None) -> None:
     trainer = build_trainer(rl_cluster, cfg.grpo)
 
     run_artifact_dir = Path(alignment.artifact_dir)
-    writer = SelectionArtifactWriter(str(run_artifact_dir), alignment.method)
-    _write_run_metadata(
-        run_artifact_dir,
-        alignment=alignment,
-        cfg=cfg,
-        max_steps=effective_max_steps,
-    )
+    writer = None
+    if benchmark is None:
+        writer = SelectionArtifactWriter(str(run_artifact_dir), alignment.method)
+        _write_run_metadata(
+            run_artifact_dir,
+            alignment=alignment,
+            cfg=cfg,
+            max_steps=effective_max_steps,
+        )
     selector_noise_config = reward_rank_noise_config_from_env()
     estimator = PromptGradientEstimator(
         rl_cluster=rl_cluster,
@@ -331,6 +359,14 @@ def main(argv: list[str] | None = None) -> None:
             selection_interval=alignment.gradalign_selection_interval,
         )
 
+    if benchmark:
+        selector_config = alignment.to_dict()
+        selector_config.pop("artifact_dir", None)
+        benchmark.run(
+            jax, nnx, mesh, trainer, curriculum, cfg, model_path, eos_tokens, load_start,
+            selector_config=selector_config,
+        )
+        return
     maybe_init_wandb(cfg.runtime.use_wandb)
     try:
         print("Starting alignment-baseline training...")
