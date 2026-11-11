@@ -14,6 +14,7 @@ import subprocess
 import tempfile
 from types import SimpleNamespace
 import unittest
+from unittest import mock
 
 from flax import nnx
 import jax
@@ -50,17 +51,24 @@ class Model(nnx.Module):
     self.weight = nnx.Param(jnp.asarray(2.0))
 
 
-def make_trainer(loo=False, scope="batch", generations=4, aux=True, ratio="1"):
+def make_trainer(loo=False, scope="batch", generations=4, aux=True, ratio="1",
+                 batch_ratio=None, frequency=1, grad_acc_steps=1):
 
   trainer = object.__new__(flip.DTVFlipTrainer)
-  trainer.flip_numerator, trainer.flip_denominator = flip.ratio_terms(ratio)
+  trainer.flip_numerator, trainer.flip_denominator = flip.ratio_terms(
+      ratio if batch_ratio is None else batch_ratio
+  )
+  trainer.quota_policy = ("cumulative_floor_no_catchup" if batch_ratio is None
+                          else "batch_nearest_even")
+  trainer.frequency = frequency
+  trainer._grad_acc_steps = grad_acc_steps
   trainer.scope, trainer.loo = scope, loo
   trainer.num_generations, trainer.decisions_path = generations, None
   trainer._lora_enabled, trainer._has_aux = False, aux
   trainer.gen_model_input_fn = lambda inputs: inputs
   def loss(model, policy, kl):
-    value = model.weight[...] * (policy + kl)
-    return (value, {"kl": model.weight[...] * kl}) if aux else value
+    value = model.weight[...] * jnp.mean(policy + kl)
+    return (value, {"kl": model.weight[...] * jnp.mean(kl)}) if aux else value
   trainer.loss_fn = loss
   return trainer
 
@@ -298,7 +306,7 @@ class DTVFlipTest(unittest.TestCase):
       launcher = scripts / "run_dtv_flip.sh"
       launcher.write_text((ROOT / "my_example/run_dtv_flip.sh").read_text())
       downstream = scripts / "run_grpo_gemma.sh"
-      downstream.write_text('#!/usr/bin/env bash\nprintf \'%s\\n\' "$TUNIX_DBC_SELF_INF_FLIP" "$TUNIX_DBC_SELF_INF_LOO" "$TUNIX_DTV_FLIP_DECISIONS_PATH" "$TUNIX_DTV_FLIP_MAX_FRACTION" "$@" > "$CAPTURE"\nexit "${FAKE_EXIT:-0}"\n')
+      downstream.write_text('#!/usr/bin/env bash\nprintf \'%s\\n\' "$TUNIX_DBC_SELF_INF_FLIP" "$TUNIX_DBC_SELF_INF_LOO" "$TUNIX_DTV_FLIP_DECISIONS_PATH" "$TUNIX_DTV_FLIP_MAX_FRACTION" "$TUNIX_DTV_FLIP_BATCH_FRACTION" "$TUNIX_DTV_FLIP_FREQUENCY" "$@" > "$CAPTURE"\nexit "${FAKE_EXIT:-0}"\n')
       downstream.chmod(0o755)
       (scripts / "save_results_to_my_result.py").write_text("pass\n")
       results = scripts / "my result"
@@ -306,7 +314,8 @@ class DTVFlipTest(unittest.TestCase):
       (results / "plot_global_eval_rewards_sum.py").write_text("pass\n")
       capture = root / "args.txt"
       env = dict(os.environ, CAPTURE=str(capture), TUNIX_MY_RESULT_DIR=str(results),
-                 TUNIX_DTV_FLIP_MAX_FRACTION="0.1")
+                 TUNIX_DTV_FLIP_MAX_FRACTION="0.1", TUNIX_DTV_FLIP_FREQUENCY="1",
+                 TUNIX_DTV_FLIP_BATCH_FRACTION="")
       # Export subprocess's interpreter location so the legacy export command
       # named 'python' resolves in both server and isolated CPU environments.
       import sys
@@ -322,6 +331,7 @@ class DTVFlipTest(unittest.TestCase):
           self.assertEqual(lines[:2], ["1", "1" if score == "dtv-loo" else "0"])
           self.assertIn(f"dtv-flip_{score}_{scope}_cap0p1_", lines[2])
           self.assertEqual(lines[3], "0.1")
+          self.assertEqual(lines[4:6], ["", "1"])
           self.assertIn("--use-dbc-self-inf-" + scope, lines)
           self.assertIn(str(root / "custom metrics"), lines)
           self.assertIn(str(root / "custom ckpt"), lines)
@@ -333,6 +343,19 @@ class DTVFlipTest(unittest.TestCase):
       for cap in ("nan", "-0.1", "1.1", "../../bad"):
         result = subprocess.run(["bash", str(launcher), "dtv", "batch"],
             env=dict(env, TUNIX_DTV_FLIP_MAX_FRACTION=cap), capture_output=True)
+        self.assertEqual(result.returncode, 2)
+      command = ["bash", str(launcher), "dtv", "batch"]
+      for batch_ratio, slug in (("", "cap0p1_freq2"), ("0.2", "batchcap0p2_freq2")):
+        result = subprocess.run(command, env=dict(env, TUNIX_DTV_FLIP_FREQUENCY="2",
+            TUNIX_DTV_FLIP_BATCH_FRACTION=batch_ratio), capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        lines = capture.read_text().splitlines()
+        self.assertIn(slug, lines[2])
+        self.assertEqual(lines[4:6], [batch_ratio, "2"])
+      for variable, value in (("TUNIX_DTV_FLIP_BATCH_FRACTION", "-0.1"),
+                              ("TUNIX_DTV_FLIP_FREQUENCY", "0"),
+                              ("TUNIX_DTV_FLIP_FREQUENCY", "2147483648")):
+        result = subprocess.run(command, env=dict(env, **{variable: value}), capture_output=True)
         self.assertEqual(result.returncode, 2)
       result = subprocess.run(["bash", str(launcher), "dtv", "batch"],
                               env=dict(env, FAKE_EXIT="7"), capture_output=True)
@@ -402,6 +425,105 @@ class DTVFlipTest(unittest.TestCase):
     self.assertEqual(int(optimizer.dtv_flip_budget.seen[...]), 80)
     self.assertEqual(int(optimizer.dtv_flip_budget.flipped[...]), 8)
 
+  def test_nearest_even_quota_and_candidate_shortage(self):
+    for size, quota in ((16, 2), (32, 4), (64, 6), (512, 52), (10, 2)):
+      with self.subTest(size=size):
+        self.assertEqual(flip.nearest_even_quota(size, 1, 10), quota)
+    self.assertEqual(flip.nearest_even_quota(3, 1, 1), 2)
+    trainer = make_trainer(batch_ratio="0.1")
+    model = Model()
+    optimizer = nnx.Optimizer(model, optax.sgd(.1), wrt=nnx.Param)
+    trainer.initialize_budget_state(optimizer, {}, 0)
+    step = nnx.jit(trainer._train_step)
+    for policy, expected in ((jnp.ones(16), 0), (jnp.array([-1.] + [1.] * 15), 1)):
+      _, aux = step(model, optimizer, dict(policy=policy, kl=jnp.zeros(16)))
+      self.assertEqual(int(aux["dtv_flip_quota"]), 2)
+      self.assertEqual(int(aux["dtv_flip_count"]), expected)
+
+  def test_frequency_and_ordinary_adamw_share_one_optimizer(self):
+    for batch_ratio, quotas in ((None, [1, 0, 2, 0, 1]), ("0.1", [2, 0, 2, 0, 2])):
+      with self.subTest(batch_ratio=batch_ratio):
+        trainer = make_trainer(loo=True, scope="group", generations=2, ratio="0.1",
+                               batch_ratio=batch_ratio, frequency=2)
+        trainer._train_steps = 0
+        trainer.rl_metrics_to_log = {}
+        trainer._buffered_train_metrics = SimpleNamespace(additional_metrics={})
+        model, reference = Model(), Model()
+        tx = optax.chain(optax.clip_by_global_norm(.3), optax.adamw(.1))
+        optimizer = nnx.Optimizer(model, tx, wrt=nnx.Param)
+        reference_optimizer = nnx.Optimizer(reference, tx, wrt=nnx.Param)
+        trainer.initialize_budget_state(optimizer, {}, 0)
+        policy = jnp.tile(jnp.array([2., -1.]), 8)
+        inputs = dict(policy=policy, kl=jnp.zeros(16))
+        step = nnx.cached_partial(nnx.jit(trainer._train_step), model, optimizer)
+        with tempfile.TemporaryDirectory() as directory:
+          trainer.decisions_path = str(Path(directory) / "decisions.jsonl")
+          for index, quota in enumerate(quotas):
+            loss, aux = step(inputs)
+            enabled = index % 2 == 0
+            self.assertEqual(bool(aux["dtv_flip_enabled"]), enabled)
+            self.assertEqual(int(aux["dtv_flip_quota"]), quota)
+            self.assertEqual(int(aux["dtv_flip_count"]), quota)
+            self.assertEqual(int(aux["dtv_flip_total_seen"]), 16 * (index + 1))
+            self.assertEqual(int(aux["dtv_flip_seen"]), 16 * (index // 2 + 1))
+            weights = jnp.ones(16).at[:quota].set(-1.)
+            expected_loss, grads = nnx.value_and_grad(
+                lambda model: trainer.loss_fn(model, policy * weights, inputs["kl"])[0]
+            )(reference)
+            reference_optimizer.update(reference, grads)
+            np.testing.assert_allclose(loss, expected_loss, atol=1e-6)
+            np.testing.assert_allclose(model.weight[...], reference.weight[...], atol=1e-6)
+            trainer._post_process_train_step(aux)
+            trainer._train_steps += 1
+          rows = [json.loads(row) for row in Path(trainer.decisions_path).read_text().splitlines()]
+        self.assertEqual([row["dtv_flip_quota"] for row in rows], quotas)
+        self.assertIsNone(rows[1]["scores"])
+        self.assertIsNone(rows[1]["dtv_flip_negative_count"])
+        self.assertEqual(rows[1]["dtv_flip_fraction"], 0)
+        self.assertEqual(rows[1]["batch_completion_count"], 16)
+        self.assertEqual(rows[-1]["frequency"], 2)
+        self.assertAlmostEqual(rows[-1]["dtv_flip_cumulative_fraction"], sum(quotas) / 80)
+        self.assertAlmostEqual(rows[-1]["dtv_flip_active_fraction"], sum(quotas) / 48)
+
+  @unittest.skipUnless(jax.local_device_count() >= 2, "requires multiple CPU devices")
+  def test_frequency_uses_optimizer_updates_under_sharded_accumulation(self):
+    trainer = make_trainer(loo=True, scope="group", generations=2, batch_ratio="0.1",
+                           frequency=2, grad_acc_steps=2)
+    model = Model()
+    optimizer = nnx.Optimizer(model, optax.MultiSteps(optax.sgd(.1), 2), wrt=nnx.Param)
+    trainer.initialize_budget_state(optimizer, {}, 0)
+    mesh = jax.sharding.Mesh(np.array(jax.local_devices()), ("data",))
+    sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec("data"))
+    inputs = dict(policy=jax.device_put(jnp.tile(jnp.array([2., -1.]), 8), sharding),
+                  kl=jax.device_put(jnp.zeros(16), sharding))
+    step = nnx.jit(trainer._train_step)
+    enabled = []
+    for _ in range(6):
+      _, aux = step(model, optimizer, inputs)
+      enabled.append(bool(aux["dtv_flip_enabled"]))
+    self.assertEqual(enabled, [True, True, False, False, True, True])
+
+  def test_skipped_step_bypasses_alignment_scoring_at_runtime(self):
+    trainer = make_trainer(frequency=2)
+    model = Model()
+    optimizer = nnx.Optimizer(model, optax.sgd(.1), wrt=nnx.Param)
+    trainer.initialize_budget_state(optimizer, {}, 0)
+    inputs = dict(policy=jnp.array([2., -1.]), kl=jnp.zeros(2))
+    calls = []
+    alignment_scores = flip.alignment_scores
+
+    def tracked_scores(*args, **kwargs):
+      scores = alignment_scores(*args, **kwargs)
+      jax.debug.callback(lambda _: calls.append(True), scores)
+      return scores
+
+    with mock.patch.object(flip, "alignment_scores", tracked_scores):
+      step = nnx.jit(trainer._train_step)
+      for expected in (1, 1, 2):
+        step(model, optimizer, inputs)
+        jax.effects_barrier()
+        self.assertEqual(len(calls), expected)
+
   def test_metadata_roundtrip_matches_uninterrupted_sequence(self):
     def build():
       trainer = make_trainer(loo=True, scope="group", generations=2, ratio="0.1")
@@ -429,6 +551,15 @@ class DTVFlipTest(unittest.TestCase):
       self.assertEqual(int(aux1["dtv_flip_quota"]), int(aux2["dtv_flip_quota"]))
       np.testing.assert_allclose(model.weight[...], model2.weight[...])
     self.assertEqual(trainer.custom_checkpoint_metadata(), resumed.custom_checkpoint_metadata())
+    old_budget = dict(metadata["dtv_flip_budget"], version=1)
+    for key in ("quota_policy", "frequency", "grad_acc_steps", "total_seen"):
+      del old_budget[key]
+    resumed.initialize_budget_state(optimizer2, {"dtv_flip_budget": old_budget}, 2)
+    self.assertEqual(int(optimizer2.dtv_flip_budget.total_seen[...]), old_budget["seen"])
+    resumed.frequency = 2
+    with self.assertRaisesRegex(ValueError, "configuration differs"):
+      resumed.initialize_budget_state(optimizer2, {"dtv_flip_budget": old_budget}, 2)
+    resumed.frequency = 1
     for changed in (dict(metadata, dtv_flip_budget={}), {}):
       with self.assertRaises(ValueError):
         resumed.initialize_budget_state(optimizer2, changed, 2)
@@ -442,7 +573,6 @@ class DTVFlipTest(unittest.TestCase):
     trainer.optimizer = nnx.Optimizer(trainer.model, optax.sgd(.1), wrt=nnx.Param)
     trainer.initialize_budget_state(trainer.optimizer, {}, 0)
     trainer.custom_checkpoint_metadata_fn = lambda: {"global_step": 3}
-    from unittest import mock
     trainer.checkpoint_manager = SimpleNamespace(latest_step=lambda: 2, save=mock.Mock())
     trainer._save_last_checkpoint()
     args = trainer.checkpoint_manager.save.call_args.kwargs
@@ -459,40 +589,48 @@ class DTVFlipTest(unittest.TestCase):
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     def build():
-      trainer = make_trainer(loo=True, scope="group", generations=2, ratio="0.1")
+      trainer = make_trainer(loo=True, scope="group", generations=2, ratio="0.1", frequency=2)
       trainer.model = Model()
       trainer.optimizer = nnx.Optimizer(trainer.model, optax.sgd(.1), wrt=nnx.Param)
       trainer.initialize_budget_state(trainer.optimizer, {}, 0)
-      trainer.custom_checkpoint_metadata_fn = lambda: {"global_step": 2}
+      trainer.custom_checkpoint_metadata_fn = lambda: {"global_step": 1}
       return trainer
     inputs = dict(policy=jnp.tile(jnp.array([2., -1.]), 8), kl=jnp.zeros(16))
     trainer = build()
     step = nnx.jit(trainer._train_step)
-    for _ in range(2):
-      step(trainer.model, trainer.optimizer, inputs)
+    step(trainer.model, trainer.optimizer, inputs)
     with tempfile.TemporaryDirectory() as directory:
       trainer.checkpoint_manager = module.CheckpointManager(directory)
-      trainer._train_steps = 2
+      trainer._train_steps = 1
       try:
         trainer._save_last_checkpoint()
         trainer.checkpoint_manager.wait_until_finished()
         resumed = build()
         restored_step, metadata = trainer.checkpoint_manager.maybe_restore(resumed.model)
         resumed.initialize_budget_state(resumed.optimizer, metadata, restored_step)
-        self.assertEqual(restored_step, 2)
+        self.assertEqual(restored_step, 1)
         np.testing.assert_allclose(trainer.model.weight[...], resumed.model.weight[...])
         next_step = nnx.jit(resumed._train_step)
-        for _ in range(3):
+        for expected in (0, 2, 0):
           _, aux1 = step(trainer.model, trainer.optimizer, inputs)
           _, aux2 = next_step(resumed.model, resumed.optimizer, inputs)
-          self.assertEqual(int(aux1["dtv_flip_quota"]), int(aux2["dtv_flip_quota"]))
+          self.assertEqual(int(aux1["dtv_flip_quota"]), expected)
+          self.assertEqual(int(aux2["dtv_flip_quota"]), expected)
           np.testing.assert_allclose(trainer.model.weight[...], resumed.model.weight[...])
         self.assertEqual(trainer.custom_checkpoint_metadata(), resumed.custom_checkpoint_metadata())
       finally:
         trainer.checkpoint_manager.close()
 
   def test_ratio_validation_and_default_environment(self):
-    self.assertEqual(flip.configuration_from_environment({})["max_flip_fraction"], "0.1")
+    defaults = flip.configuration_from_environment({})
+    self.assertEqual(defaults["max_flip_fraction"], "0.1")
+    self.assertIsNone(defaults["batch_flip_fraction"])
+    self.assertEqual(defaults["frequency"], 1)
+    config = flip.configuration_from_environment({
+        "TUNIX_DTV_FLIP_BATCH_FRACTION": "0.2", "TUNIX_DTV_FLIP_FREQUENCY": "2",
+    })
+    self.assertEqual(config["batch_flip_fraction"], "0.2")
+    self.assertEqual(config["frequency"], 2)
     self.assertEqual(flip.ratio_terms("0.1"), (1, 10))
     for value in ("nan", "inf", "bad", "-0.1", "1.01", "0.0000001"):
       with self.subTest(value=value), self.assertRaises(ValueError):

@@ -13390,3 +13390,145 @@ This file tracks engineering changes made in this repository.
 - 验收：两步 TensorBoard actor loss 和冲突诊断均有限，未跳过样本，PCGrad 有投影次数指标。校验 step-2 LoRA checkpoint、训练后 restore 路径、合并模型产物和 pre/post 评测 JSON；任一失败退出，`--check-only` 复查已通过队列。投影次数和 accuracy 可为零，测试只验证执行链。
 - 验证命令与结果：新旧 launcher 分别 `bash -n`，两种方法按 smoke 参数 `--dry-run`，`git diff --check` 通过。使用模拟 TensorBoard 读入的合成产物验证 `--check-only` 通过完整目录并拒绝未结束队列、非有限指标。四设备 CPU 隔离 `gradient_conflict_test.py` 9 项复跑通过。
 - 风险与待办：本机未运行真实 TPU smoke，需检查服务器磁盘能保留两份合并模型、两套 checkpoint 及模型缓存。服务器真实 TensorBoard 写出、JAX/TPU 编译及 HBM 由 smoke 验收。未提交或推送，待用户运行并回传两个 PASS，再准备正式实验。
+
+## 2026-11-10 — 正式 clean GSM8K wall-clock 三路结果通过
+
+- 改动范围：无代码改动；仅更新 `develop.md`。用户回传 `20261110_062839` 的三条 checker PASS；同一 worker、clean seed13、diagnostics off，15 warmup 后各完成 50 个计时迭代和 50 次实际 optimizer 更新。所有测量窗口内均无记录到的 XLA 编译事件，三条报告的 reviewer_timing_eligible=true。
+- 测量结果：Vanilla/DTV/DTV-Loo 总计 353.553770/415.212241/387.899545 s，均值 7.071075/8.304245/7.757991 s，生成 token 数 186383/192416/179292，端到端 token/s 为 527.170167/463.416009/462.212452。相对 Vanilla 的额外墙钟为 17.4396% 和 9.7144%。
+- 范围：单 seed/单早期窗口，不是 691 步全作业或跨 seed 均值；生成长度不同，不把总耗时差解释为纯 valuation 差。HBM 仍待独立 runtime/XProf 覆盖核验。
+- 验证：据用户原始 JSON 复算相对墙钟、token 数和吞吐差，`git diff --check -- develop.md` 通过；未访问远端或重新运行。
+
+## 2026-11-10 — 提供正式 HBM memory-only nohup 命令
+
+- 改动范围：无代码改动；仅更新 `develop.md`。复用 ziao1 worker0 的正式 timing 目录 `20261110_062839`，在独立进程顺序采 Vanilla/DTV/DTV-Loo 的 clean seed13、`memory/off`、各 15 warmup + 50 measured，不重跑或覆盖 timing。
+- 验证与待办：核对现有 launcher 和跨模式 checker；队列片段 `bash -n`、`git diff --check -- develop.md` 通过。用户先查看 smoke trace 覆盖与磁盘，再手动启动；结束后核对六组可比性，独立核验 XProf 窗口、四设备与常驻分配。未连接远端或启动；累计高水位不冒充正式峰值。
+
+## 2026-11-10 — 解释 HBM smoke PASS 与峰值核验的区别
+
+- 改动范围：无代码改动；仅更新 `develop.md`。只读核对 checker：memory smoke 的 PASS 检查四设备报告条目与 XPlane 文件存在，不核实 trace 是否记录每颗芯片的运行时总 HBM 或已驻留的分配。说明 `df -h` 只用于检查保存 trace 的磁盘容量，与 TPU HBM 无关。
+- 验证与待办：核对 `check_run` 与 `memory_report`，`git diff --check -- develop.md` 通过；先看既有 smoke 的 `memory.json` 可辨别 runtime counter 情况，但不能代替 XProf trace 覆盖核验。未访问远端或启动正式采集。
+
+## 2026-11-10 — 解读 DTV-Loo smoke 的 TPU allocator 计数
+
+- 改动范围：无代码改动；仅更新 `develop.md`。用户回传 DTV-Loo smoke 四设备计数可用；allocator 最大累计 in-use 为 3,158,639,616 B（2.94 GiB），每设备 reserved 高水位为 44,734,349,312 B（41.66 GiB），两者口径不同，不能相加或等同窗口总 HBM。仅设备 0 的 in-use 高水位在窗口内增加 52,224 B，其余未刷新；verified window peak 仍为 null。
+- 验证与待办：核对用户报告及 OpenXLA XProf Memory Profile 文档，`git diff --check -- develop.md` 通过。优先打开已有 smoke XPlane 检查 per-device 窗口峰值和常驻覆盖，再跑 15+50 正式 memory 采集；未访问远端、未启动或填入 reviewer HBM。
+
+## 2026-11-10 — XProf 查看器缺失时使用隔离环境
+
+- 改动范围：无代码改动；仅更新 `develop.md`。用户 worker0 报 `xprof: command not found`，提供在独立临时 venv 安装官方 PyPI xprof、读取已有 DTV-Loo smoke trace、通过 SSH 端口转发访问的命令。训练 venv 不安装或升级任何依赖，不重跑 smoke。
+- 验证与待办：核对 OpenXLA XProf 安装和查看命令，`bash -n`、`git diff --check -- develop.md` 通过；未执行远端安装或打开 trace。待用户看到 Memory Profile 后核验窗口和四设备覆盖。
+
+## 2026-11-10 — XProf smoke 显示 HBM 窗口峰值
+
+- 改动范围：无代码改动；仅更新 `develop.md`。用户截图的 XProf v2.24.2、DTV-Loo smoke、Memory ID 0 显示 Profile-window Peak 44.60 GiB（stack reservation 41.66 GiB + heap allocation 2.94 GiB），区别于单独的 lifetime peak heap。截图仅展示设备 0，非四设备或正式 50 步峰值。
+- 验证与待办：核对截图和 `grpo_benchmark.py` 的窗口内自动 trace 采集、窗口外峰值核验路径；`git diff --check -- develop.md` 通过。可直接运行此前正式 memory-only 队列，完成后逐设备读取窗口峰值并取最大；不需要边跑边开网页，未执行远端任务。
+
+## 2026-11-10 — 澄清 HBM 运行时采集和事后读取
+
+- 改动范围：无代码改动；仅更新 `develop.md`。现有 memory-only 命令在预热后、正式第 16–65 步运行期间采集 trace，末步完成后停止并落盘；XProf 网页事后读取文件，不参与记录，无需边跑边打开或点击 Capture Profile。
+- 验证：只读核对 `grpo_benchmark.py` 的 trace 起止与报告路径，`git diff --check -- develop.md` 通过。未运行远端采集；正式峰值待逐设备读取。
+
+## 2026-11-10 — 给出无需网页的 HBM 读取方法
+
+- 改动范围：无代码改动；仅更新 `develop.md`。训练 `stdout.log` 不写 XProf 窗口峰值，`memory.json` 的 allocator 高水位不是窗口总 HBM。给出用既有独立 XProf 环境将已完成 XPlane 转成 Memory Profile、逐设备读取同一时间点 stack+heap 峰值的终端命令。
+- 验证与待办：核对本地 `memory_report`、XProf 转换入口及 Memory Profile schema；`git diff --check -- develop.md` 通过。未执行远端命令或读取实测 trace。先用 DTV-Loo smoke 设备 0 对照网页的 44.60 GiB；正式值仍需核对四个 HBM 设备及窗口覆盖后再报告。
+
+## 2026-11-10 — 确认 PCGrad / CAGrad 单 worker smoke 并准备正式 seed5
+
+- 改动范围：无代码改动。仅更新 `develop.md`，给出在同一空闲 worker 顺序运行 PCGrad、CAGrad 的 seed5 正式队列。
+- Smoke 验收：用户回传 `gradient_conflict_smoke.woChXW` 的队列退出码 0，两个方法均通过 step 1/2 指标、零样本丢弃、checkpoint、合并模型及训练前后评测检查。PCGrad 两步平均投影次数为 5、5.75，CAGrad 两步方向改变量范数为 2.23036、4.87023。末尾手动 `--check-only` 打印用法，对应目录参数未传入有效值，队列的自动检查已通过。4 题准确率仅用来检查评测流程。
+- 正式配置：clean seed5、policy 梯度冲突处理加全量 KL、CAGrad c=0.5；复用已提交 launcher 的 4×4、691 更新、1319 题评测，独立输出目录，任一训练失败停止队列。
+- 验证与待办：启动片段及内层队列分别 `bash -n`，两种正式命令 `--dry-run` 和 `git diff --check -- develop.md` 通过。未连接服务器或启动正式训练，待用户确认磁盘空间后手动运行。
+
+## 2026-11-10 — 准备 PCGrad / CAGrad Mismatch-20% seed5 正式队列
+
+- 改动范围与文件：无代码改动，仅更新 `develop.md`。沿用 `gradient_conflict_smoke.woChXW` 两组自动验收通过的结果。手动复查可直接传实际 smoke 目录。
+- 启动配置：在 `t1v-n-b69a87ca-w-0` 的同一 worker 顺序执行 PCGrad、CAGrad；实验和奖励扰动 seed 均为 5，训练 prompt group 按 0.2 阈值选中后反转组内奖励排序，pre/post 仍评测原 GSM8K test。正式预算为 4×4、691 更新、1319 题 pre/post；默认 policy 梯度冲突处理并保留全量 KL，CAGrad c=0.5。新队列下每方法独立输出，记录 PID、日志及退出码，失败即停止。
+- 验证与待办：核对现有训练态 reward-rank reversal 入口；外层与后台队列分别 `bash -n`，两个 launcher `--dry-run` 核对种子、噪声、训练预算、KL 和单 worker 变量，`git diff --check -- develop.md` 通过。未执行服务器命令；实际 Mismatch-20% 长训练和结果待确认。
+
+## 2026-11-10 — 排查正式 HBM trace 的空设备峰值
+
+- 改动范围：无代码改动，仅更新 `develop.md`。用户在同一 XProf 环境成功复现 smoke 设备 0 的 44.60 GiB；正式 Vanilla 的旧提取命令过滤后得到空字典，尚无法区分 XProf 原始 allocator map 为空与实际 ID 非 0–3。
+- 验证与待办：复核 launcher、trace 起止与现有 checker；checker 不验证 trace 的内存事件覆盖。提供离线复查三组原始 allocator ID、窗口峰值及设备库存的命令，不重跑，不把空数据当作零 HBM。`git diff --check -- develop.md` 通过；正式 trace 根因与覆盖待用户回传。
+
+## 2026-11-10 — 区分 TPU HBM 容量与测量窗口峰值
+
+- 改动范围：无代码改动，仅更新 `develop.md`。用户回传正式三组的 XProf `memoryIds` 和 allocator map 均为空，排除仅为 ID 过滤问题。正式峰值不可得；Smoke 的设备 0 峰值 44.60 GiB 不代替正式三组。
+- 验证与待办：核对 Google Cloud 的 v5p 芯片与主机规格、XProf 的窗口指标定义及用户输出；`git diff --check -- develop.md` 通过。单 worker 的规格容量约 380 GiB（四芯片合计）不是实际峰值，正式 HBM 如需报告则待查采集；无需重跑 wall-clock。
+
+## 2026-11-10 — 核查 DTV-Loo 正式 HBM JSON 与补采方案
+
+- 改动范围：无代码改动，仅更新 `develop.md`。正式 DTV-Loo 四设备窗口首尾 allocator 快照完全相同，设备 0 的 2.16 GiB in-use、2.94 GiB lifetime in-use peak、41.66 GiB reserved 均不是窗口总峰值；`verified_*` 为空符合报告设计。
+- 验证与待办：复算附件单位并核对 `before_iteration`、`memory_report` 和 `check_run`；profiler 在第 16 步前才开启，是否因 TPU 预热期间完成关键分配仍待对照。优先离线检查已有三组短 smoke 的四设备峰值；若采用短窗口补充报告，和 50 步计时窗口分开标注。若需同一 50 步 HBM 窗口，先验证提前开始的 trace 能涵盖驻留分配及正式窗口。`git diff --check -- develop.md` 通过。未运行远端命令。
+
+## 2026-11-10 — 核对三方法短窗口 XProf HBM 峰值
+
+- 改动范围：无代码改动，仅更新 `develop.md`。用户回传的 clean GSM8K seed13 smoke（1 步预热、2 步采样）三组均有四个 TPU 的 XProf allocator 峰值。各组最高单设备峰值都在设备 0，Vanilla/DTV/DTV-Loo 分别为 13.550/44.592/44.604 GiB；后两者约为 Vanilla 的 3.29 倍。
+- 验证与限制：根据用户输出复算倍数并核对 XProf 窗口定义；`git diff --check -- develop.md` 通过。数值仅作为短窗口观察到的 XProf 峰值，不能推断第 16–65 步、完整训练或开销具体归因；正式 50 步 wall-clock 仍单独有效。未运行远端命令。
+
+## 2026-11-10 — 汇总 GSM8K 墙钟、输出长度与 HBM 实测
+
+- 改动范围：无代码改动，仅更新 `develop.md`。汇总正式 `timing/off`（15+50）与独立 HBM smoke（1+2），未混用 smoke timing、正式 HBM 空 trace 或 allocator lifetime 计数。相同方法顺序均为 Vanilla/DTV/DTV-Loo。
+- 正式时间与工作量：warmup 272.229550/378.264110/378.138401 s，50 步平均 7.071075/8.304245/7.757991 s，边界中位 9.109997/10.240740/9.221225 s。50 步各有 200 次 prompt 访问、800 条 completion；分别 186383/192416/179292 个非 padding、去 stop EOS token，平均每条 232.97875/240.52000/224.11500 token，端到端吞吐相对 Vanilla 为 0%/-12.0937%/-12.3220%。正式测量窗口内没有记录到可归属的 XLA 完成事件。
+- HBM smoke：设备 ID 0/1/2/3 的峰值（GiB）分别为 [13.550,13.545,13.545,13.545]、[44.592,44.587,44.587,44.587]、[44.604,44.599,44.599,44.599]。短采集生成 5111/5149/5122 token，三组均在第 2 步记录到 XLA 编译；不作为稳态 HBM 或正式时钟。较 Vanilla 峰值多 31.042/31.054 GiB，所有组 XProf 显示容量 95.743 GiB/芯片。
+- 验证与待办：对照用户正式 JSON、smoke 附件、XProf 峰值输出、launcher/config 和 benchmark 字段并复算。`git diff --check -- develop.md` 通过。逐步 token 总量和时间、加载细分及版本留在服务器原始文件；当前报告不保存每条 completion 或 prompt 的长度分布。未访问远端。
+
+## 2026-11-10 — 准备 ziao1 双 worker 补齐 PCGrad/CAGrad Mismatch-20% 四 seed
+
+- 改动范围：无代码改动，仅更新 `develop.md`；提供 worker0 从 `origin/for_GRPO_8kBaseline` 快进、按同一提交打包已跟踪源码并通过 TPU VM SCP 同步 worker1 的命令。目标不依赖 Git，先验包 SHA256，保留同名旧源码备份，rsync 不删除、不覆盖环境、数据、凭据或 logs；确认同步源码内容相同。
+- 启动配置：按物理 hostname 让 worker0 跑 CAGrad、worker1 跑 PCGrad，每个 worker 顺序跑 0/13/21/42，实验和噪声 seed 同值、mismatch=0.2。沿用 seed5 launcher 的 policy 冲突处理、全量 KL、CAGrad c=0.5、单 worker 4 TPU、原训练评估预算。固定后台队列路径；run 目录保留原标签与日期时间，无随机或 PID 后缀。
+- 验证与待办：核对历史主机与官方 gcloud SCP/SSH 参数，检查命令片段和 launcher `bash -n`，8 组 `--dry-run` 验证 method、seed、mismatch、KL 模式、c 和 checkpoint 路径；`git diff --check -- develop.md` 通过。未登录、拉取、同步、初始化 TPU 或启动训练；远端 SSH、目录权限和空间仍需用户执行确认。
+
+## 2026-11-10 — 核对提交状态及两条独立四 seed 启动命令
+
+- 改动范围：无代码改动，仅更新 `develop.md`。本地 `HEAD` 和 `origin/for_GRPO_8kBaseline` 跟踪引用均为 `2ab43e2`，未提交的是文档，不需重新提交训练源码。提供只提交日志的可选命令及分别限定 worker0 CAGrad、worker1 PCGrad 的后台队列。
+- 验证与待办：核对旧 seeded launcher、新 launcher 和共享 `RewardRankNoiseGRPOLearner`；0.2 是固定 prompt hash 阈值，只在训练内反转入选组奖励排名，并非强制每批恰好 20%，评估不受污染。两段外层及后台 shell 均通过 `bash -n`，`git diff --check -- develop.md` 通过。实际远端分支、同步和训练仍由用户操作；未提交或推送。
+
+## 2026-11-11 — 核对 DTV flip10% 启动并设计按更新步控制频率
+
+- 改动范围与文件：无代码改动，仅更新 `develop.md`。核对 `my_example/run_dtv_flip.sh`、下游 GRPO launcher、DTV flip trainer 和 actor 更新计数。现行 `TUNIX_DTV_FLIP_MAX_FRACTION=0.1` 为累计 completion 翻转上限，默认每步运行 DTV 评分，4×4 时前五步配额为 1/2/1/2/2。提供现行 clean seed5、batch DTV、单 worker 启动命令。
+- 设计：拟加正整数 frequency，默认 1，按 1-based actor optimizer update `1, 1+f, 1+2f, …` 启用 flip。其他步复用普通 batch 完整梯度和同一个 clipping/AdamW 状态，跳过逐样本评分。建议比例预算只累计启用步的 completion，未用整数名额不追补；同时记录启用步和全部步的实际翻转率。固定 4×4 时，f=2 或 3 的长期全训练比例上限分别约为 5% 和 3.33%。恢复时需要保存步数相位并检查 frequency 与预算口径。
+- 验证与待办：两个现有 launcher 和建议启动片段 `bash -n` 通过。用模拟下游核对 `dtv batch` 默认 0.1、`dtv-loo group` 显式 0.2、方法标记和输出路径透传。`git diff --check -- develop.md` 通过。频率与配额分母待定稿，未实现或运行 TPU。
+
+## 2026-11-11 — 明确启用步使用逐 batch flip 上限
+
+- 改动范围与文件：无代码改动，仅更新 `develop.md`。根据用户澄清，启用步对当前 batch 单独计算 `floor(k × completion_count)`，只翻最低负分，批间不累计配额或小数余量。跳过步不参与配额，使用普通完整梯度更新。当前 16 条 completion、k=0.1 时，每个启用步最多翻 1 条。
+- 验证与待办：核对现有 `select_flips` 的累计余量和 launcher 的 4×4 配置，`git diff --check -- develop.md` 通过。逐 batch 配额和频率仍是设计；现有运行采用累计预算。
+
+## 2026-11-11 — 分析 flip 跳过步与累计配额
+
+- 改动范围与文件：无代码改动，仅更新 `develop.md`。现有 k=0.1 在每批 16 条时分配 1/2/1/2/2，只结转取整余量，负分不足时未用整数配额失效。
+- 分析与验证：对照 `select_flips` 及文档，按 frequency=2 手算前五步。仅启用步计数并暂停小数余量时配额为 1/0/2/0/1；若跳过步也计入且把其配额转给下一启用步，则为 1/0/3/0/4；逐 batch 硬上限为 1/0/1/0/1。`git diff --check -- develop.md` 通过。是否允许单个启用 batch 超过 10% 仍影响选择，未实现频率。
+
+## 2026-11-11 — 设计 DTV flip 每批最近偶数配额
+
+- 改动范围与文件：无代码改动，仅更新 `develop.md`。旧累计配额保留用于复现实验。拟议每批配额用当前实际 completion 数乘目标比例 k，取最近偶数，等距时向上，配额不跨步结转。启用步优先翻最低负分，实际翻转数受候选数限制，可为奇数；跳过步使用普通更新且配额为零。
+- 验证与待办：对照当前选择与日志字段，用 Python 精确有理数复算 k=0.1 时 B=16/32/64/512 的配额为 2/4/6/52，实际配额比例为 12.5%/12.5%/9.375%/10.15625%。若统一向上取偶数，B=64 会给 8。拟记录 k、frequency、逐批配额与实际数，并用实际翻转数除以实际处理数报告整体比例；另可核对启用步比例。`git diff --check -- develop.md` 通过，设计尚未实施。
+
+## 2026-11-11 — 明确固定 batch flip 配额的对比口径
+
+- 改动范围与文件：无代码改动，仅更新 `develop.md`。固定 batch 大小与 k 时，各启用步获得相同配额，消除累计余量造成的 1/2 个名额交替。负分候选数会使实际翻转数低于配额。
+- 验证与待办：用当前 B=16、k=0.1 的每启用步 2 个名额复核。报告应同时给出 frequency、每启用 batch 的配额和实际翻转总数或比例。比较 frequency 时，启用时点和全训练翻转量都会变化。`git diff --check -- develop.md` 通过，尚未实现。
+
+## 2026-11-11 — 区分 flip 配额上限和实测比例
+
+- 改动范围与文件：无代码改动，仅更新 `develop.md`。旧版实际翻转数是逐步配额与负分候选数的较小值，累计上限为 `floor(k × 累计 completion 数)`。零负分时翻转数为零，整数配额不追补。
+- 验证与待办：按现有 `select_flips` 复核。拟议逐 batch 规则中，k 是取整前目标，报告需标明取整后的配额及实际翻转率。`git diff --check -- develop.md` 通过，尚未实施。
+
+## 2026-11-11 — 设计累计与逐 batch flip 共用频率控制
+
+- 改动范围与文件：无代码改动，仅更新 `develop.md`。旧 `TUNIX_DTV_FLIP_MAX_FRACTION` 保持累计语义，拟议 `TUNIX_DTV_FLIP_BATCH_FRACTION` 选择逐批最近偶数配额，`TUNIX_DTV_FLIP_FREQUENCY` 对两种配额生效，默认 1。先决定当前 actor 更新是否启用，再按所选规则分配配额。跳过步复用普通 batch 梯度与同一个优化器，旧累计配额只在启用步推进，已有小数余量暂停。
+- 验证与待办：核对 `DTVFlipTrainer` 的 JIT、配额元数据以及 actor 步数/梯度累积路径。当前 16 条与 frequency=2 时，旧配额 1/0/2/0/1，新配额 2/0/2/0/2。后续需验证 JIT 动态步数、跳过步与普通更新的等价、旧默认和旧 checkpoint 兼容、恢复时频率相位和计数。`git diff --check -- develop.md` 通过，未实施或运行 TPU。
+
+## 2026-11-11 — 实现 DTV flip 逐 batch 偶数配额与更新频率
+
+- 改动范围与文件：`tunix/rl/dtv_flip_trainer.py`、`my_example/run_dtv_flip.sh`、`tests/rl/dtv_flip_trainer_test.py`、`docs/dtv_flip.md`、`develop.md`。新增 `TUNIX_DTV_FLIP_BATCH_FRACTION` 和两种模式共用的 `TUNIX_DTV_FLIP_FREQUENCY`。旧命令默认累计配额、频率 1，旧 v1 checkpoint 可继续按原配置恢复。
+- 实现：JIT 用 optimizer 调用数和恢复的 actor step 计算频率，梯度累积的各 micro-batch 共用启用相位。跳过步直接计算普通 batch 梯度，共用原 optimizer，累计配额及余量暂停。新模式取最近偶数，等距时向上，批间不转移；两模式都只翻最低负分。JSONL 记录配置、配额、实际翻转数、启用步和全程两个实测比例。新 checkpoint 校验配置并恢复计数。
+- 验证：`XLA_FLAGS=--xla_force_host_platform_device_count=4 JAX_PLATFORMS=cpu TUNIX_FLIP_TEST_ISOLATED=1 /tmp/tunix-flip-frequency-venv/bin/python -m unittest discover -s tests/rl -p dtv_flip_trainer_test.py` 29 项通过。含新旧配额序列、运行时跳过评分、同一 AdamW 状态下的梯度更新、四设备梯度累积、旧元数据兼容和真实 Orbax 相位恢复。另通过 BF16 LoRA 嵌套输入小测、9 项 CPU 隔离 PCGrad/CAGrad 回归、`bash -n`、Ruff `E9,F` 和 `git diff --check`。
+- 风险与待办：验证使用 JAX 0.8.1、Flax 0.12.1 的 CPU 隔离环境。真实 TPU 的两条 JIT 分支编译和 GSM8K 端到端仍待服务器验证。
+
+## 2026-11-11 — 准备 Eric v5p-8 的 clean GSM8K 固定 batch flip
+
+- 改动范围与文件：无代码改动，仅更新 `develop.md`。提供本地显式提交清单与推送命令，以及在已登录的 Eric v5p-8 单 worker 上快进拉取并 nohup 启动的命令。服务器仓库按 `$HOME/Project_8k/tunix`，复用 `.venv_jax081` 或 `.venv`。
+- 启动配置：沿用最近 clean seed5 的 `dtv batch`、accuracy reward、4×4、691 更新、完整 1319 题 pre/post 与 launcher 默认长度 256/768。新 `TUNIX_DTV_FLIP_BATCH_FRACTION=0.1`、`TUNIX_DTV_FLIP_FREQUENCY=2`，全新目录。第 1、3、5 步启用，每步最多翻 2 条负分；偶数步普通更新。独立保存提交 SHA、PID、退出码和产物。
+- 验证与待办：本地提交片段、服务器片段及其 nohup 内层均通过 `bash -n`，`git diff --check` 通过。未执行提交、推送或连接节点。首次真实 TPU 运行需核对 JSONL 的启用序列和 2/0/2 配额。

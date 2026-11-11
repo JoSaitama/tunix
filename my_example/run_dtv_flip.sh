@@ -26,17 +26,33 @@ for arg in "$@"; do
 done
 
 MAX_FLIP_FRACTION="${TUNIX_DTV_FLIP_MAX_FRACTION:-0.1}"
-if ! [[ "$MAX_FLIP_FRACTION" =~ ^(0([.][0-9]+)?|1([.]0+)?)$ ]]; then
-  echo "error: TUNIX_DTV_FLIP_MAX_FRACTION must be a decimal in [0, 1]" >&2
+BATCH_FLIP_FRACTION="${TUNIX_DTV_FLIP_BATCH_FRACTION:-}"
+FREQUENCY="${TUNIX_DTV_FLIP_FREQUENCY-1}"
+FRACTION_ENV=TUNIX_DTV_FLIP_MAX_FRACTION
+QUOTA_SLUG=cap
+if [ -n "$BATCH_FLIP_FRACTION" ]; then
+  FRACTION_ENV=TUNIX_DTV_FLIP_BATCH_FRACTION
+  QUOTA_SLUG=batchcap
+fi
+FRACTION="${BATCH_FLIP_FRACTION:-$MAX_FLIP_FRACTION}"
+if ! [[ "$FRACTION" =~ ^(0([.][0-9]+)?|1([.]0+)?)$ ]]; then
+  echo "error: $FRACTION_ENV must be a decimal in [0, 1]" >&2
   exit 2
 fi
-CAP_SLUG="${MAX_FLIP_FRACTION//./p}"
+if ! [[ "$FREQUENCY" =~ ^[1-9][0-9]{0,9}$ ]] || [ "$FREQUENCY" -gt 2147483647 ]; then
+  echo "error: TUNIX_DTV_FLIP_FREQUENCY must be an integer in [1, 2147483647]" >&2
+  exit 2
+fi
+QUOTA_SLUG+="${FRACTION//./p}"
+if [ "$FREQUENCY" != 1 ] || [ -n "$BATCH_FLIP_FRACTION" ]; then
+  QUOTA_SLUG+="_freq${FREQUENCY}"
+fi
 
 RUN_TS="$(date +%Y%m%d_%H%M%S)_$$"
-METRICS_LOG_DIR="/tmp/content/tmp/tensorboard/dtv-flip_${SCORE}_${SCOPE}_cap${CAP_SLUG}_${RUN_TS}"
-CHECKPOINT_ROOT="/tmp/content/ckpts_dtv-flip_${SCORE}_${SCOPE}_cap${CAP_SLUG}_${RUN_TS}"
+LABEL="dtv-flip_${SCORE}_${SCOPE}_${QUOTA_SLUG}_${RUN_TS}"
+METRICS_LOG_DIR="/tmp/content/tmp/tensorboard/${LABEL}"
+CHECKPOINT_ROOT="/tmp/content/ckpts_${LABEL}"
 RESULTS_DIR="${TUNIX_MY_RESULT_DIR:-${ROOT_DIR}/my_example/my result}"
-LABEL="dtv-flip_${SCORE}_${SCOPE}_cap${CAP_SLUG}_${RUN_TS}"
 RUN_LOG="${RESULTS_DIR}/${LABEL}__stdout.log"
 
 # Respect any explicit overrides passed via "$@" so export reads the correct
@@ -83,6 +99,8 @@ cd "${ROOT_DIR}"
 mkdir -p "${RESULTS_DIR}"
 
 TUNIX_DTV_FLIP_MAX_FRACTION="$MAX_FLIP_FRACTION" \
+TUNIX_DTV_FLIP_BATCH_FRACTION="$BATCH_FLIP_FRACTION" \
+TUNIX_DTV_FLIP_FREQUENCY="$FREQUENCY" \
 TUNIX_DBC_SELF_INF_FLIP=1 \
 TUNIX_DBC_SELF_INF_LOO="$LOO" \
 TUNIX_DTV_FLIP_DECISIONS_PATH="${RESULTS_DIR}/${LABEL}__decisions.jsonl" \
