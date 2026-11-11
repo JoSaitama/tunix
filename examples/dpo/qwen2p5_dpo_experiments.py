@@ -34,6 +34,7 @@ SUPPORTED_VARIANTS = (
     "reward_based_filtering_filt5",
     "reward_based_filtering_filt10",
     "self_inf",
+    "self_inf_flip10",
     "self_inf_norm",
     "self_inf_loo",
     "self_inf_re_loo",
@@ -74,6 +75,7 @@ METHOD_DISPLAY = {
     "reward_based_filtering_filt10": "Reward-based Filtering (10%)",
     "reward_based_filtering_filt5": "Reward-based Filtering (5%)",
     "self_inf": "Self-DTV (ours)",
+    "self_inf_flip10": "Self-DTV Gradient Flip (up to 10%)",
     "self_inf_norm": "Self-DTV-Norm",
     "self_inf_loo": "Self-DTV-LOO",
     "self_inf_re_loo": "Self-DTV-Re-LOO",
@@ -241,6 +243,7 @@ def _normalize_variant(variant: str) -> str:
       "reward_based_filtering_5": "reward_based_filtering_filt5",
       "reward_based_filtering_5pct": "reward_based_filtering_filt5",
       "self_inf": "self_inf",
+      "self_inf_flip10": "self_inf_flip10",
       "self_inf_batch": "self_inf",
       "self_influence_batch": "self_inf",
       "self_dtv": "self_inf",
@@ -476,6 +479,9 @@ def prepare_launch_config(
   trainer_variant = get_underlying_trainer_variant(variant)
   if trainer_variant == "vanilla_dpo":
     cfg.dpo_config.use_dynamic_batch_curation = False
+  elif trainer_variant == "self_inf_flip10":
+    cfg.dpo_config.use_dynamic_batch_curation = True
+    cfg.dpo_config.curation_variant = trainer_variant
   elif trainer_variant == "outlier_l2":
     cfg.dpo_config.use_dynamic_batch_curation = True
     cfg.dpo_config.curation_variant = "outlier_l2"

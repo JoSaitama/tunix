@@ -8749,3 +8749,11 @@ This file tracks engineering changes made in this repository.
 ### Known risks / TODO
 
 - 该文档仍是 runbook，不包含结果数值；若要投稿附录式复现实验设置，可再压缩成论文风格段落。
+
+## 2026-11-10 - PKU-SafeRLHF-30K DPO safety pilot
+
+- 改动范围：新增 PKU-SafeRLHF-30K DPO 数据适配和串行训练评测入口。只保留一安全一不安全的 pair，按归一化 prompt 去重，并从训练和验证排除官方 test 的 prompt。默认使用现有 Qwen2.5-1.5B UltraFeedback SFT LoRA recipe，同 seed 先训练并评测 Vanilla，再训练并评测 Self-DTV Flip10。两个导出模型和每组的配置、日志、评测结果都保留。
+- 翻转规则：复用普通 DTV 分数 `g_i · mean(g)`。每个累积窗口最多翻转 `floor(window_size / 10)` 个严格负分且排名最低的梯度，额度按窗口独立计算。梯度按实际窗口样本总数平均。记录负分数量、翻转额度、实际翻转数量和比例。
+- 文件：`tunix/examples/data/pku_saferlhf_dpo.py`、`tunix/sft/dpo/dpo_trainer.py`、`examples/dpo/qwen2p5_dpo_experiments.py`、`examples/dpo/run_qwen2p5_pku_safety_pilot.sh`、`examples/dpo/eval_qwen2p5_pku_safety.py`、`examples/dpo/eval_qwen2p5_rewardbench_v2.py`、`tests/sft/dpo/dpo_trainer_test.py`、`develop.md`。
+- 验证：`bash -n examples/dpo/run_qwen2p5_pku_safety_pilot.sh`、`--help`、Python 源码和脚本内嵌 Python 编译、`git diff --check` 均通过。CPU JAX/JIT 隔离运行验证了梯度聚合、最负样本选择、负样本不足、零翻转、满 256 对窗口和同分顺序。模拟数据验证了安全标签、prompt 去重及切分隔离。模拟模型和评测依赖运行了实际串行脚本，验证了共享权重和 seed、两组启动顺序和 CSV 汇总。
+- 待办：本机缺少 Tunix 全量运行依赖，尚未运行完整 trainer 测试套件或 TPU 训练。默认最多取 4096 对、16 个更新步，实际有效样本数以官方数据及 tokenizer 长度过滤日志为准。

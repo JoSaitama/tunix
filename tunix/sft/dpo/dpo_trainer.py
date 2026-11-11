@@ -268,6 +268,7 @@ def _normalize_curation_variant(variant: str) -> str:
       "random_pair_filtering": "random_pair_filtering",
       "reward_based_filtering": "reward_based_filtering",
       "self_inf_batch": "self_inf_batch",
+      "self_inf_flip10": "self_inf_flip10",
       "self_influence_batch": "self_inf_batch",
       "self_inf_norm": "self_inf_norm_batch",
       "self_inf_norm_batch": "self_inf_norm_batch",
@@ -304,7 +305,7 @@ def _normalize_curation_variant(variant: str) -> str:
         "'reward-based-filtering', 'self_inf_batch', 'self-inf-batch', "
         "'self_inf_norm', 'self-inf-norm', 'dtv_norm', "
         "'self_inf_loo', 'self-inf-loo', 'self_inf_loo_cos', "
-        "'self-inf-loo-cos', or 'self_influence_batch'. "
+        "'self-inf-loo-cos', 'self_inf_flip10', or 'self_influence_batch'. "
         f"Received: {variant!r}"
     )
   return alias_map[normalized_variant]
@@ -756,6 +757,44 @@ def _self_influence_batch_scores(
     normalized_grads = _normalize_per_sample_grads(per_sample_grads)
     return _self_influence_loo_batch_scores(normalized_grads)
   raise ValueError(f"Unknown self-influence score_mode: {score_mode!r}")
+
+
+def aggregate_self_influence_flip10_step(
+    per_sample_grads: Any,
+    per_sample_losses: jax.Array,
+    per_sample_aux: dict[str, jax.Array],
+) -> tuple[Any, jax.Array, dict[str, jax.Array]]:
+  """Reverses the lowest negative DTV gradients, capped at 10% of the window."""
+  scores = _self_influence_batch_scores(per_sample_grads, score_mode="full")
+
+  def reject_nonfinite(_):
+    def fail():
+      raise FloatingPointError("DPO gradient flip encountered nonfinite DTV scores.")
+
+    jax.debug.callback(fail)
+
+  jax.lax.cond(jnp.all(jnp.isfinite(scores)), lambda _: None, reject_nonfinite, None)
+  quota = scores.shape[0] // 10
+  order = jnp.argsort(scores, stable=True)
+  ranks = jnp.empty_like(order).at[order].set(jnp.arange(scores.shape[0]))
+  negative = scores < 0
+  flip_mask = negative & (ranks < quota)
+
+  def signed_mean(grad):
+    sample_mask = flip_mask.reshape(
+        (flip_mask.size,) + (1,) * (grad.ndim - 1)
+    )
+    return jnp.mean(jnp.where(sample_mask, -grad, grad), axis=0)
+
+  final_grads = jax.tree.map(signed_mean, per_sample_grads)
+  aux = jax.tree.map(lambda value: jnp.mean(value, axis=0), per_sample_aux)
+  aux.update({
+      "dbc/flip_quota": jnp.asarray(quota, dtype=jnp.float32),
+      "dbc/num_negative_scores": negative.sum().astype(jnp.float32),
+      "dbc/num_samples_flipped": flip_mask.sum().astype(jnp.float32),
+      "dbc/flip_ratio": flip_mask.mean(),
+  })
+  return final_grads, per_sample_losses.mean(), aux
 
 
 def aggregate_self_influence_curated_step(
@@ -1213,6 +1252,10 @@ class CuratedDPOTrainer(DPOTrainer):
         "dbc/self_inf_dot_mean": np.mean,
         "dbc/self_inf_dot_std": np.mean,
         "dbc/self_inf_dot_threshold": np.mean,
+        "dbc/flip_quota": np.mean,
+        "dbc/num_negative_scores": np.mean,
+        "dbc/num_samples_flipped": np.mean,
+        "dbc/flip_ratio": np.mean,
     }
     self._jitted_microbatch_train_step_fn = None
     self._jitted_curated_apply_step_fn = None
@@ -1489,8 +1532,12 @@ class CuratedDPOTrainer(DPOTrainer):
       per_sample_grad_norms: jax.Array,
       window_seed: int | jax.Array,
   ) -> tuple[jax.Array, dict[str, jax.Array]]:
-    """Filters samples across the window and applies one update."""
-    if self.curation_variant in (
+    """Applies the configured curation across the window, then updates once."""
+    if self.curation_variant == "self_inf_flip10":
+      final_grads, final_loss, final_aux = aggregate_self_influence_flip10_step(
+          per_sample_grads, per_sample_losses, per_sample_aux
+      )
+    elif self.curation_variant in (
         "self_inf_batch",
         "self_inf_norm_batch",
         "self_inf_loo_batch",

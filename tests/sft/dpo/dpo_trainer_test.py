@@ -440,6 +440,27 @@ class DPOTrainerTest(parameterized.TestCase):
         final_aux["dbc/self_inf_dot_threshold"], 0.0, atol=1e-6
     )
 
+  @parameterized.named_parameters(
+      ("most_negative", [-9, -5] + [2] * 8, 2.0, 2, 1),
+      ("fewer_than_quota", [-2] + [1] * 19, 21 / 20, 1, 1),
+      ("none_negative", [1] * 10, 1.0, 0, 0),
+      ("subquota_window", [-1] + [1] * 8, 7 / 9, 1, 0),
+  )
+  def test_flip10_uses_signed_mean_over_full_window(
+      self, values, expected_grad, negative_count, flip_count
+  ):
+    grads = {"w": jnp.array(values, dtype=jnp.float32)[:, None]}
+    losses = jnp.arange(len(values), dtype=jnp.float32)
+    aggregate = jax.jit(dpo_lib.aggregate_self_influence_flip10_step)
+    final_grads, final_loss, aux = aggregate(grads, losses, {"metric": losses})
+
+    np.testing.assert_allclose(final_grads["w"], [expected_grad], atol=1e-6)
+    np.testing.assert_allclose(final_loss, np.mean(losses), atol=1e-6)
+    np.testing.assert_allclose(aux["metric"], np.mean(losses), atol=1e-6)
+    self.assertEqual(int(aux["dbc/flip_quota"]), len(values) // 10)
+    self.assertEqual(int(aux["dbc/num_negative_scores"]), negative_count)
+    self.assertEqual(int(aux["dbc/num_samples_flipped"]), flip_count)
+
   def test_aggregate_random_curated_step_keeps_requested_count_deterministically(
       self,
   ):
