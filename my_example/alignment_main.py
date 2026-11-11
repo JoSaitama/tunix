@@ -141,15 +141,21 @@ def main(argv: list[str] | None = None) -> None:
         from .rebuttal.grpo_benchmark import Benchmark
 
         benchmark = Benchmark.from_env()
-        if (alignment.method, benchmark.method) != ("gradalign", "gradalign"):
-            raise ValueError("Only GradAlign is supported by the alignment benchmark entrypoint")
-        if (
+        if alignment.method != benchmark.method:
+            raise ValueError("Alignment method and benchmark route disagree")
+        if alignment.method == "gradalign" and (
             alignment.gradalign_selection_interval, alignment.selection_ratio,
             alignment.gradalign_validation_prompts,
             alignment.gradalign_candidate_rollouts, alignment.gradalign_validation_rollouts,
             alignment.selection_micro_batch_size, alignment.projection_dim,
         ) != (10, 4, 30, 4, 4, 4, 4096):
             raise ValueError("Benchmark requires the standard GradAlign selector budget")
+        if alignment.method == "learnalign" and (
+            alignment.learnalign_warmup_prompts, alignment.learnalign_warmup_counts_toward_budget,
+            alignment.selection_ratio, alignment.learnalign_estimation_rollouts,
+            alignment.selection_micro_batch_size, alignment.projection_dim,
+        ) != (40, True, 2, 8, 4, 4096):
+            raise ValueError("LearnAlign benchmark requires 10 pre-learning updates and the standard selector")
 
     if cfg.training.use_dynamic_batch_curation:
         raise ValueError(

@@ -158,6 +158,8 @@ class FixedFilterTrainer(rl_trainer.Trainer):
     final_loss = jnp.sum(per_sample_loss * mask) / jnp.clip(num_kept, 1.0)
     optimizer.update(model, final_grads)
 
+    if getattr(self, "_benchmark_quiet", False):
+      return final_loss, num_skipped
     if self._has_aux:
       final_aux = masked_mean(per_sample_aux)
       if isinstance(final_aux, dict):

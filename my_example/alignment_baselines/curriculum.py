@@ -117,20 +117,29 @@ class LearnAlignCurriculum(_BaseCurriculum):
             num_batches=self.warmup_steps,
         )
 
-        estimate = self.estimator.estimate(
-            self.examples,
-            num_rollouts=self.estimation_rollouts,
-            apply_mismatch=True,
-        )
-        values = learnability(estimate.selector_rewards)
-        scores = learnalign_scores(estimate.features, values)
-        selected_count = max(
-            self.train_batch_size,
-            len(self.examples) // self.selection_ratio,
-        )
-        selected_count -= selected_count % self.train_batch_size
-        selected_indices = stable_top_indices(scores, selected_count)
-        selected = [self.examples[index] for index in selected_indices]
+        benchmark = getattr(self.rl_cluster, "_training_benchmark", None)
+        with (benchmark.selector_round() if benchmark else nullcontext()):
+            estimate = self.estimator.estimate(
+                self.examples,
+                num_rollouts=self.estimation_rollouts,
+                apply_mismatch=True,
+            )
+            values = learnability(estimate.selector_rewards)
+            scores = learnalign_scores(estimate.features, values)
+            selected_count = max(
+                self.train_batch_size,
+                len(self.examples) // self.selection_ratio,
+            )
+            selected_count -= selected_count % self.train_batch_size
+            selected_indices = stable_top_indices(scores, selected_count)
+            selected = [self.examples[index] for index in selected_indices]
+        selected_steps = self.total_update_steps
+        if self.warmup_counts_toward_budget:
+            selected_steps -= self.warmup_steps
+        if benchmark is not None:
+            yield from cyclic_batches(selected, batch_size=self.train_batch_size,
+                                      num_batches=selected_steps)
+            return
         selected_set = set(int(index) for index in selected_indices)
         gradient_rollout_batch_size = min(
             int(
@@ -222,9 +231,6 @@ class LearnAlignCurriculum(_BaseCurriculum):
             step=self.warmup_steps,
         )
 
-        selected_steps = self.total_update_steps
-        if self.warmup_counts_toward_budget:
-            selected_steps -= self.warmup_steps
         yield from cyclic_batches(
             selected,
             batch_size=self.train_batch_size,

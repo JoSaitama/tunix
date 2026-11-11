@@ -1,11 +1,11 @@
 # Clean GSM8K: wall-clock and HBM benchmark
 
-Use a single idle worker on a v5p-16 node. Run all three methods on the
+Use a single idle worker on a v5p-16 node. Run methods on the
 **same worker**, sequentially, in fresh processes, and use the same environment,
 checkout, and data. No benchmark is enabled in an ordinary launch.
 
 The launcher calls the same Python entrypoint as `my_example/run_grpo_gemma.sh`
-(or the standalone GradAlign entrypoint). It mirrors the exact
+(or the standalone alignment entrypoint). It mirrors the exact
 `baseline`, `group_policy`, and `group_loo_policy` route flags from
 `run_seeded_full.sh`, without invoking its post-training exporters. Python
 asserts the actual route. Vanilla uses the ordinary actor trainer and no
@@ -130,11 +130,11 @@ leave runtime peak unreported. No missing data are set to zero.
 
 ### Additional baseline cost measurements
 
-The same opt-in launcher accepts `pods`, `grpo-ds`, `norm-top50`, `pcgrad`,
-`cagrad`, and `gradalign`. They use clean seed 13, the same accuracy reward
+The same opt-in launcher also accepts `pods`, `grpo-ds`, `norm-top50`, `pcgrad`,
+`cagrad`, `gradalign`, `random10`, `reward10`, and `learnalign`. They use clean seed 13, the same accuracy reward
 mode and 256/768 limits as the existing benchmark, not necessarily the reward
 environment or overrides of a historical full training run. Ordinary training
-launchers are unchanged. All six require `diagnostics=off`; neither checkpoint
+launchers are unchanged. These methods require `diagnostics=off`; neither checkpoint
 nor model is saved. GradAlign still uses its held-out **selector reference**;
 this is not periodic training evaluation.
 
@@ -142,6 +142,8 @@ this is not periodic training evaluation.
 | --- | --- | --- |
 | PODS, GRPO+DS, Norm Top-50%, PCGrad, CAGrad | 15 + 50 | 1 + 2 |
 | GradAlign | 20 + 50 (five complete selector/update cycles) | 0 + 1 (first selector and first update) |
+| Random 10%, Reward 10% | 15 + 50 | 1 + 2 |
+| LearnAlign cost probe | 10 + 50, plus one separately timed selector | 1 + 2 (pre-learning) or 10 + 2 (post-selection) |
 
 The GradAlign round uses q=4, 160 candidates and 30 held-out reference
 prompts for a full round, each with four selector rollouts. The first selector
@@ -159,10 +161,40 @@ training-only count/rate separately. DS training rollout counts include all
 candidate batches, even rejected or excess groups; its actor still gets 16
 rows. PODS generates 16 rows and the actor receives 8, verified at runtime.
 Cross-method prompt hashes are checked only for methods with a shared input
-stream. DS and GradAlign change that stream; their repeated runs are checked
+stream. DS and both alignment methods change that stream; their repeated runs are checked
 within their method, rather than against the fixed stream. The checker still
 rejects different commits and runtime configurations; rerun a Vanilla anchor
 on the new checkout if a same-commit comparison is needed.
+
+### Random/Reward 10% and LearnAlign phase windows
+
+Random and Reward use the production group-scoped fixed filter at 0.10.
+Fractional group quotas use the production stochastic rounding, so the observed
+fraction over the measurement window need not be exactly 10%. The actor still
+receives all 16 completions for per-completion gradients and masks the update.
+`iterations.csv` records `filtered_completions`; `summary.json` also gives
+`actual_filtered_fraction`. Only scalar counts are retained on device and
+copied to the host after timing; decision logs remain disabled.
+
+LearnAlign runs ten actual GRPO updates before selection in this **cost probe
+only**. The normal pre-learning budget (75 updates) and the 691-step optimizer
+schedule are unchanged. Report these as three separate measurements:
+
+- `learnalign_prelearn`: updates 6–10; updates 1–5 are timing warmup.
+- `learnalign_selector`: one complete scoring/selection pass after update 10
+  (2,764 prompts × 8 completions); time and tokens are separate.
+- `measurement`: post-selection updates 11–60; time and tokens exclude the
+  selector. This uses the selected set from the step-10 model, not step 75.
+
+The two independent HBM launches record updates 2–3 (`prelearn`) and 11–12
+(`postselect`). The post-selection run performs the ten updates and full
+selector again, then starts tracing. Neither trace covers the selector peak.
+Do not treat the maximum of the two as a whole-run LearnAlign peak.
+
+```bash
+bash my_example/rebuttal/run_grpo_benchmark.sh learnalign memory "$BENCH/memory/learnalign-prelearn" 1 2 off
+bash my_example/rebuttal/run_grpo_benchmark.sh learnalign memory "$BENCH/memory/learnalign-postselect" 10 2 off
+```
 
 For limited space, queue `timing` first and capture `memory` one method at a
 time or use a larger output filesystem. The launcher and trace start require

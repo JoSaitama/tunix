@@ -944,6 +944,8 @@ class PeftTrainer:
             )
             # NB: put this after self._buffer_metrics is important
             self._post_process_train_step(aux)
+          elif (benchmark_aux_sink := getattr(self, "_benchmark_aux_sink", None)) is not None:
+            benchmark_aux_sink(aux)
           self._iter_steps += 1
           self._maybe_log_actor_heartbeat(
               status="done",

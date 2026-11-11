@@ -147,18 +147,117 @@ class BenchmarkTest(unittest.TestCase):
         launcher = Path(bench.__file__).with_name("run_grpo_benchmark.sh")
         markers = {"pods": "pods_keep=2", "grpo-ds": "ds=1", "norm-top50": "actor_variant=gradient_norm_top50",
                    "pcgrad": "conflict_method=pcgrad", "cagrad": "conflict_method=cagrad",
-                   "gradalign": "-m my_example.alignment_main"}
+                   "gradalign": "-m my_example.alignment_main", "learnalign": "--learnalign-warmup-prompts 40",
+                   "random10": "fixed_filter=random scope=group ratio=0.10",
+                   "reward10": "fixed_filter=reward scope=group ratio=0.10"}
         for method, marker in markers.items():
             for mode in ("timing", "memory"):
-                warmup, steps = ((20, 50) if mode == "timing" else (0, 1)) if method == "gradalign" else (
-                    (15, 50) if mode == "timing" else (1, 2))
+                warmup, steps = (15, 50) if mode == "timing" else (1, 2)
+                if method == "gradalign":
+                    warmup, steps = (20, 50) if mode == "timing" else (0, 1)
+                elif method == "learnalign" and mode == "timing":
+                    warmup, steps = (10, 50)
                 cmd = ["bash", str(launcher), method, mode, str(self.path / "never-create"),
                        str(warmup), str(steps), "off", "--dry-run"]
                 with self.subTest(method=method, mode=mode):
                     plan = subprocess.check_output(cmd, text=True)
                     self.assertIn(marker, plan)
                     self.assertIn("--skip-eval-before --skip-eval-after", plan)
+        base = ["bash", str(launcher), "learnalign"]
+        out = str(self.path / "never-create")
+        plan = subprocess.check_output(
+            [*base, "memory", out, "10", "2", "off", "--dry-run"], text=True,
+        )
+        self.assertIn("warmup=10 steps=2", plan)
+        rejected = subprocess.run(
+            [*base, "timing", out, "75", "50", "off", "--dry-run"], check=False,
+        )
+        self.assertEqual(rejected.returncode, 2)
         self.assertFalse((self.path / "never-create").exists())
+
+    @unittest.skipUnless(importlib.util.find_spec("numpy"), "NumPy not installed")
+    def test_learnalign_keeps_full_selector_outside_training_windows(self):
+        import numpy as np
+        from my_example.alignment_baselines.curriculum import LearnAlignCurriculum
+
+        for mode, warmup, steps in (("timing", 10, 50), ("memory", 1, 2), ("memory", 10, 2)):
+            with self.subTest(mode=mode, warmup=warmup, steps=steps):
+                out = self.path / f"{mode}-{warmup}"
+                out.mkdir()
+                b = bench.Benchmark("learnalign", mode, "off", warmup, steps, out, "v5p-16")
+                b.metadata = {"schedule_optimizer_steps": 691, "actor_trainer": "Trainer", "valuation": True}
+                b.batching, b.learner_entry = {}, 0.0
+                b.actor = SimpleNamespace(train_steps=0)
+                b.cluster = SimpleNamespace(global_steps=0, _training_benchmark=b)
+                b._optimizer_steps = lambda: b.actor.train_steps
+                b._drain = Mock()
+                b._memory_snapshot = Mock(return_value={str(i): {"stats": None} for i in range(4)})
+                b._start_trace = Mock()
+                selector_calls = []
+                clock = [0.0]
+
+                def estimate(examples, *, num_rollouts, apply_mismatch):
+                    self.assertEqual(b.active_iteration, 11)
+                    b._start_trace.assert_not_called()
+                    self.assertEqual((len(examples), num_rollouts), (2764, 8))
+                    selector_calls.append(True)
+                    clock[0] += 120
+                    b.compiler_events.append({"iteration": 11, "phase": "learnalign_selector",
+                                              "xla_compile_completed_log": True})
+                    b.note_selector_rollout(len(examples) * num_rollouts, 40000, candidate=apply_mismatch)
+                    return SimpleNamespace(features=np.ones((len(examples), 2)),
+                                           selector_rewards=np.tile([0, 1] * 4, (len(examples), 1)))
+
+                data = LearnAlignCurriculum(
+                    training_examples=[{"prompts": str(i)} for i in range(2764)],
+                    train_batch_size=4, total_update_steps=691, estimator=SimpleNamespace(estimate=estimate),
+                    writer=None, rl_cluster=b.cluster, warmup_prompts=40, estimation_rollouts=8,
+                    selection_ratio=2, warmup_counts_toward_budget=True,
+                )
+                batches = iter(data)
+                with patch.object(bench.time, "perf_counter", side_effect=lambda: clock[0]):
+                    for i in range(1, warmup + steps + 1):
+                        b.before_iteration()
+                        b.note_prompts(next(batches)["prompts"])
+                        if mode == "memory" and i == warmup + 1:
+                            b._start_trace.assert_called_once()
+                        b.note_rollout(16, 100)
+                        clock[0] += 2
+                        b.actor.train_steps = b.cluster.global_steps = i
+                        self.assertEqual(b.after_iteration(), i == warmup + steps)
+                self.assertEqual(selector_calls, [] if warmup == 1 else [True])
+                self.assertEqual(b.window_seconds, 2 * steps)
+                self.assertEqual(b.rows[warmup]["seconds"], 2)
+                b.teardown_seconds = 0.0
+                if mode == "memory":
+                    (out / "trace").mkdir()
+                    (out / "trace/test.xplane.pb").touch()
+                b._write_reports()
+                (out / "exit_code").write_text("0\n")
+                report, _, _ = bench.check_run(out)
+                self.assertEqual(report["measurement"]["generated_tokens"], 100 * steps)
+                self.assertEqual(report["measured_xla_compile_steps"], [])
+                if mode == "timing":
+                    self.assertEqual(report["learnalign_prelearn"]["mean_seconds_per_iteration"], 2)
+                if warmup == 10:
+                    self.assertEqual(report["learnalign_selector"]["elapsed_seconds"], 120)
+                    self.assertEqual(report["learnalign_selector"]["generated_tokens"], 40000)
+
+    def test_fixed_filter_count_is_materialized_after_window(self):
+        b = self._fixture()
+        b.method = "random10"
+        b.metadata.update(actor_trainer="FixedFilterTrainer", valuation=True)
+        device_get = Mock(side_effect=lambda values: values)
+        b.jax = SimpleNamespace(device_get=device_get)
+        for i, count in enumerate((0, 1, 3), 1):
+            b.active_iteration = i
+            b.note_fixed_filter(count)
+        device_get.assert_not_called()
+        b._write_reports()
+        device_get.assert_called_once_with((0, 1, 3))
+        report, _, _ = bench.check_run(self.path)
+        self.assertEqual(report["measurement"]["filtered_completions"], 4)
+        self.assertEqual(report["measurement"]["actual_filtered_fraction"], 4 / 32)
 
     def test_disk_guard_rejects_small_volume(self):
         with patch.object(bench.shutil, "disk_usage", return_value=SimpleNamespace(free=5 * 2**30)):

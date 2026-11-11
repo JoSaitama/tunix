@@ -30,16 +30,24 @@ METHODS = {
     "pcgrad": "GradientConflictTrainer",
     "cagrad": "GradientConflictTrainer",
     "gradalign": "Trainer",
+    "learnalign": "Trainer",
+    "random10": "FixedFilterTrainer",
+    "reward10": "FixedFilterTrainer",
 }
 GRADALIGN_INTERVAL = 10
-VALUATION_ACTORS = {"dtv", "dtv-loo", "norm-top50", "pcgrad", "cagrad"}
+LEARNALIGN_PRE_UPDATES = 10
+LEARNALIGN_PRE_SKIP = 5
+LEARNALIGN_SELECTOR_COMPLETIONS = 691 * 4 * 8
+FIXED_FILTERS = {"random10": "random", "reward10": "reward"}
+ALIGNMENT_METHODS = {"gradalign", "learnalign"}
+VALUATION_ACTORS = {"dtv", "dtv-loo", "norm-top50", "pcgrad", "cagrad", *FIXED_FILTERS}
 STEP_FIELDS = (
     "iteration", "window", "seconds", "prompts", "completions",
     "generated_tokens", "update_completions", "candidate_batches",
     "ds_zero_variance_groups", "ds_excess_eligible_groups", "selector_rounds",
     "selector_seconds", "selector_completions", "selector_tokens",
     "selector_reference_tokens", "selector_candidate_tokens",
-    "prompt_order_sha256", "compile_event",
+    "filtered_completions", "prompt_order_sha256", "compile_event",
 )
 
 
@@ -88,7 +96,18 @@ def summarize(rows, elapsed):
                 "selector_seconds", "selector_completions", "selector_reference_tokens",
                 "selector_candidate_tokens"):
         result[key] = sum(r.get(key, 0) for r in rows)
+    if all("filtered_completions" in row for row in rows):
+        result["filtered_completions"] = sum(row["filtered_completions"] for row in rows)
+        result["actual_filtered_fraction"] = result["filtered_completions"] / result["completions"]
     return result
+
+
+def _train_compile_steps(events, method):
+    return {
+        e["iteration"] for e in events
+        if e["xla_compile_completed_log"] and e["iteration"] is not None
+        and not (method == "learnalign" and e.get("phase") == "learnalign_selector")
+    }
 
 
 class _CompileLog(logging.Handler):
@@ -133,6 +152,15 @@ class Benchmark:
             else:
                 _require((warmup, steps) == (0, 1),
                          "GradAlign memory captures the first selector and update (0 + 1)")
+        self.memory_phase = None
+        if method == "learnalign":
+            if mode == "timing":
+                _require((warmup, steps) == (LEARNALIGN_PRE_UPDATES, 50),
+                         "LearnAlign timing uses 10 + 50 updates")
+            else:
+                _require((warmup, steps) in {(1, 2), (LEARNALIGN_PRE_UPDATES, 2)},
+                         "LearnAlign memory uses 1 + 2 (prelearn) or 10 + 2 (postselect)")
+                self.memory_phase = "prelearn" if warmup == 1 else "postselect"
         self.method, self.mode, self.diagnostics = method, mode, diagnostics
         self.quiet = diagnostics == "off"
         self.warmup, self.steps = warmup, steps
@@ -144,6 +172,8 @@ class Benchmark:
         self.thread = threading.local()
         self.trace_active = False
         self.memory = {}
+        self.learnalign_selection = None
+        self.filter_counts = []
         # The ordinary learner peeks at item 1 to infer its batch size. That
         # would execute GradAlign's first selector before timing/tracing starts.
         self.first_batch_size = 4 if method == "gradalign" else None
@@ -282,6 +312,9 @@ class Benchmark:
         if step == 1:
             self.previous_boundary = self.warmup_start = time.perf_counter()
             self.metadata["learner_setup_seconds"] = self.warmup_start - self.learner_entry
+        if self.method == "learnalign" and self.mode == "timing" and step == LEARNALIGN_PRE_SKIP + 1:
+            self._drain()
+            self.previous_boundary = time.perf_counter()
         if step == self.warmup + 1:
             self._drain()
             warmup_end = time.perf_counter()
@@ -290,11 +323,9 @@ class Benchmark:
             self.start_actor_step = self.actor.train_steps
             _require(self.start_optimizer_step == self.start_actor_step == self.warmup,
                      "Warmup actor and optimizer counters disagree")
-            if self.mode == "memory":
-                self.memory["window_start"] = self._memory_snapshot()
-                self._start_trace()
-            self.previous_boundary = self.window_start = time.perf_counter()
-            self.metadata["post_warmup_setup_seconds"] = self.window_start - warmup_end
+            self.warmup_end = warmup_end
+            if self.method != "learnalign" or self.memory_phase == "prelearn":
+                self._open_measurement_window()
         self.active_iteration = step
         self.prompt_hash = None
         self.prompt_count = 0
@@ -305,6 +336,16 @@ class Benchmark:
         self.selector_reference_tokens = self.selector_candidate_tokens = 0
         self.selector_seconds = 0.0
 
+    def _open_measurement_window(self):
+        if self.mode == "memory":
+            self.memory["window_start"] = self._memory_snapshot()
+            self._start_trace()
+        self.previous_boundary = self.window_start = time.perf_counter()
+        setup = self.window_start - self.warmup_end
+        if self.learnalign_selection is not None:
+            setup -= self.learnalign_selection["elapsed_seconds"]
+        self.metadata["post_warmup_setup_seconds"] = setup
+
     def note_prompts(self, prompts):
         _require(self.prompt_hash is None, "Expected one input batch per iteration")
         self.prompt_count = len(prompts)
@@ -313,6 +354,12 @@ class Benchmark:
     def note_rollout(self, count, tokens):
         self.rollouts += count
         self.tokens += tokens
+
+    def note_fixed_filter(self, count):
+        _require(self.method in FIXED_FILTERS and self.active_iteration is not None,
+                 "Unexpected fixed-filter count")
+        # Keep the scalar device result, without forcing a host sync per update.
+        self.filter_counts.append((self.active_iteration, count))
 
     def check_actor_input(self, examples):
         count = sum(example.completion_ids.shape[0] for example in examples)
@@ -330,16 +377,37 @@ class Benchmark:
 
     @contextmanager
     def selector_round(self):
-        _require(self.method == "gradalign" and self.active_iteration is not None,
-                 "GradAlign selector ran outside a measured or warmup iteration")
+        _require(self.method in ALIGNMENT_METHODS and self.active_iteration is not None,
+                 "Selector ran outside a measured or warmup iteration")
+        is_learnalign = self.method == "learnalign"
+        if is_learnalign:
+            _require(self.active_iteration == LEARNALIGN_PRE_UPDATES + 1
+                     and self.learnalign_selection is None and self.memory_phase != "prelearn"
+                     and not self.trace_active, "Unexpected LearnAlign selector boundary")
+            print("LearnAlign benchmark: starting the full selector after update 10.", flush=True)
         start = time.perf_counter()
-        with self.phase("gradalign_selector"):
+        with self.phase(f"{self.method}_selector"):
             yield
         self.selector_seconds += time.perf_counter() - start
         self.selector_rounds += 1
+        if is_learnalign:
+            _require(self.selector_completions == LEARNALIGN_SELECTOR_COMPLETIONS
+                     and self.selector_reference_tokens == 0 and self.selector_candidate_tokens > 0,
+                     "Expected a complete LearnAlign full-pool selector")
+            self.learnalign_selection = {
+                "after_optimizer_updates": LEARNALIGN_PRE_UPDATES,
+                "elapsed_seconds": self.selector_seconds,
+                "completions": self.selector_completions,
+                "generated_tokens": self.selector_candidate_tokens,
+            }
+            # The standalone selector is not part of step 11's timing or tokens.
+            self.selector_rounds = self.selector_completions = self.selector_candidate_tokens = 0
+            self.selector_seconds = 0.0
+            print("LearnAlign benchmark: full selector complete; starting post-select window.", flush=True)
+            self._open_measurement_window()
 
     def note_selector_rollout(self, count, tokens, *, candidate):
-        _require(self.method == "gradalign" and self.active_iteration is not None,
+        _require(self.method in ALIGNMENT_METHODS and self.active_iteration is not None,
                  "Selector rollout ran outside an iteration")
         self.selector_completions += count
         if candidate:
@@ -375,12 +443,16 @@ class Benchmark:
             _require(self.selector_rounds == expected
                      and self.selector_completions == expected * 4 * (30 + candidates),
                      "Unexpected GradAlign selector cycle or rollout count")
+        if self.method == "learnalign" and step > LEARNALIGN_PRE_UPDATES:
+            _require(self.learnalign_selection is not None, "Post-select update without full selector")
         _require(self.actor.train_steps == self.cluster.global_steps == step,
                  f"Iteration {step} actor/global counters disagree")
         final = step == self.warmup + self.steps
         if final:
             with self.phase("window_drain"):
                 self._drain()
+        elif self.method == "learnalign" and self.mode == "timing" and step == LEARNALIGN_PRE_UPDATES:
+            self._drain()
         end = time.perf_counter()
         self.rows.append({
             "iteration": step, "window": "warmup" if step <= self.warmup else "measure",
@@ -426,6 +498,12 @@ class Benchmark:
         _require(actor_name == METHODS[self.method], f"Unexpected actor trainer: {actor_name}")
         _require(self.actor.train_steps == 0, "A fresh run is required")
         _require(self.actor.config.checkpoint_root_directory is None, "Checkpointing must be disabled")
+        if self.method in FIXED_FILTERS:
+            _require((self.actor.method, self.actor.scope, self.actor.filter_ratio,
+                      self.actor.num_generations, self.actor.decisions_path)
+                     == (FIXED_FILTERS[self.method], "group", 0.1, 4, None),
+                     "Expected group fixed filtering at 10% without decisions logs")
+            self.actor._benchmark_aux_sink = self.note_fixed_filter
         if self.method in {"dtv", "dtv-loo"}:
             _require(self.actor.scope == "group" and self.actor._score_loss_fn is not None,
                      "Expected group-scoped policy valuation")
@@ -441,7 +519,7 @@ class Benchmark:
         if self.method == "grpo-ds":
             _require(learner._ds_cap == 20 and learner._ds_dir is None,
                      "Expected DS cap twenty without artifacts")
-        _require((selector_config is not None) == (self.method == "gradalign"),
+        _require((selector_config is not None) == (self.method in ALIGNMENT_METHODS),
                  "Unexpected selector configuration")
         if self.method == "dtv-loo":
             _require(self.actor.min_keep_fraction == 0.25, "Expected formal DTV-Loo retention floor")
@@ -528,10 +606,14 @@ class Benchmark:
                 logger.removeHandler(handler)
 
     def _write_reports(self):
-        compile_steps = {
-            event["iteration"] for event in self.compiler_events
-            if event["xla_compile_completed_log"] and event["iteration"] is not None
-        }
+        if self.method in FIXED_FILTERS:
+            _require([step for step, _ in self.filter_counts] == list(range(1, len(self.rows) + 1)),
+                     "Expected one fixed-filter count per update")
+            counts = self.jax.device_get(tuple(count for _, count in self.filter_counts))
+            for row, count in zip(self.rows, counts):
+                _require(float(count) in range(5), "Invalid group fixed-filter count")
+                row["filtered_completions"] = int(count)
+        compile_steps = _train_compile_steps(self.compiler_events, self.method)
         for row in self.rows:
             row["compile_event"] = row["iteration"] in compile_steps
         measured = self.rows[self.warmup:]
@@ -550,10 +632,11 @@ class Benchmark:
         _dump(self.out / "compiler_events.json", self.compiler_events)
         _dump(self.out / "metadata.json", {**self.metadata, "batching": self.batching})
         if self.mode == "memory":
-            _dump(self.out / "memory.json", memory_report(
-                self.memory, list(self.out.glob("trace/**/*.xplane.pb"))
-            ))
-        _dump(self.out / "summary.json", {
+            memory = memory_report(self.memory, list(self.out.glob("trace/**/*.xplane.pb")))
+            if self.memory_phase is not None:
+                memory["memory_phase"] = self.memory_phase
+            _dump(self.out / "memory.json", memory)
+        report = {
             "method": self.method, "mode": self.mode, "diagnostics": self.diagnostics,
             "warmup_iterations": self.warmup, "warmup_seconds": self.warmup_seconds,
             "post_window_teardown_seconds": self.teardown_seconds,
@@ -568,7 +651,20 @@ class Benchmark:
             "timing_scope": "full outer iterations; only window boundaries explicitly drained",
             "reviewer_timing_eligible": self.mode == "timing" and self.quiet
             and self.steps == 50 and self.warmup >= 10,
-        })
+        }
+        if self.method == "learnalign":
+            report["learnalign_selector"] = self.learnalign_selection
+            if self.mode == "timing":
+                pre = self.rows[LEARNALIGN_PRE_SKIP:LEARNALIGN_PRE_UPDATES]
+                report["learnalign_prelearn"] = {
+                    **summarize(pre, sum(row["seconds"] for row in pre)),
+                    "iterations_inclusive": [LEARNALIGN_PRE_SKIP + 1, LEARNALIGN_PRE_UPDATES],
+                    "xla_compile_steps": sorted(compile_steps & {r["iteration"] for r in pre}),
+                }
+                report["timing_scope"] = "post-select updates only; pre-learning and full selector reported separately"
+        if self.memory_phase is not None:
+            report["memory_phase"] = self.memory_phase
+        _dump(self.out / "summary.json", report)
 
 
 def memory_report(snapshots, traces):
@@ -636,6 +732,27 @@ def check_run(path):
     _require(metadata["actor_trainer"] == METHODS[summary["method"]], f"{path}: wrong actor")
     _require(metadata["valuation"] == (summary["method"] != "vanilla"),
              f"{path}: wrong valuation route")
+    if method == "learnalign":
+        phase = summary.get("memory_phase")
+        if summary["mode"] == "timing":
+            _require((warmup, steps) == (LEARNALIGN_PRE_UPDATES, 50), f"{path}: wrong LearnAlign timing window")
+            pre = summary["learnalign_prelearn"]
+            _require(pre["iterations_inclusive"] == [LEARNALIGN_PRE_SKIP + 1, LEARNALIGN_PRE_UPDATES]
+                     and pre["iterations"] == LEARNALIGN_PRE_UPDATES - LEARNALIGN_PRE_SKIP
+                     and abs(pre["elapsed_seconds"] - sum(float(r["seconds"]) for r in
+                             rows[LEARNALIGN_PRE_SKIP:LEARNALIGN_PRE_UPDATES])) < 1e-6,
+                     f"{path}: wrong LearnAlign pre-learning report")
+        else:
+            _require((phase, warmup, steps) in {("prelearn", 1, 2), ("postselect", LEARNALIGN_PRE_UPDATES, 2)},
+                     f"{path}: wrong LearnAlign memory phase/window")
+        selection = summary["learnalign_selector"]
+        if phase == "prelearn":
+            _require(selection is None, f"{path}: pre-learning unexpectedly ran the selector")
+        else:
+            _require(selection is not None and selection["after_optimizer_updates"] == LEARNALIGN_PRE_UPDATES
+                     and selection["completions"] == LEARNALIGN_SELECTOR_COMPLETIONS
+                     and selection["elapsed_seconds"] > 0 and selection["generated_tokens"] > 0,
+                     f"{path}: missing full LearnAlign selector")
     for i, row in enumerate(rows, 1):
         candidate_batches = int(row.get("candidate_batches") or 1)
         _require(
@@ -653,6 +770,12 @@ def check_run(path):
             _require(rejected == 4 * (candidate_batches - 1), f"{path}: bad DS accounting")
         if method == "pods":
             _require(int(row["update_completions"]) == 8, f"{path}: bad PODS count")
+        if method in FIXED_FILTERS:
+            _require(int(row["filtered_completions"]) in range(5), f"{path}: bad fixed-filter count")
+        if method == "learnalign":
+            _require(all(float(row[key]) == 0 for key in
+                         ("selector_rounds", "selector_completions", "selector_seconds", "selector_tokens")),
+                     f"{path}: standalone selector leaked into update accounting")
         if method == "gradalign":
             expected = int((i - 1) % GRADALIGN_INTERVAL == 0)
             candidates = 16 * min(GRADALIGN_INTERVAL, 692 - i)
@@ -667,10 +790,11 @@ def check_run(path):
              measured["generated_tokens"], f"{path}: inconsistent token count")
     _require(abs(sum(float(row["seconds"]) for row in rows[warmup:]) -
                  measured["elapsed_seconds"]) < 1e-6, f"{path}: inconsistent window timing")
-    _require(sorted({
-        e["iteration"] for e in compiler if e["xla_compile_completed_log"]
-        and e["iteration"] is not None and warmup < e["iteration"] <= warmup + steps
-    }) == summary["measured_xla_compile_steps"], f"{path}: inconsistent compilation flags")
+    if method in FIXED_FILTERS:
+        _require(sum(int(r["filtered_completions"]) for r in rows[warmup:]) == measured["filtered_completions"],
+                 f"{path}: inconsistent filtered count")
+    _require(sorted(s for s in _train_compile_steps(compiler, method) if warmup < s <= warmup + steps)
+             == summary["measured_xla_compile_steps"], f"{path}: inconsistent compilation flags")
     for unused in ("checkpoints", "model"):
         _require(not (path / unused).exists(), f"{path}: unexpected {unused} output")
     if summary["diagnostics"] == "off":
@@ -683,6 +807,7 @@ def check_run(path):
                  f"{path}: unexpected selection log state")
     if summary["mode"] == "memory":
         memory = _load(path / "memory.json")
+        _require(memory.get("memory_phase") == summary.get("memory_phase"), f"{path}: memory phase mismatch")
         _require(len(memory["devices"]) == 4, f"{path}: incomplete device inventory")
         _require(any((path / "trace").rglob("*.xplane.pb")), f"{path}: no XPlane trace")
     return summary, metadata, [r["prompt_order_sha256"] for r in rows]
@@ -702,7 +827,7 @@ def check_comparable(runs):
     by_stream = {}
     for summary, meta, prompts in runs:
         method = summary.get("method")
-        key = method if method in {"gradalign", "grpo-ds"} else "fixed_stream"
+        key = method if method in ALIGNMENT_METHODS | {"grpo-ds"} else "fixed_stream"
         if key in by_stream:
             reference_meta, reference_prompts = by_stream[key]
             _require(meta.get("selector_config") == reference_meta.get("selector_config"),
@@ -747,6 +872,7 @@ def observed_xprof_peaks(run):
         "collector": "XProf Memory Profile", "method": summary["method"],
         "source_run": str(Path(run).resolve()), "trace_file": str(traces[0]),
         "commit_sha": metadata["commit_sha"], "devices": devices,
+        "memory_phase": summary.get("memory_phase"),
         "iterations_inclusive": [summary["warmup_iterations"] + 1, summary["actor_optimizer_end"]],
         "max_device_peak_hbm_gib": max(d["peak_hbm_gib"] for d in devices.values()),
         "resident_allocations_verified": False,
@@ -774,6 +900,7 @@ def verified_xprof_peaks(run, evidence):
     maximum = max(value["peak_hbm_bytes"] for value in values.values())
     return {
         **report,
+        "memory_phase": summary.get("memory_phase"),
         "max_device_peak_hbm_bytes": maximum,
         "max_device_peak_hbm_gib": maximum / 1024**3,
         "source_run": str(Path(run).resolve()),

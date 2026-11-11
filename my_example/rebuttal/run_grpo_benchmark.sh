@@ -4,7 +4,8 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT"
 if [[ ${1:-} == --help || $# -lt 3 ]]; then
-  echo "usage: bash $0 {vanilla|dtv|dtv-loo|pods|grpo-ds|norm-top50|pcgrad|cagrad|gradalign} {timing|memory} OUT [WARMUP] [STEPS] [off|on] [--dry-run]"
+  echo "usage: bash $0 {vanilla|dtv|dtv-loo|pods|grpo-ds|norm-top50|pcgrad|cagrad|gradalign|random10|reward10|learnalign} {timing|memory} OUT [WARMUP] [STEPS] [off|on] [--dry-run]"
+  echo 'LearnAlign: timing 10+50; memory 1+2 (prelearn) or 10+2 (postselect).'
   [[ ${1:-} == --help ]] && exit 0
   exit 2
 fi
@@ -17,6 +18,8 @@ if [[ "$METHOD" == gradalign ]]; then
   else DEFAULT_WARMUP=20; fi
 elif [[ "$MODE" == memory ]]; then
   DEFAULT_WARMUP=1 DEFAULT_STEPS=2
+elif [[ "$METHOD" == learnalign ]]; then
+  DEFAULT_WARMUP=10
 fi
 WARMUP="${4:-$DEFAULT_WARMUP}"
 STEPS="${5:-$DEFAULT_STEPS}"
@@ -35,6 +38,12 @@ if [[ "$METHOD" == gradalign ]]; then
       echo 'GradAlign timing needs aligned ten-update cycles.' >&2; exit 2;
     }
   fi
+elif [[ "$METHOD" == learnalign ]]; then
+  if [[ "$MODE" == memory ]]; then
+    [[ "$STEPS" == 2 && ( "$WARMUP" == 1 || "$WARMUP" == 10 ) ]] || exit 2
+  else
+    [[ "$WARMUP" == 10 && "$STEPS" == 50 ]] || exit 2
+  fi
 else
   (( WARMUP > 0 )) || exit 2
 fi
@@ -45,6 +54,7 @@ fi
 
 unset JAX_PLATFORMS JAX_PLATFORM_NAME
 unset TUNIX_PODS_KEEP_COUNT TUNIX_DYNAMIC_SAMPLING TUNIX_FIXED_FILTER_METHOD
+unset TUNIX_FIXED_FILTER_SCOPE TUNIX_FIXED_FILTER_RATIO TUNIX_FIXED_FILTER_DECISIONS_PATH
 unset TUNIX_DBC_VARIANT TUNIX_DBC_SELF_INF_SCOPE TUNIX_DBC_SELF_INF_MIN_KEEP_FRACTION
 unset TUNIX_DBC_SELF_INF_POLICY TUNIX_DBC_SELF_INF_LOO TUNIX_DBC_SELF_INF_LOO_POLICY
 unset TUNIX_DBC_SELF_INF_LOO_POLICY_ONLY TUNIX_DBC_SELF_INF_FLIP
@@ -87,6 +97,18 @@ case "$METHOD" in
       --gradalign-validation-prompts 30 --gradalign-candidate-rollouts 4
       --gradalign-validation-rollouts 4 --gradalign-selection-interval 10)
     ;;
+  learnalign)
+    MODULE=my_example.alignment_main
+    METHOD_ARGS=(--alignment-method learnalign --learnalign-selection-ratio 2
+      --learnalign-warmup-prompts 40 --learnalign-estimation-rollouts 8
+      --learnalign-warmup-counts-toward-budget)
+    ;;
+  random10|reward10)
+    export TUNIX_DBC_VARIANT=fixed_filter TUNIX_GRPO_NUM_GENERATIONS=4
+    export TUNIX_FIXED_FILTER_METHOD="${METHOD%10}" TUNIX_FIXED_FILTER_SCOPE=group
+    export TUNIX_FIXED_FILTER_RATIO=0.10
+    METHOD_ARGS=(--use-dynamic-batch-curation)
+    ;;
   *) echo "Unsupported benchmark method: $METHOD" >&2; exit 2 ;;
 esac
 [[ "$DIAGNOSTICS" == off || "$METHOD" =~ ^(vanilla|dtv|dtv-loo)$ ]] || exit 2
@@ -121,6 +143,8 @@ if [[ "$DRY_RUN" == --dry-run ]]; then
   printf 'actor_variant=%s conflict_method=%s pods_keep=%s ds=%s\n' \
     "${TUNIX_DBC_VARIANT:-off}" "${TUNIX_GRADIENT_CONFLICT_METHOD:-off}" \
     "${TUNIX_PODS_KEEP_COUNT:-off}" "${TUNIX_DYNAMIC_SAMPLING:-off}"
+  printf 'fixed_filter=%s scope=%s ratio=%s\n' \
+    "${TUNIX_FIXED_FILTER_METHOD:-off}" "${TUNIX_FIXED_FILTER_SCOPE:-off}" "${TUNIX_FIXED_FILTER_RATIO:-off}"
   printf '%q ' "${COMMAND[@]}"; printf '\n'
   exit 0
 fi

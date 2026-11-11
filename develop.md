@@ -13557,3 +13557,51 @@ This file tracks engineering changes made in this repository.
 - 新测量：PODS、DS、Norm、PCGrad、CAGrad 的 timing 15+50、memory 1+2。GradAlign timing 20+50（5 完整周期），memory 0+1（首轮 selector 和首次更新）；绕过首 batch 形状探测对 lazy selector 的提前执行，分开统计 selector 和训练 token/时间。DS 含被拒与超额组的全部生成，PODS 验证 16 条生成/8 条更新。统一 clean seed13、原 691 步 LR schedule 和已有 benchmark accuracy reward 口径；旧记录的 reward override 不作假定。
 - 磁盘与 HBM：两次检查所在卷默认至少 6 GiB 可用；不是 trace 上限，原 trace 不自动删除。XProf 离线工具强制四设备并分列 stack+heap，但不自动认定常驻覆盖。建议 9 GB 时先排 timing，再逐个采集并转移 trace。GradAlign 的首轮窗口与其他方法 1+2 分开标注。
 - 验证与待办：16 项本地 CPU benchmark 单测（含六方法双模式 dry-run、DS/PODS 工作量、GradAlign lazy 周期、磁盘和 XProf 覆盖）、23 项 DS、2 项 alignment curriculum、9 项隔离 PCGrad/CAGrad、Ruff E9/F、shell 语法与 `git diff --check` 通过。完整 alignment/PODS 框架回归被本机缺 `metrax` 阻断。未连接 TPU、推送或实际训练；真实首轮 trace 大小、覆盖和 TPU 集成待服务器 smoke。LearnAlign 历史启动间隔 6:20:51 除 691≈33.07 秒/更新，属于含加载/评测/选择/保存导出的整次作业摊销，非纯训练或 50 步实测。
+
+## 2026-11-11 — 区分 PODS smoke 与六方法正式计时队列
+
+- 改动范围：无代码改动，仅更新 `develop.md`。用户贴出 PODS 短测的 `reviewer_timing_eligible=false` 及 `excluding_logged_compile_steps.iterations=1`；后者是去掉记录到编译的步之后的统计，不是正式队列的完成状态。六组正式 timing 由独立 nohup 块启动。
+- 验证与待办：核对当前 launcher 默认窗口及 benchmark 输出字段，`git diff --check -- develop.md` 通过。以当前 `$BENCH/timing_queue.log`、退出码和实际 launcher/Python 进程确认状态，不用 `ps | grep seed` 推断；未访问远端或启动训练。
+
+## 2026-11-11 — 提供六组正式墙钟只读汇总
+
+- 改动范围：无代码改动，仅更新 `develop.md`。用户报告六组跑完；提供调用现有离线验收函数并打印每组窗口、时间、生成量、编译步及 DS/GradAlign 明细的命令。默认不混入 smoke、HBM 或历史 Vanilla。
+- 验证与待办：核对 `check_run`、`check_comparable` 与 `summary.json` 字段，`git diff --check -- develop.md` 通过。未读取服务器实际结果，待用户回传汇总。
+
+## 2026-11-11 — 合并 GSM8K 九方法正式墙钟
+
+- 改动范围：无代码改动，仅更新 `develop.md`。合并旧 Vanilla/DTV/DTV-Loo 与新 PODS、GRPO+DS、Norm Top-50%、PCGrad、CAGrad、GradAlign 用户回传结果，50 步均值依次为 7.071/8.304/7.758/7.281/15.500/7.899/7.747/8.040/44.883 s。相对旧 Vanilla 为 1.000/1.174/1.097/1.030/2.192/1.117/1.096/1.137/6.347 倍；跨批次历史参照，不声称同一 worker/提交的配对比较。
+- 验证与限制：按用户回传窗口总秒数复算比值。DS 102 个候选批、208 个丢弃组，生成 394630 token（旧 Vanilla 的 2.12 倍），窗口记录编译步 21/24。GradAlign 5 轮 selector 共 1920.858 s（85.6%），共 1039204 token，其中 866397 为 selector。旧 HBM 三组仍是短窗口，新六组尚未回传。`git diff --check -- develop.md` 通过，未访问 TPU。
+
+## 2026-11-11 — 设计 Random/Reward 与 LearnAlign 补测
+
+- 改动范围：无代码改动，仅更新 `develop.md`。Random/Reward 复用正式 group 固定比例路径，15+50 timing、1+2 HBM；5%/10% 为随机取整的期望过滤率。全量表测四个配置，若只需代表性成本则优先两种 10%，不冒称覆盖 5%。
+- LearnAlign 阶段：默认 300 prompts/4 即 75 次真实训练更新，计入 691 步；一次完整全池 selector 后再做 616 次更新。普通 JIT 预热不同于这 75 步。拟测真实 75 步、全池 selector 与后续 50 步，分报，若按 616 步外推需标估算；已有整场墙钟可按实际完成更新数摊销，不与短窗口直比。HBM 分阶段采短 trace，不用整池长 trace，不把样本窗口最高值称整场峰值。
+- 验证与待办：核对 `FixedFilterTrainer`、alignment config/curriculum 与 launcher 白名单，`git diff --check -- develop.md` 通过。尚未实现入口或启动远端任务。
+
+## 2026-11-11 — 区分 LearnAlign 的同形状成本与模型状态
+
+- 改动范围：无代码改动，仅更新 `develop.md`。5 与 75 步的单步 GRPO 路径相同，但分别经历 20/300 次 prompt 访问；固定 691 步调度时还处在 69 步学习率预热的不同侧。selector 从当时模型采样并计算正确率与梯度特征，因此同种信号不意味着同一信号或同一后续数据分布。
+- 验证与边界：核对 curriculum、`p(1-p)`、梯度分块与 LR schedule；允许 5 步做同形状工程 pilot，不以此替代正式 75 步状态下的测量。`git diff --check -- develop.md` 通过；未执行 TPU。
+
+## 2026-11-11 — 确定 LearnAlign 两列墙钟口径
+
+- 改动范围：无代码改动，仅更新 `develop.md`。两列可分别报告选择前与选择后秒/更新，但一次性全池选择需单列总秒数或写入表注；全程均值须计入选择成本。其他方法没有 LearnAlign 专属的选择前训练阶段，不等于没有 benchmark 预热或 GradAlign 周期选择。
+- 验证与待办：复核默认 75/616 更新划分及旧 50 步窗口，`git diff --check -- develop.md` 通过。现有整场日志不能单独恢复两个阶段的均值，未执行新计时。
+
+## 2026-11-11 — 改用 LearnAlign 10+50 短窗口成本协议
+
+- 改动范围：无代码改动，仅更新 `develop.md`。按用户决定，benchmark 专用提前学习改为 40 prompts / 10 次更新，以第 6–10 步平均报选题前墙钟；真实全池 selector 单独计时，完成后测第 11–60 步共 50 次更新。保留 691 步 LR schedule、选择池、selector rollout 和训练形状，不改正式 LearnAlign 的 75 步配置。
+- 验证与待办：核对 `--learnalign-warmup-prompts` 和 curriculum 阶段边界；`git diff --check -- develop.md` 通过。该协议少跑 65 次提前训练，不减少全池 selector 工作量；标注为 10-step pre-learning cost probe，不冒称 75 步原方法实测。尚未实现或运行。
+
+## 2026-11-11 — 设计 Random10/Reward10/LearnAlign benchmark 接入与分阶段 HBM
+
+- 改动范围：无代码改动，仅更新 `develop.md`。固定过滤新增两个显式 benchmark 路由，复用 `FixedFilterTrainer` group 0.10，timing 15+50、memory 1+2；不写逐条诊断，窗口后聚合实际过滤比例。LearnAlign 复用独立 alignment 入口，仅 benchmark 设 40 prompts / 10 步，完整 selector 前后由 curriculum 发边界事件；保留 691 步调度，计前 6–10、完整 selector、后 11–60。
+- HBM 方案：提前学习第 2–3 步与选题后第 11–12 步分别开短 trace、分目录和报告；后一窗口必须等全池 selector 完成后再启用。两份采集可独立排队以适应低磁盘。可选另采少量 selector chunks 作为第三个诊断窗口，不纳入两段 GRPO 峰值，不把部分窗口称整场峰值；四设备不足则显式缺测。
+- 验证与待办：核对 benchmark 单窗口实现、固定过滤 env/诊断、LearnAlign lazy curriculum 和现有 selector hook；`git diff --check -- develop.md` 通过。待批准后实施与验证，未改 benchmark 或启动 TPU。
+
+## 2026-11-11 — 实现 Random10、Reward10 和 LearnAlign 分阶段成本 benchmark
+
+- 改动范围与文件：`my_example/rebuttal/{grpo_benchmark.py,run_grpo_benchmark.sh,grpo_benchmark.md}`、`my_example/alignment_main.py`、`my_example/alignment_baselines/curriculum.py`、`tunix/{rl/fixed_filter_trainer.py,sft/peft_trainer.py}`、`tests/my_example/grpo_benchmark_test.py`、`develop.md`。仅新增 benchmark 路径，正式训练配置、学习率调度及保存行为不变。
+- 计量：clean seed13。Random/Reward 复用 group 10% 期望配额，计时 15+50、HBM 1+2；实际过滤数留在设备，窗口后批量读取。LearnAlign 提前训练 10 步，报第 6–10 步、一次完整 2,764×8 selector 及第 11–60 步；筛选不计入第 11 步。HBM 独立采第 2–3 与 11–12 步，后者等全池筛选结束才开 trace。两者均不覆盖 selector HBM。所有新增窗口不评测、不保存 checkpoint 或模型。
+- 验证与待办：本地 `JAX_PLATFORMS=cpu python -m unittest discover -s tests/my_example -p grpo_benchmark_test.py` 18 项、`alignment_curriculum_test.py` 2 项、Ruff E9/F、`bash -n` 和 `git diff --check` 通过。完整 alignment 回归的两个用例和原 fixed-filter suite 因本地缺 `metrax` 无法执行，交由服务器 CPU 环境复验。未提交、推送、连接远端或初始化 TPU；真实 TPU 流程和 XProf 四设备覆盖待验证。短 trace 的 6 GiB 可用空间门槛不保证最终大小，需分开采集并保留或转移原始 trace。
