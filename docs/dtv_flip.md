@@ -71,6 +71,24 @@ TUNIX_DTV_FLIP_BATCH_FRACTION=0.1 TUNIX_DTV_FLIP_FREQUENCY=2 \
   ./my_example/run_dtv_flip.sh dtv batch
 ```
 
+## Random Flip
+
+`random batch` 从当前启用 batch 的所有 completion 均匀无放回抽满固定配额。
+默认逐 batch 比例为 `0.1`，同样取最近偶数。当前 16 条 completion 时，每个
+启用步翻 2 条。采样由 `TUNIX_EXPERIMENT_SEED` 与训练 micro-step 决定。
+选中条目的完整 policy + KL loss 乘 `-1`，再按原 batch 大小平均并反传一次。
+跳过步使用普通 GRPO 更新。Random Flip 使用标准的 `sequence-mean-token-mean`
+GRPO loss。
+
+```bash
+TUNIX_EXPERIMENT_SEED=5 TUNIX_DTV_FLIP_BATCH_FRACTION=0.1 \
+TUNIX_DTV_FLIP_FREQUENCY=2 ./my_example/run_dtv_flip.sh random batch
+```
+
+决策 JSONL 中 `method` 为 `random-flip`，记录 `random_flip_seed` 与
+`flipped_indices`。DTV 评分和负分计数为 `null`。配额、实际翻转数及两种累计
+比例沿用 flip 日志字段。Random Flip checkpoint 同时校验采样 seed。
+
 ## Checkpoint恢复
 
 周期保存和最终保存都包含 `dtv_flip_budget` metadata，记录配额模式、比例、
@@ -149,7 +167,8 @@ TUNIX_FLIP_TEST_ISOLATED=1 JAX_PLATFORMS=cpu \
 python -m unittest discover -s tests/rl -p dtv_flip_trainer_test.py
 ```
 
-本地 JAX 0.8.1 四 CPU 设备隔离模式 29 项测试通过，覆盖两种配额、
-频率调度、跳过步与普通 AdamW 的一致性、梯度累积及 Orbax 保存恢复。
+本地 JAX 0.8.1 四 CPU 设备隔离模式 30 项测试通过，覆盖两种配额、
+频率调度、跳过步与普通 AdamW 的一致性、梯度累积、Orbax 保存恢复，
+以及 Random Flip 单次反传与逐 completion 完整梯度取反的一致性。
 隔离测试不代表完整依赖导入、TPU 显存、checkpoint restore 或完整 GSM8K 训练已验证。
 服务器仍需运行正常模式测试与实际训练；本次未在服务器执行或推送代码。

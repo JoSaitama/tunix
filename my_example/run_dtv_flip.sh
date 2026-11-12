@@ -3,15 +3,17 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-# Usage: run_dtv_flip.sh [dtv|dtv-loo] [batch|group] [existing GRPO flags...]
+# Usage: run_dtv_flip.sh [dtv|dtv-loo|random] [batch|group] [existing GRPO flags...]
 SCORE="${1:-dtv}"
 if [ "$#" -gt 0 ]; then shift; fi
 SCOPE="${1:-batch}"
 if [ "$#" -gt 0 ]; then shift; fi
+RANDOM_FLIP=0
 case "$SCORE" in
   dtv) LOO=0 ;;
   dtv-loo) LOO=1 ;;
-  *) echo "error: score must be dtv or dtv-loo" >&2; exit 2 ;;
+  random) LOO=0; RANDOM_FLIP=1 ;;
+  *) echo "error: score must be dtv, dtv-loo or random" >&2; exit 2 ;;
 esac
 case "$SCOPE" in
   batch|group) ;;
@@ -27,6 +29,13 @@ done
 
 MAX_FLIP_FRACTION="${TUNIX_DTV_FLIP_MAX_FRACTION:-0.1}"
 BATCH_FLIP_FRACTION="${TUNIX_DTV_FLIP_BATCH_FRACTION:-}"
+if [ "$RANDOM_FLIP" = 1 ]; then
+  if [ "$SCOPE" != batch ]; then
+    echo "error: random flip requires batch scope" >&2
+    exit 2
+  fi
+  BATCH_FLIP_FRACTION="${BATCH_FLIP_FRACTION:-0.1}"
+fi
 FREQUENCY="${TUNIX_DTV_FLIP_FREQUENCY-1}"
 FRACTION_ENV=TUNIX_DTV_FLIP_MAX_FRACTION
 QUOTA_SLUG=cap
@@ -101,6 +110,7 @@ mkdir -p "${RESULTS_DIR}"
 TUNIX_DTV_FLIP_MAX_FRACTION="$MAX_FLIP_FRACTION" \
 TUNIX_DTV_FLIP_BATCH_FRACTION="$BATCH_FLIP_FRACTION" \
 TUNIX_DTV_FLIP_FREQUENCY="$FREQUENCY" \
+TUNIX_DTV_FLIP_RANDOM="$RANDOM_FLIP" \
 TUNIX_DBC_SELF_INF_FLIP=1 \
 TUNIX_DBC_SELF_INF_LOO="$LOO" \
 TUNIX_DTV_FLIP_DECISIONS_PATH="${RESULTS_DIR}/${LABEL}__decisions.jsonl" \

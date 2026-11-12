@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""DTV-flip: reverse negative-alignment full sample gradients."""
+"""Flip full completion gradients selected by alignment or random sampling."""
 
 from __future__ import annotations
 
@@ -54,6 +54,8 @@ def configuration_from_environment(environ):
       max_flip_fraction=environ.get("TUNIX_DTV_FLIP_MAX_FRACTION", "0.1"),
       batch_flip_fraction=environ.get("TUNIX_DTV_FLIP_BATCH_FRACTION") or None,
       frequency=flip_frequency(environ.get("TUNIX_DTV_FLIP_FREQUENCY", "1")),
+      random_flip_seed=(int(environ.get("TUNIX_EXPERIMENT_SEED") or "0")
+                        if enabled("TUNIX_DTV_FLIP_RANDOM") else None),
   )
 
 
@@ -166,21 +168,31 @@ class FlipBudget(nnx.Module):
 
 
 class DTVFlipTrainer(rl_trainer.Trainer):
-  """Use total-loss alignment to flip the same total gradients DTV masks."""
+  """Apply signed GRPO updates at a fixed actor-update frequency."""
 
   def __init__(self, *args, scope="batch", num_generations=None,
                loo=False, decisions_path=None, max_flip_fraction="0.1",
-               batch_flip_fraction=None, frequency=1, **kwargs):
+               batch_flip_fraction=None, frequency=1, random_flip_seed=None,
+               **kwargs):
     if scope not in ("batch", "group"):
       raise ValueError(f"Invalid dtv-flip scope: {scope!r}")
     if scope == "group" and int(num_generations or 0) <= int(loo):
       raise ValueError("Insufficient num_generations for dtv-flip group scope.")
+    if random_flip_seed is not None:
+      if scope != "batch" or loo:
+        raise ValueError("Random flip requires batch scope and no LOO scoring.")
+      if type(random_flip_seed) is not int or not 0 <= random_flip_seed < 2**32:
+        raise ValueError("Random flip requires a seed in [0, 4294967295].")
+      if batch_flip_fraction is None:
+        batch_flip_fraction = "0.1"
     self.quota_policy = (
         "cumulative_floor_no_catchup" if batch_flip_fraction is None else "batch_nearest_even"
     )
     fraction = max_flip_fraction if batch_flip_fraction is None else batch_flip_fraction
     self.flip_numerator, self.flip_denominator = ratio_terms(fraction)
     self.frequency = flip_frequency(frequency)
+    self.random_flip_seed = random_flip_seed
+    self._random_flip_loss = None
     super().__init__(*args, **kwargs)
     self._grad_acc_steps = self.config.get_with_default("gradient_accumulation_steps", 1)
     self.scope = scope
@@ -192,6 +204,22 @@ class DTVFlipTrainer(rl_trainer.Trainer):
     )
     if decisions_path:
       os.makedirs(os.path.dirname(os.path.abspath(decisions_path)), exist_ok=True)
+
+  def with_random_flip_loss_fn(self, loss_fn):
+    """Attach the GRPO loss that accepts completion signs."""
+    self.clear_jit_cache()
+    self._random_flip_loss = loss_fn
+
+  def _budget_configuration(self):
+    configuration = dict(
+        version=2, numerator=self.flip_numerator, denominator=self.flip_denominator,
+        scope=self.scope, loo=self.loo, num_generations=self.num_generations,
+        quota_policy=self.quota_policy, frequency=self.frequency,
+        grad_acc_steps=self._grad_acc_steps,
+    )
+    if self.random_flip_seed is not None:
+      configuration.update(version=3, random_flip_seed=self.random_flip_seed)
+    return configuration
 
   def initialize_budget_state(self, optimizer, metadata, restored_step):
     """Restore quota counters and continue the schedule from the saved actor step."""
@@ -205,10 +233,7 @@ class DTVFlipTrainer(rl_trainer.Trainer):
         state = dict(state, version=2, quota_policy="cumulative_floor_no_catchup",
                      frequency=1, grad_acc_steps=self._grad_acc_steps,
                      total_seen=state.get("seen"))
-      expected = dict(version=2, numerator=self.flip_numerator,
-                      denominator=self.flip_denominator, scope=self.scope, loo=self.loo,
-                      num_generations=self.num_generations, quota_policy=self.quota_policy,
-                      frequency=self.frequency, grad_acc_steps=self._grad_acc_steps)
+      expected = self._budget_configuration()
       if any(state.get(key) != value for key, value in expected.items()):
         raise ValueError("Checkpoint dtv-flip configuration differs.")
       seen, flipped, remainder, total_seen = (
@@ -233,10 +258,7 @@ class DTVFlipTrainer(rl_trainer.Trainer):
     metadata = dict(self.custom_checkpoint_metadata_fn())
     budget = self.optimizer.dtv_flip_budget
     metadata["dtv_flip_budget"] = dict(
-        version=2, numerator=self.flip_numerator, denominator=self.flip_denominator,
-        scope=self.scope, loo=self.loo, num_generations=self.num_generations,
-        quota_policy=self.quota_policy, frequency=self.frequency,
-        grad_acc_steps=self._grad_acc_steps,
+        self._budget_configuration(),
         seen=int(np.asarray(budget.seen[...])),
         flipped=int(np.asarray(budget.flipped[...])),
         remainder=int(np.asarray(budget.remainder[...])),
@@ -271,6 +293,7 @@ class DTVFlipTrainer(rl_trainer.Trainer):
     )
     budget = optimizer.dtv_flip_budget
     remainder = budget.remainder[...]
+    iter_step = optimizer.step[...] + self._initial_iter_step
 
     def flip_step(model, inputs):
       values, grads = jax.vmap(grad_fn, in_axes=(None, 0))(model, inputs)
@@ -300,18 +323,41 @@ class DTVFlipTrainer(rl_trainer.Trainer):
     def ordinary_step(model, inputs):
       values, grads = grad_fn(model, inputs)
       loss, aux = values if self._has_aux else (values, None)
-      scores = jnp.zeros(batch_size, dtype=jnp.float32)
+      scores = (jnp.zeros(batch_size, dtype=jnp.float32)
+                if self.random_flip_seed is None else None)
       weights = jnp.broadcast_to(1.0, (batch_size,))
       return grads, loss, aux, loss, scores, weights, jnp.asarray(0, jnp.int32), remainder
 
+    def random_step(model, inputs):
+      quota = nearest_even_quota(batch_size, self.flip_numerator, self.flip_denominator)
+      if quota == 0:
+        return ordinary_step(model, inputs)
+
+      # Use a separate PRNG stream for flip selection, indexed by micro-step.
+      key = jax.random.fold_in(jax.random.key(self.random_flip_seed), 0x464C4950)
+      key = jax.random.fold_in(key, iter_step)
+      indices = jax.random.permutation(key, batch_size)[:quota]
+      weights = jnp.ones(batch_size).at[indices].set(-1.0)
+
+      def signed_loss(model):
+        return self._random_flip_loss(model, **inputs, completion_weights=weights)
+
+      (loss, aux), grads = nnx.value_and_grad(
+          signed_loss, argnums=nnx.DiffState(0, wrt), has_aux=True
+      )(model)
+      raw_loss = aux.pop("dtv_flip_raw_loss")
+      return grads, loss, aux, raw_loss, None, weights, jnp.asarray(quota, jnp.int32), remainder
+
+    if self.random_flip_seed is not None and self._random_flip_loss is None:
+      raise ValueError("Random flip requires the GRPO loss with completion signs.")
+    active_step = flip_step if self.random_flip_seed is None else random_step
     if self.frequency == 1:
       enabled = jnp.asarray(True)
-      result = flip_step(model, inputs)
+      result = active_step(model, inputs)
     else:
-      iter_step = optimizer.step[...] + self._initial_iter_step
       # All microbatches in one accumulated optimizer update use the same phase.
       enabled = (iter_step // self._grad_acc_steps) % self.frequency == 0
-      result = nnx.cond(enabled, flip_step, ordinary_step, model, inputs)
+      result = nnx.cond(enabled, active_step, ordinary_step, model, inputs)
     grads, loss, aux, raw_loss, scores, weights, quota, remainder = result
     optimizer.update(model, grads)
 
@@ -323,14 +369,10 @@ class DTVFlipTrainer(rl_trainer.Trainer):
     if isinstance(aux, dict):
       aux.update({
           "skipped_samples": jnp.asarray(0.0),
-          "self_inf_dot_mean": jnp.mean(scores),
-          "self_inf_dot_std": jnp.std(scores),
           "self_inf_kept_fraction": jnp.asarray(1.0),
           "dtv_flip_enabled": enabled.astype(jnp.int32),
           "dtv_flip_count": flip_count,
           "dtv_flip_fraction": jnp.mean(weights < 0),
-          "dtv_flip_negative_count": jnp.sum(scores < 0),
-          "dtv_flip_negative_fraction": jnp.mean(scores < 0),
           "dtv_flip_quota": quota,
           "dtv_flip_seen": budget.seen[...],
           "dtv_flip_total_seen": budget.total_seen[...],
@@ -339,6 +381,13 @@ class DTVFlipTrainer(rl_trainer.Trainer):
           "dtv_flip_cumulative_fraction": budget.flipped[...] / budget.total_seen[...],
           "dtv_flip_raw_loss": raw_loss,
       })
+      if scores is not None:
+        aux.update({
+            "self_inf_dot_mean": jnp.mean(scores),
+            "self_inf_dot_std": jnp.std(scores),
+            "dtv_flip_negative_count": jnp.sum(scores < 0),
+            "dtv_flip_negative_fraction": jnp.mean(scores < 0),
+        })
       if self.decisions_path:
         aux["dtv_flip_scores"] = scores
         aux["dtv_flip_weights"] = weights
@@ -347,33 +396,38 @@ class DTVFlipTrainer(rl_trainer.Trainer):
   def _post_process_train_step(self, aux: Any) -> None:
     if isinstance(aux, dict):
       enabled = self.frequency == 1 or bool(aux["dtv_flip_enabled"])
-      if self.decisions_path and "dtv_flip_scores" in aux:
+      if self.decisions_path and "dtv_flip_weights" in aux:
         scores = aux.pop("dtv_flip_scores")
         weights = aux.pop("dtv_flip_weights")
         record = {
-            "method": "dtv-flip", "score": "dtv-loo" if self.loo else "dtv",
-            "scope": self.scope, "score_objective": "total",
+            "method": "dtv-flip" if scores is not None else "random-flip",
+            "score": ("dtv-loo" if self.loo else "dtv") if scores is not None else "random",
+            "scope": self.scope, "score_objective": "total" if scores is not None else None,
             "flip_application": "full", "num_generations": self.num_generations,
             "train_step": int(self._train_steps) + 1,
             "quota_scope": "batch", "quota_policy": self.quota_policy,
             "frequency": self.frequency, "flip_enabled": enabled,
-            "batch_completion_count": int(scores.shape[0]),
+            "batch_completion_count": int(weights.shape[0]),
             "configured_fraction": self.flip_numerator / self.flip_denominator,
             **{key: np.asarray(aux[key]).item() for key in (
-                "dtv_flip_count", "dtv_flip_fraction", "dtv_flip_negative_count", "dtv_flip_quota",
+                "dtv_flip_count", "dtv_flip_fraction", "dtv_flip_quota",
                 "dtv_flip_seen", "dtv_flip_total_seen", "dtv_flip_total",
                 "dtv_flip_active_fraction", "dtv_flip_cumulative_fraction",
             )},
-            "scores": np.asarray(scores).tolist() if enabled else None,
+            "dtv_flip_negative_count": (
+                int(aux["dtv_flip_negative_count"]) if enabled and scores is not None else None
+            ),
+            "scores": np.asarray(scores).tolist() if enabled and scores is not None else None,
             "weights": np.asarray(weights).tolist() if enabled else None,
         }
         if self.quota_policy == "cumulative_floor_no_catchup":
           record["max_flip_fraction"] = record["configured_fraction"]
-        if not enabled:
-          record["dtv_flip_negative_count"] = None
+        if self.random_flip_seed is not None:
+          record["random_flip_seed"] = self.random_flip_seed
+          record["flipped_indices"] = np.flatnonzero(np.asarray(weights) < 0).tolist()
         with open(self.decisions_path, "a", encoding="utf-8") as output:
           output.write(json.dumps(record, allow_nan=False) + "\n")
-      if not enabled:
+      if not enabled and self.random_flip_seed is None:
         for key in ("self_inf_dot_mean", "self_inf_dot_std", "dtv_flip_negative_count",
                     "dtv_flip_negative_fraction"):
           aux.pop(key)

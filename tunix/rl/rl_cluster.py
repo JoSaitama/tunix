@@ -647,10 +647,14 @@ class RLCluster:
       actor_trainer_kwargs.update(
           dtv_flip_trainer.configuration_from_environment(os.environ)
       )
-      logging.info(
-          "dtv-flip: full-gradient scoring and flipping (scope=%s, loo=%s).",
-          actor_trainer_kwargs["scope"], actor_trainer_kwargs["loo"],
-      )
+      if actor_trainer_kwargs["random_flip_seed"] is not None:
+        logging.info("random-flip: batch sampling with full-loss signs (seed=%s).",
+                     actor_trainer_kwargs["random_flip_seed"])
+      else:
+        logging.info(
+            "dtv-flip: full-gradient scoring and flipping (scope=%s, loo=%s).",
+            actor_trainer_kwargs["scope"], actor_trainer_kwargs["loo"],
+        )
     elif actor_config.use_dynamic_batch_curation and dbc_variant == "self_inf":
       use_self_inf_loo = os.environ.get(
           "TUNIX_DBC_SELF_INF_LOO", ""

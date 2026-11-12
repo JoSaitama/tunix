@@ -13,6 +13,7 @@ from pathlib import Path
 import subprocess
 import tempfile
 from types import SimpleNamespace
+from typing import Any
 import unittest
 from unittest import mock
 
@@ -52,7 +53,7 @@ class Model(nnx.Module):
 
 
 def make_trainer(loo=False, scope="batch", generations=4, aux=True, ratio="1",
-                 batch_ratio=None, frequency=1, grad_acc_steps=1):
+                 batch_ratio=None, frequency=1, grad_acc_steps=1, random_seed=None):
 
   trainer = object.__new__(flip.DTVFlipTrainer)
   trainer.flip_numerator, trainer.flip_denominator = flip.ratio_terms(
@@ -61,6 +62,7 @@ def make_trainer(loo=False, scope="batch", generations=4, aux=True, ratio="1",
   trainer.quota_policy = ("cumulative_floor_no_catchup" if batch_ratio is None
                           else "batch_nearest_even")
   trainer.frequency = frequency
+  trainer.random_flip_seed = random_seed
   trainer._grad_acc_steps = grad_acc_steps
   trainer.scope, trainer.loo = scope, loo
   trainer.num_generations, trainer.decisions_path = generations, None
@@ -71,6 +73,30 @@ def make_trainer(loo=False, scope="batch", generations=4, aux=True, ratio="1",
     return (value, {"kl": model.weight[...] * jnp.mean(kl)}) if aux else value
   trainer.loss_fn = loss
   return trainer
+
+
+def load_grpo_loss():
+  if os.environ.get("TUNIX_FLIP_TEST_ISOLATED") != "1":
+    from tunix.rl.grpo import grpo_learner
+    return grpo_learner.grpo_loss_fn, grpo_learner.common
+  # Keep the production loss, KL and reduction while substituting a tiny model
+  # forward for the server-only import graph.
+  namespace = dict(jax=jax, jnp=jnp, Any=Any)
+  for filename, names in (
+      ("common.py", {"compute_kl_divergence", "aggregate_loss"}),
+      ("grpo/grpo_learner.py", {"grpo_loss_fn"}),
+  ):
+    source = ROOT / "tunix/rl" / filename
+    nodes = [node for node in ast.parse(source.read_text()).body
+             if isinstance(node, ast.FunctionDef) and node.name in names]
+    for node in nodes:
+      node.decorator_list = []
+    exec(compile(ast.Module(body=nodes, type_ignores=[]), str(source), "exec"), namespace)
+  common = SimpleNamespace(compute_per_token_logps=None,
+                           compute_kl_divergence=namespace["compute_kl_divergence"],
+                           aggregate_loss=namespace["aggregate_loss"])
+  namespace["common"] = common
+  return namespace["grpo_loss_fn"], common
 
 
 class DTVFlipTest(unittest.TestCase):
@@ -222,12 +248,13 @@ class DTVFlipTest(unittest.TestCase):
         "rl_trainer": SimpleNamespace(Trainer="baseline"),
         "logging": SimpleNamespace(info=lambda *a: None), "os": os,
     }
-    for enabled, flag, loo, expected in (
-        (False, "1", "0", "baseline"), (True, "", "0", "dtv"),
-        (True, "", "1", "loo"), (True, "1", "0", flip.DTVFlipTrainer),
-        (True, "1", "1", flip.DTVFlipTrainer)):
+    for enabled, flag, loo, random, expected in (
+        (False, "1", "0", "0", "baseline"), (True, "", "0", "0", "dtv"),
+        (True, "", "1", "0", "loo"), (True, "1", "0", "0", flip.DTVFlipTrainer),
+        (True, "1", "1", "0", flip.DTVFlipTrainer),
+        (True, "1", "0", "1", flip.DTVFlipTrainer)):
       env = {"TUNIX_DBC_VARIANT": "self_inf", "TUNIX_DBC_SELF_INF_FLIP": flag,
-             "TUNIX_DBC_SELF_INF_LOO": loo}
+             "TUNIX_DBC_SELF_INF_LOO": loo, "TUNIX_DTV_FLIP_RANDOM": random}
       namespace = dict(names, actor_config=SimpleNamespace(use_dynamic_batch_curation=enabled))
       with mock.patch.dict(os.environ, env, clear=True):
         exec(compile(block, "cluster_selection", "exec"), namespace)
@@ -237,6 +264,8 @@ class DTVFlipTest(unittest.TestCase):
       self.assertEqual(actual, expected)
       if expected == flip.DTVFlipTrainer:
         self.assertEqual(namespace["actor_trainer_kwargs"]["loo"], loo == "1")
+        self.assertEqual(namespace["actor_trainer_kwargs"]["random_flip_seed"],
+                         0 if random == "1" else None)
         self.assertNotIn("min_keep_fraction", namespace["actor_trainer_kwargs"])
 
 
@@ -306,7 +335,7 @@ class DTVFlipTest(unittest.TestCase):
       launcher = scripts / "run_dtv_flip.sh"
       launcher.write_text((ROOT / "my_example/run_dtv_flip.sh").read_text())
       downstream = scripts / "run_grpo_gemma.sh"
-      downstream.write_text('#!/usr/bin/env bash\nprintf \'%s\\n\' "$TUNIX_DBC_SELF_INF_FLIP" "$TUNIX_DBC_SELF_INF_LOO" "$TUNIX_DTV_FLIP_DECISIONS_PATH" "$TUNIX_DTV_FLIP_MAX_FRACTION" "$TUNIX_DTV_FLIP_BATCH_FRACTION" "$TUNIX_DTV_FLIP_FREQUENCY" "$@" > "$CAPTURE"\nexit "${FAKE_EXIT:-0}"\n')
+      downstream.write_text('#!/usr/bin/env bash\nprintf \'%s\\n\' "$TUNIX_DBC_SELF_INF_FLIP" "$TUNIX_DBC_SELF_INF_LOO" "$TUNIX_DTV_FLIP_DECISIONS_PATH" "$TUNIX_DTV_FLIP_MAX_FRACTION" "$TUNIX_DTV_FLIP_BATCH_FRACTION" "$TUNIX_DTV_FLIP_FREQUENCY" "$TUNIX_DTV_FLIP_RANDOM" "$@" > "$CAPTURE"\nexit "${FAKE_EXIT:-0}"\n')
       downstream.chmod(0o755)
       (scripts / "save_results_to_my_result.py").write_text("pass\n")
       results = scripts / "my result"
@@ -331,7 +360,7 @@ class DTVFlipTest(unittest.TestCase):
           self.assertEqual(lines[:2], ["1", "1" if score == "dtv-loo" else "0"])
           self.assertIn(f"dtv-flip_{score}_{scope}_cap0p1_", lines[2])
           self.assertEqual(lines[3], "0.1")
-          self.assertEqual(lines[4:6], ["", "1"])
+          self.assertEqual(lines[4:7], ["", "1", "0"])
           self.assertIn("--use-dbc-self-inf-" + scope, lines)
           self.assertIn(str(root / "custom metrics"), lines)
           self.assertIn(str(root / "custom ckpt"), lines)
@@ -352,6 +381,13 @@ class DTVFlipTest(unittest.TestCase):
         lines = capture.read_text().splitlines()
         self.assertIn(slug, lines[2])
         self.assertEqual(lines[4:6], [batch_ratio, "2"])
+      result = subprocess.run(["bash", str(launcher), "random", "batch"],
+          env=dict(env, TUNIX_DTV_FLIP_FREQUENCY="2"), capture_output=True)
+      self.assertEqual(result.returncode, 0, result.stderr)
+      lines = capture.read_text().splitlines()
+      self.assertEqual(lines[:2], ["1", "0"])
+      self.assertIn("dtv-flip_random_batch_batchcap0p1_freq2_", lines[2])
+      self.assertEqual(lines[4:7], ["0.1", "2", "1"])
       for variable, value in (("TUNIX_DTV_FLIP_BATCH_FRACTION", "-0.1"),
                               ("TUNIX_DTV_FLIP_FREQUENCY", "0"),
                               ("TUNIX_DTV_FLIP_FREQUENCY", "2147483648")):
@@ -360,7 +396,7 @@ class DTVFlipTest(unittest.TestCase):
       result = subprocess.run(["bash", str(launcher), "dtv", "batch"],
                               env=dict(env, FAKE_EXIT="7"), capture_output=True)
       self.assertEqual(result.returncode, 7)
-      for args in (["bad"], ["dtv", "invalid"],
+      for args in (["bad"], ["dtv", "invalid"], ["random", "group"],
                    ["dtv", "batch", "--use-dbc-self-inf-group"],
                    ["dtv", "batch", "--metrics-log-dir"]):
         result = subprocess.run(["bash", str(launcher), *args], env=env, capture_output=True)
@@ -524,6 +560,84 @@ class DTVFlipTest(unittest.TestCase):
         jax.effects_barrier()
         self.assertEqual(len(calls), expected)
 
+  def test_random_flip_matches_signed_grpo_gradient_and_resumes(self):
+    grpo_loss, common = load_grpo_loss()
+    config = SimpleNamespace(beta=.08, epsilon=.2, loss_algo="grpo",
+                             loss_agg_mode="sequence-mean-token-mean")
+
+    def loss(model, train_example, **kwargs):
+      return grpo_loss(model, SimpleNamespace(**train_example), config, 0, 1, **kwargs)
+
+    def build(seed):
+      trainer = make_trainer(batch_ratio="0.1", frequency=2, random_seed=seed)
+      trainer.loss_fn = loss
+      trainer._random_flip_loss = loss
+      trainer.gen_model_input_fn = lambda inputs: {"train_example": inputs}
+      trainer.custom_checkpoint_metadata_fn = lambda: {}
+      trainer._train_steps = 0
+      trainer.rl_metrics_to_log = {}
+      trainer._buffered_train_metrics = SimpleNamespace(additional_metrics={})
+      model = Model()
+      trainer.optimizer = nnx.Optimizer(model, optax.sgd(.1), wrt=nnx.Param)
+      trainer.initialize_budget_state(trainer.optimizer, {}, 0)
+      return trainer, model
+
+    tokens = jnp.tile(jnp.array([[2, 3, 0], [3, 2, 4]]), (8, 1))
+    inputs = dict(completion_ids=tokens, completion_mask=tokens != 0,
+                  prompt_ids=jnp.ones((16, 1), dtype=jnp.int32),
+                  advantages=jnp.linspace(-1., 1., 16),
+                  old_per_token_logps=jnp.full((16, 3), -.07),
+                  ref_per_token_logps=jnp.full((16, 3), -.3))
+    if jax.local_device_count() > 1:
+      mesh = jax.sharding.Mesh(np.array(jax.local_devices()), ("data",))
+      sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec("data"))
+      inputs = jax.device_put(inputs, sharding)
+    trainer, model = build(5)
+    reference = Model()
+    reference_optimizer = nnx.Optimizer(reference, optax.sgd(.1), wrt=nnx.Param)
+    with (mock.patch.object(common, "compute_per_token_logps", side_effect=
+                           lambda model, completion_tokens, **_: -.1 * model.weight[...] * completion_tokens),
+          mock.patch.object(flip, "alignment_scores", side_effect=AssertionError("unexpected DTV scoring")),
+          tempfile.TemporaryDirectory() as directory):
+      trainer.decisions_path = str(Path(directory) / "random.jsonl")
+      step = nnx.jit(trainer._train_step)
+      for index, quota in enumerate((2, 0, 2)):
+        if index == 2:
+          resumed, resumed_model = build(5)
+          resumed_model.weight[...] = model.weight[...]
+          metadata = trainer.custom_checkpoint_metadata()
+          resumed.initialize_budget_state(resumed.optimizer, metadata, 2)
+          resumed.decisions_path = trainer.decisions_path
+          next_step = nnx.jit(resumed._train_step)
+          _, restored_aux = next_step(resumed_model, resumed.optimizer, inputs)
+          different_seed, _ = build(13)
+          with self.assertRaisesRegex(ValueError, "configuration differs"):
+            different_seed.initialize_budget_state(different_seed.optimizer, metadata, 2)
+        actual_loss, aux = step(model, trainer.optimizer, inputs)
+        weights = aux["dtv_flip_weights"]
+        self.assertIsNone(aux["dtv_flip_scores"])
+        self.assertEqual(int(aux["dtv_flip_quota"]), quota)
+        self.assertEqual(int(aux["dtv_flip_count"]), quota)
+
+        def reference_loss(model):
+          per_sample = jax.vmap(lambda sample: loss(model, sample)[0])(inputs)
+          return jnp.mean(per_sample * weights)
+
+        expected_loss, grads = nnx.value_and_grad(reference_loss)(reference)
+        reference_optimizer.update(reference, grads)
+        np.testing.assert_allclose(actual_loss, expected_loss, atol=1e-6)
+        np.testing.assert_allclose(model.weight[...], reference.weight[...], atol=1e-6)
+        if index == 2:
+          np.testing.assert_array_equal(restored_aux["dtv_flip_weights"], weights)
+          np.testing.assert_allclose(resumed_model.weight[...], model.weight[...], atol=1e-6)
+        trainer._post_process_train_step(aux)
+        trainer._train_steps += 1
+      rows = [json.loads(row) for row in Path(trainer.decisions_path).read_text().splitlines()]
+    self.assertEqual([row["flip_enabled"] for row in rows], [True, False, True])
+    self.assertEqual([len(row["flipped_indices"]) for row in rows], [2, 0, 2])
+    self.assertTrue(all(row["method"] == "random-flip" and row["scores"] is None for row in rows))
+    self.assertAlmostEqual(rows[-1]["dtv_flip_cumulative_fraction"], 4 / 48)
+
   def test_metadata_roundtrip_matches_uninterrupted_sequence(self):
     def build():
       trainer = make_trainer(loo=True, scope="group", generations=2, ratio="0.1")
@@ -631,6 +745,9 @@ class DTVFlipTest(unittest.TestCase):
     })
     self.assertEqual(config["batch_flip_fraction"], "0.2")
     self.assertEqual(config["frequency"], 2)
+    self.assertEqual(flip.configuration_from_environment({
+        "TUNIX_DTV_FLIP_RANDOM": "1", "TUNIX_EXPERIMENT_SEED": "0",
+    })["random_flip_seed"], 0)
     self.assertEqual(flip.ratio_terms("0.1"), (1, 10))
     for value in ("nan", "inf", "bad", "-0.1", "1.01", "0.0000001"):
       with self.subTest(value=value), self.assertRaises(ValueError):

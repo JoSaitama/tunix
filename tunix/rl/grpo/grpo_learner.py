@@ -177,6 +177,22 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
         loss_fn,
         has_aux=True,
     )
+    actor_trainer = self.rl_cluster.actor_trainer
+    if getattr(actor_trainer, "random_flip_seed", None) is not None:
+      if self.algo_config.policy_loss_fn != "grpo":
+        raise ValueError("Random flip requires the standard GRPO loss.")
+
+      def random_flip_loss(model, train_example, completion_weights):
+        return policy_loss_fn(
+            model,
+            train_example,
+            algo_config=self.algo_config,
+            pad_id=self.rl_cluster.rollout.pad_id(),
+            eos_id=self.rl_cluster.rollout.eos_id(),
+            completion_weights=completion_weights,
+        )
+
+      actor_trainer.with_random_flip_loss_fn(random_flip_loss)
     policy_score_loss_setter = getattr(
         self.rl_cluster.actor_trainer,
         "with_policy_score_loss_fn",
@@ -498,6 +514,8 @@ def grpo_loss_fn(
     algo_config,
     pad_id,
     eos_id,
+    *,
+    completion_weights=None,
 ):
   """GRPO loss function.
 
@@ -513,6 +531,7 @@ def grpo_loss_fn(
     algo_config: The algorithm config.
     pad_id: The pad ID from tokenizer.
     eos_id: The eos ID from.
+    completion_weights: Optional fixed signs for sequence-mean GRPO.
 
   Returns:
     A tuple containing the loss and an aux dictionary.
@@ -594,6 +613,16 @@ def grpo_loss_fn(
   loss = common.aggregate_loss(
       per_token_loss, completion_mask, loss_aggregation_mode
   )
+  if completion_weights is not None:
+    if loss_aggregation_mode != "sequence-mean-token-mean":
+      raise ValueError("Random flip requires sequence-mean-token-mean GRPO loss.")
+    if completion_weights.shape != (completion_ids.shape[0],):
+      raise ValueError("Random flip requires one sign per completion.")
+    aux["dtv_flip_raw_loss"] = loss
+    signs = jax.lax.stop_gradient(completion_weights.astype(per_token_loss.dtype))
+    loss = common.aggregate_loss(
+        per_token_loss * signs[:, None], completion_mask, loss_aggregation_mode
+    )
 
   return loss, aux
 

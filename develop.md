@@ -13605,3 +13605,84 @@ This file tracks engineering changes made in this repository.
 - 改动范围与文件：`my_example/rebuttal/{grpo_benchmark.py,run_grpo_benchmark.sh,grpo_benchmark.md}`、`my_example/alignment_main.py`、`my_example/alignment_baselines/curriculum.py`、`tunix/{rl/fixed_filter_trainer.py,sft/peft_trainer.py}`、`tests/my_example/grpo_benchmark_test.py`、`develop.md`。仅新增 benchmark 路径，正式训练配置、学习率调度及保存行为不变。
 - 计量：clean seed13。Random/Reward 复用 group 10% 期望配额，计时 15+50、HBM 1+2；实际过滤数留在设备，窗口后批量读取。LearnAlign 提前训练 10 步，报第 6–10 步、一次完整 2,764×8 selector 及第 11–60 步；筛选不计入第 11 步。HBM 独立采第 2–3 与 11–12 步，后者等全池筛选结束才开 trace。两者均不覆盖 selector HBM。所有新增窗口不评测、不保存 checkpoint 或模型。
 - 验证与待办：本地 `JAX_PLATFORMS=cpu python -m unittest discover -s tests/my_example -p grpo_benchmark_test.py` 18 项、`alignment_curriculum_test.py` 2 项、Ruff E9/F、`bash -n` 和 `git diff --check` 通过。完整 alignment 回归的两个用例和原 fixed-filter suite 因本地缺 `metrax` 无法执行，交由服务器 CPU 环境复验。未提交、推送、连接远端或初始化 TPU；真实 TPU 流程和 XProf 四设备覆盖待验证。短 trace 的 6 GiB 可用空间门槛不保证最终大小，需分开采集并保留或转移原始 trace。
+
+## 2026-11-11 — 准备 Eric v5p-8 固定 batch flip clean 四 seed 队列
+
+- 改动范围与文件：无代码改动，仅更新 `develop.md`。提供已登录 Eric 单 worker 后快进拉取和顺序执行 0/13/21/42 的命令。沿用 clean GSM8K、`dtv batch`、固定 batch 比例 0.1、频率 2、4×4、691 更新与 1319 题 pre/post，首步启用 flip。
+- 输出：队列及各 seed 的 run 根目录均以各自的上海时间 `YYYYMMDD_HHMMSS` 结尾。保存独立日志、提交 SHA、队列 PID 和退出码，任一训练失败停止。
+- 验证与待办：核对已提交的 launcher 与分支；外层及后台片段 `bash -n`、`git diff --check` 通过。模拟四 seed 正常完成及 seed13 失败，验证顺序、时间戳目录、日志与退出码。未连接服务器或实际启动训练。
+
+## 2026-11-11 — 准备 ziao1 双 worker 的 CAGrad / PCGrad clean 五 seed 队列
+
+- 改动范围与文件：无代码改动，仅更新 `develop.md`。同一 nohup 命令按 hostname 路由到 worker0 CAGrad、worker1 PCGrad，各按 5/0/13/21/42 串行。复用正式 GSM8K launcher、policy 冲突处理、CAGrad c=0.5、单 worker 4 TPU 及原 pre/post 评测与保存；显式关闭训练 reward rank reversal。
+- 验证与待办：真实 launcher 的 10 组 `--dry-run` 均核对 seed、fraction=0、KL 模式、c、4 TPU、1319 评测预算和输出路径；外层及后台片段 `bash -n` 通过。队列禁止覆盖，run 路径为 `mismatch0_YYYYMMDD_HHMMSS`，检查每次运行的无反转日志和评测导出。未访问远端、初始化 TPU 或启动训练；执行前需确认各 worker 空闲及磁盘空间。
+
+## 2026-11-11 — 解释 CAGrad c0p5 标签及约束
+
+- 改动范围与文件：无代码改动，仅更新 `develop.md`。核对 `run_gradient_conflict_baseline.sh`、`tunix/rl/cagrad.py` 及 `gradient_conflict_trainer.py`：c=0.5 限制每题方向相对四条回答的平均 policy 梯度偏移范数，半径为平均梯度范数的 50%；不控制保留率、污染或学习率。policy 路径只改写 policy 梯度，仍保留原 batch KL。
+- 论文来源：Liu et al. (NeurIPS 2021) Eq. (3) 定义此约束；[附录 B.3](https://arxiv.org/pdf/2110.14048#page=19) 记录 Meta-World SAC 在 {0.1, 0.5, 0.9} 中选择，MT50 用 0.5、MT10 用 0.9；0.5 亦出现在 §5.1 消融中。GSM8K 是组内 completion 级适配，clean 和 mismatch20% 固定相同的 c，不声称这是 GSM8K 调优结果或原文通用默认。
+- 验证与待办：静态核对 launcher 默认值、求解约束及聚合路径；`git diff --check -- develop.md` 通过。未做超参扫描或启动训练。
+
+## 2026-11-12 — 汇总 Random10/Reward10/LearnAlign 成本结果的只读命令
+
+- 改动范围与文件：无代码改动，仅更新 `develop.md`。为用户指定的 `rebuttal_grpo_gsm8k_cost_filters_learnalign_seed13_clean_20261111_132552` 提供离线验收和 Markdown 行输出，追加到已有九方法表。LearnAlign 分列第 6–10 步、完整 selector、第 11–60 步，不把 selector 计为一次 optimizer 更新。
+- 验证与限制：核对当前 `summary.json`、`check_run` 与 `check_comparable` 字段；相对 Vanilla 使用此前用户回传的精确 353.5537697679829/50 秒基准。跨批次历史参照，不假定同 worker/commit；新数据在服务器读取，不虚构结果。未连接服务器或启动 TPU。`git diff --check -- develop.md` 通过。
+
+## 2026-11-12 — 修正空 BENCH 的 HBM 启动命令并列出补采范围
+
+- 改动范围与文件：无代码改动，仅更新 `develop.md`。用户 `/hbm_random10.log` 路径表明 BENCH 为空，且 shell 在 Project_8k 上层。提供自含 bash 块，显式仓库、环境和结果根目录，使用方法名+日期时间的新采集目录，不依赖旧 shell 变量，不覆盖失败产物。
+- 范围与口径：补 PODS/DS/Norm/PCGrad/CAGrad/Random10/Reward10 的 1+2，GradAlign 的 0+1，LearnAlign prelearn 1+2 与 postselect 10+2。当前未实现 selector HBM 独立 trace，Pool selection 留缺测，不以训练阶段峰值代替；postselect 重做全池选择，不能承诺只需两步时间。表中报告四设备窗口 stack+heap 峰值的最大值，非各芯片之和，保留窗口和常驻覆盖限定。
+- 验证与待办：核对 launcher、XProf 离线提取与窗口检查；启动片段 `bash -n`、`git diff --check -- develop.md` 通过。9GB 时逐项采集并转移原 trace，不自动删除；未访问远端或初始化 TPU。
+
+## 2026-11-12 — 补齐 ziao2 XProf 离线环境与 run 路径大小写
+
+- 改动范围与文件：无代码改动，仅更新 `develop.md`。用户在 ziao2 未找到唯一 `/tmp/tunix-xprof.*` 环境；这不能区分未安装、清理或存在多份。提供独立 `.venv_xprof_2242` 安装 XProf 2.24.2 的服务器命令，不改 `.venv_jax081`，随后读取现有 trace。
+- 核对：用户 RUN 末尾误写 `/RUN`，应为 `/run`；父目录退出码为零不能证明子目录路径正确。要求检查 `summary.json` 和原始 XPlane，再离线提取四芯片峰值。官方 PyPI 确认 2.24.2 存在，对齐之前截图版本。
+- 验证与待办：`git diff --check -- develop.md` 通过。未访问服务器、安装包或重跑训练；如环境安装或原 trace 覆盖有问题，保留报错，不填写虚构 HBM。
+
+## 2026-11-12 — 提取 Eric v5p-8 clean GSM8K 固定 batch flip 五 seed 评测
+
+- 改动范围与文件：无代码改动，仅更新 `develop.md`。按用户给出的 seed 0/5/13/21/42 五个目录，读取各自 `results/*__eval_accuracy__meta.json`，输出每 seed 一行 TSV。保留 pre/post 的 accuracy、partial accuracy、format accuracy、num_correct 与 total。
+- 验证与待办：核对 exporter 文件名和字段。Python 模拟五份 JSON 验证 seed 顺序、列数与 1319 题校验，`git diff --check -- develop.md` 通过。实际数据由服务器命令读取。
+
+## 2026-11-12 — 核对 GSM8K Random Flip 与频次对照的设计
+
+- 改动范围与文件：无代码改动，仅更新 `develop.md`。当前 `FixedFilterTrainer` 的 random 模式将选中梯度 mask 为零并按保留数归一化。`DTVFlipTrainer` 已实现频次和完整梯度取反，选择仅支持 DTV 与 DTV-LOO。GSM8K GRPO 没有 Random Flip 路径。
+- 拟议对照：复用 `DTVFlipTrainer` 的频次、完整梯度签名聚合和普通更新分支。对 clean 五 seed，从已完成 DTV 决策 JSONL 冻结每步实际翻转数；随机对照在相同启用步从当前整个 batch 均匀无放回抽取对应数量。固定随机流并保存来源、步号、实际翻转数与比例。直接每启用步翻满 2 条会与 DTV 实际翻转量产生差异。比较频次时，同样的固定 batch 配额下频率变化也会改变全程翻转量。
+- 验证与待办：只读核对 trainer、launcher 与 JSONL 字段，`git diff --check -- develop.md` 通过。待实施前从服务器验证每 seed 的实际计数记录完整，未访问远端或运行训练。
+
+## 2026-11-12 — 核对 Random Flip 数量匹配对训练速度的影响
+
+- 改动范围与文件：无代码改动，仅更新 `develop.md`。Random Flip 在训练前读入既有 DTV 日志的每步实际翻转数，训练时随机抽取位置。当前 GSM8K 的 sequence-mean-token-mean 口径下，可先对含 KL 的逐 completion loss 加固定 ±1，再对 batch 均值做一次反传，数学上等价于对对应逐 completion 梯度取符号后平均。
+- 验证与待办：核对 DTV trainer 的启用步 `vmap`、alignment、普通步分支，以及 GRPO 默认 loss 归一化。`git diff --check -- develop.md` 通过。Random Flip 仍待实施，墙钟差异需实测。
+
+## 2026-11-12 — 确定固定配额 Random Flip 的代码接入
+
+- 改动范围与文件：无代码改动，仅更新 `develop.md`。按用户决定，Random Flip 使用相同固定 batch 配额和频率，从当前 batch 均匀无放回抽满配额。实际翻转量可与 DTV 不同，两者都记录实测数量和比例，无需读取已有 DTV 日志。
+- 设计：在 flip launcher 与 `DTVFlipTrainer` 加 random 选择，复用 `nearest_even_quota`、actor 更新频次和日志。通过 GRPO opt-in loss 接口，在加入 KL 后对选中 completion 应用 -1，沿用默认 sequence-mean-token-mean 和原 batch 分母，一次反传。现有 Random Filter 的 0/1 mask 和保留数分母仍用于过滤。
+- 验证与待办：核对 filter、flip、GRPO loss 注册与聚合入口，`git diff --check -- develop.md` 通过。尚未实施或运行。
+
+## 2026-11-12 — 实现 GSM8K 固定配额 Random Flip
+
+- 改动范围与文件：`my_example/run_dtv_flip.sh`、`tunix/rl/dtv_flip_trainer.py`、`tunix/rl/grpo/grpo_learner.py`、`tunix/rl/rl_cluster.py`、`tests/rl/dtv_flip_trainer_test.py`、`docs/dtv_flip.md`、`develop.md`。新增 opt-in `run_dtv_flip.sh random batch`，逐批比例默认 0.1，沿用最近偶数配额和 actor 更新频率。
+- 实现：启用步用实验 seed 与 micro-step 派生独立随机 key，从整个 batch 均匀无放回抽满配额。给选中的 policy + KL loss 加负号，使用标准 sequence-mean-token-mean 聚合与一次 batch 反传。普通步复用原 loss；Random Flip 使用独立 checkpoint 版本以校验 seed，JSONL 保存索引、配额与两个实际累计比例，评分字段为空。
+- 验证：JAX 0.8.1 四设备 CPU 隔离 `dtv_flip_trainer_test.py` 30 项通过，含 2/0/2、生产 GRPO 含 KL loss 与逐条梯度取反的一致性、随机索引恢复、launcher 和 trainer 路由。`gradient_conflict_test.py` 9 项通过；`bash -n`、Ruff `E9,F`、`git diff --check` 通过。
+- 风险与待办：本地完整 trainer import 缺 `metrax`，隔离测试以轻量模型替代 rollout forward。真实 TPU 端到端和墙钟速度仍待实测。
+
+## 2026-11-12 — 解释 Random10 与 PODS 的 HBM 差异
+
+- 改动范围与文件：无代码改动，仅更新 `develop.md`。用户回传第 2–3 步四芯片 XProf 峰值，Random10 最大 34.3802 GiB、PODS 最大 8.6487 GiB。当前 PODS 在更新前将 4×4 条裁为 4×2 条，使用普通 batch 反传；FixedFilterTrainer 对全部 16 条 vmap 求逐条 full 梯度再按保留数聚合，未在反传前裁剪。
+- 解释边界：差异与当前代码路径相符，不能全部归因为逐条梯度数组本身，还包括激活、编译临时缓冲和 stack reservation。Random 算法不必求逐条梯度，此处属于现有实现开销，不是算法固有下界。PODS 数值仅代表短窗口，不代表整场/所有长度峰值；对照四设备、stack/heap、配置与常驻覆盖，必要时读取完整报告。未优化或重跑方法。
+- 验证：静态核对 `my_example/pods.py`、`tunix/rl/fixed_filter_trainer.py`、`tunix/sft/peft_trainer.py`；`git diff --check -- develop.md` 通过，未访问服务器。
+
+## 2026-11-12 — 设计 Random Filter 的低 HBM 聚合反传
+
+- 改动范围与文件：无代码改动，仅更新 `develop.md`。计划复用原随机配额、tie-break 和每组 mask，在完整 GRPO（含 KL）的逐 completion loss 上应用 0/1 权重，以保留回答数量为分母，仅一次聚合反传；输入保持 16 条固定形状，不生成逐条参数梯度树。
+- 等价边界：保留原四回答 advantage，不重算；每条先按有效 token 数归一化，再按保留数平均，不能直接采用总 token 分母或 Random Flip 的原 batch 分母。保持 optimizer、裁剪、schedule 和 RNG。拟 opt-in 独立 loss hook，普通 baseline/flip 默认分支不动；Reward 可共用但需独立测试。
+- 验证计划：同一 mask/参数/旧 logps/输入对比旧 vmap 与新聚合的 loss、参数梯度和一步 optimizer 状态，含零/变长 mask 和全部保留情况；真实 TPU BF16 对照与同窗口 XProf 后才报告成本改善，不承诺 bitwise 一致或预估显存值。旧训练结果不自动失效，新成本数据须注明优化实现版本。
+- 验证：静态核对 FixedFilterTrainer、GRPO loss 和当前新增 Random Flip hook；`git diff --check -- develop.md` 通过。未修改训练代码或运行测试。
+
+## 2026-11-12 — 准备 Eric v5p-8 Random Flip clean 五 seed 队列
+
+- 改动范围与文件：无代码改动，仅更新 `develop.md`。提供本地显式提交和推送清单，以及 Eric 单 worker 快进拉取后的后台队列命令。沿用 DTV flip 的 clean GSM8K、accuracy reward、4×4、691 步与完整 pre/post 评测。按 0/5/13/21/42 顺序执行，使用 `random batch`、固定比例 0.1、频率 2。队列和每 seed 的目录用上海时间戳结尾，分别保存提交和退出码。
+- 验证与待办：本地、服务器、后台三段 `bash -n` 通过。模拟验证五 seed 顺序、参数透传、目录命名以及 seed13 失败后停止，`git diff --check` 通过。未实际提交、推送、拉取或启动 TPU。
