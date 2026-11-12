@@ -521,6 +521,41 @@ class DPOTrainerTest(parameterized.TestCase):
       self.assertEqual(int(aux["dbc/flip_quota"]), 4 if enabled else 0)
       self.assertEqual(int(aux["dbc/num_samples_flipped"]), count if enabled else 0)
 
+  @parameterized.parameters("random_flip", "reward_flip")
+  def test_flip_controls_use_the_quota_and_keep_the_full_denominator(
+      self, variant
+  ):
+    window_size = 32
+    quota = 4
+    grads = {"w": jnp.eye(window_size)}
+    losses = jnp.arange(window_size, dtype=jnp.float32)
+    margins = jnp.arange(window_size, dtype=jnp.float32) + 1
+    margins = margins.at[jnp.array([5, 6, 7, 8, 9])].set(0.5)
+
+    @jax.jit
+    def aggregate(step):
+      return dpo_lib.aggregate_gradient_flip_step(
+          grads, losses, {"rewards/margin": margins},
+          variant=variant, quota=quota,
+          enabled=dpo_lib._flip_scheduled(step, 1),
+          curation_seed=5, window_seed=step,
+      )
+
+    for step in range(4):
+      result, loss, aux = aggregate(jnp.uint32(step))
+      weights = np.full(window_size, 1 / window_size)
+      if step % 2 == 0:
+        if variant == "reward_flip":
+          weights[[5, 6, 7, 8]] *= -1
+        else:
+          key = jax.random.fold_in(jax.random.PRNGKey(5), step)
+          ranks = np.asarray(jax.random.permutation(key, window_size))
+          weights[ranks < quota] *= -1
+      np.testing.assert_allclose(result["w"], weights)
+      self.assertEqual(int(aux["dbc/num_samples_flipped"]), quota if step % 2 == 0 else 0)
+      self.assertEqual(float(loss), float(losses.mean()))
+      self.assertEqual(float(aux["rewards/margin"]), float(margins.mean()))
+
   def test_aggregate_random_curated_step_keeps_requested_count_deterministically(
       self,
   ):

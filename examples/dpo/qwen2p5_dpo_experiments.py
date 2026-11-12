@@ -36,6 +36,8 @@ SUPPORTED_VARIANTS = (
     "self_inf",
     "self_inf_flip",
     "self_inf_flip10",
+    "random_flip",
+    "reward_flip",
     "self_inf_norm",
     "self_inf_loo",
     "self_inf_re_loo",
@@ -78,6 +80,8 @@ METHOD_DISPLAY = {
     "self_inf": "Self-DTV (ours)",
     "self_inf_flip": "Self-DTV Gradient Flip",
     "self_inf_flip10": "Self-DTV Gradient Flip (up to 10%)",
+    "random_flip": "Random Gradient Flip",
+    "reward_flip": "Reward Margin Gradient Flip",
     "self_inf_norm": "Self-DTV-Norm",
     "self_inf_loo": "Self-DTV-LOO",
     "self_inf_re_loo": "Self-DTV-Re-LOO",
@@ -247,6 +251,8 @@ def _normalize_variant(variant: str) -> str:
       "self_inf": "self_inf",
       "self_inf_flip": "self_inf_flip",
       "self_inf_flip10": "self_inf_flip10",
+      "random_flip": "random_flip",
+      "reward_flip": "reward_flip",
       "self_inf_batch": "self_inf",
       "self_influence_batch": "self_inf",
       "self_dtv": "self_inf",
@@ -482,7 +488,9 @@ def prepare_launch_config(
   trainer_variant = get_underlying_trainer_variant(variant)
   if trainer_variant == "vanilla_dpo":
     cfg.dpo_config.use_dynamic_batch_curation = False
-  elif trainer_variant in ("self_inf_flip", "self_inf_flip10"):
+  elif trainer_variant in (
+      "self_inf_flip", "self_inf_flip10", "random_flip", "reward_flip"
+  ):
     cfg.dpo_config.use_dynamic_batch_curation = True
     cfg.dpo_config.curation_variant = trainer_variant
   elif trainer_variant == "outlier_l2":

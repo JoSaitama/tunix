@@ -4,6 +4,7 @@ set -euo pipefail
 if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
   echo "Usage: bash $0 [--smoke | --resume RUN_DIR] /path/to/sft/exported_model [seed ...]"
   echo "Default seed: 0. Defaults for gradient flip: MAX_FLIP_PERCENT=10 FLIP_FREQUENCY=1."
+  echo "Pilot methods: vanilla_dpo self_inf_flip random_flip reward_flip."
   echo "Optional environment setting: PYTHON_BIN."
   echo "TRAIN_PAIRS and MAX_STEPS default to 4096 and 16 (pilot), or 1536 and 4 (smoke)."
   echo "Requires one worker with four local v5p TPU devices."
@@ -46,7 +47,7 @@ if (( SMOKE )); then
 else
   TRAIN_PAIRS="${TRAIN_PAIRS:-4096}"
   MAX_STEPS="${MAX_STEPS:-16}"
-  METHODS=(vanilla_dpo self_inf_flip reward_based_filtering_filt10)
+  METHODS=(vanilla_dpo self_inf_flip random_flip reward_flip)
   RUN_PREFIX=pku_safety
 fi
 MAX_FLIP_PERCENT="${MAX_FLIP_PERCENT:-10}"
