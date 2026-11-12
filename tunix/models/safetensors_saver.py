@@ -20,6 +20,7 @@ import shutil
 from typing import Any, Callable
 
 import jax.numpy as jnp
+import numpy as np
 import safetensors.numpy as safe_np
 
 _INDEX_FILENAME = 'model.safetensors.index.json'
@@ -114,7 +115,9 @@ def _apply_lora_delta(
     lora_b_val = lora_b_val.reshape(d0, d1 * d2)
 
   combined_lora = (lora_a_val @ lora_b_val) * (alpha / rank)
-  base_state[state_key] += combined_lora.T.astype(base_state[state_key].dtype)
+  base_weight = base_state[state_key]
+  delta = np.asarray(combined_lora.T.astype(base_weight.dtype))
+  base_state[state_key] = np.ascontiguousarray(base_weight + delta)
 
 
 def save_lora_merged_model_as_safetensors(
