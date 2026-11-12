@@ -6,6 +6,7 @@ if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
   echo "Default seed: 0. Defaults for gradient flip: MAX_FLIP_PERCENT=10 FLIP_FREQUENCY=1."
   echo "Optional environment setting: PYTHON_BIN."
   echo "TRAIN_PAIRS and MAX_STEPS default to 4096 and 16 (pilot), or 1536 and 4 (smoke)."
+  echo "Requires one worker with four local v5p TPU devices."
   echo "Output: runs_xuesong/runs and runs_xuesong/logs."
   exit 0
 fi
@@ -71,9 +72,31 @@ if [[ -f .env || -f my_example/.env ]]; then
   fi
   set +a
 fi
-# Keep checkpointing and export enabled for the train-then-eval workflow.
+# Use the four chips on this VM, including when it is part of a larger slice.
+export JAX_PLATFORMS=tpu
+export TPU_PROCESS_BOUNDS=1,1,1 TPU_CHIPS_PER_PROCESS_BOUNDS=2,2,1
+export TPU_VISIBLE_CHIPS=0,1,2,3 CLOUD_TPU_TASK_ID=0
+
+# The full run needs a temporary model export for the offline evaluator.
 export DPO_TIMING_ONLY=0
-"$PYTHON_BIN" -c 'import sys; sys.version_info >= (3, 11) or sys.exit("Tunix requires Python 3.11 or newer.")'
+"$PYTHON_BIN" - <<'PY'
+import sys
+
+if sys.version_info < (3, 11):
+    sys.exit("Tunix requires Python 3.11 or newer.")
+
+import jax
+
+topology = (
+    f"backend={jax.default_backend()} process_count={jax.process_count()} "
+    f"device_count={jax.device_count()} local_device_count={jax.local_device_count()}"
+)
+if jax.default_backend() != "tpu" or (
+    jax.process_count(), jax.device_count(), jax.local_device_count()
+) != (1, 4, 4):
+    sys.exit(f"Expected a single worker with four local TPU devices. Got {topology}.")
+print(f"Local TPU ready: {topology}")
+PY
 mkdir -p runs_xuesong/runs runs_xuesong/logs
 PILOT_ROOT="$(mktemp -d "$PWD/runs_xuesong/runs/${RUN_PREFIX}_$(date +%Y%m%d_%H%M%S)_XXXXXX")"
 PILOT_LOG_ROOT="$PWD/runs_xuesong/logs/${PILOT_ROOT##*/}"
@@ -140,7 +163,10 @@ cfg.dpo_config.flip_frequency = int(flip_frequency)
 cfg.training_config.max_steps = max_steps
 eval_interval = max_steps if smoke else max(1, max_steps // 2)
 cfg.training_config.eval_every_n_steps = eval_interval
-cfg.training_config.checkpointing_options.save_interval_steps = eval_interval
+cfg.training_config.checkpoint_root_directory = None
+cfg.training_config.checkpointing_options = None
+if smoke:
+    cfg.exported_model_output_dir = None
 cfg.training_config.metrics_logging_options.flush_every_n_steps = 1
 cfg.optimizer_config.warmup_steps = max_steps // 8
 cfg.optimizer_config.decay_steps = max_steps
@@ -165,6 +191,7 @@ PY
 import csv
 import json
 from pathlib import Path
+import shutil
 import sys
 
 summary_path, run_dir, seed, method = sys.argv[1:]
@@ -175,6 +202,9 @@ with open(summary_path, "a", newline="") as output:
     if output.tell() == 0:
         writer.writeheader()
     writer.writerow(row)
+exported_model = Path(run_dir) / "exported_model"
+shutil.rmtree(exported_model)
+print(f"Saved safety metrics and removed temporary export: {exported_model}")
 PY
   done
 done
