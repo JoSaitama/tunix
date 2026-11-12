@@ -2,9 +2,11 @@
 set -euo pipefail
 
 if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
-  echo "Usage: bash $0 [--smoke] /path/to/sft/exported_model [seed]"
-  echo "Optional environment settings: PYTHON_BIN, MAX_FLIP_PERCENT (10), FLIP_FREQUENCY (0)."
+  echo "Usage: bash $0 [--smoke] /path/to/sft/exported_model [seed ...]"
+  echo "Default seed: 0. Defaults for gradient flip: MAX_FLIP_PERCENT=10 FLIP_FREQUENCY=1."
+  echo "Optional environment setting: PYTHON_BIN."
   echo "TRAIN_PAIRS and MAX_STEPS default to 4096 and 16 (pilot), or 1536 and 4 (smoke)."
+  echo "Output: runs_xuesong/runs and runs_xuesong/logs."
   exit 0
 fi
 SMOKE=0
@@ -12,13 +14,25 @@ if [[ "${1:-}" == "--smoke" ]]; then
   SMOKE=1
   shift
 fi
-if [[ $# -lt 1 || $# -gt 2 ]]; then
-  echo "Usage: bash $0 [--smoke] /path/to/sft/exported_model [seed]" >&2
+if [[ $# -lt 1 ]]; then
+  echo "Usage: bash $0 [--smoke] /path/to/sft/exported_model [seed ...]" >&2
   exit 2
 fi
 
 SFT_MODEL_PATH="$(cd "$1" && pwd -P)"
-SEED="${2:-0}"
+shift
+SEEDS=(0)
+if (( $# )); then
+  SEEDS=("$@")
+fi
+seen_seeds=" "
+for seed in "${SEEDS[@]}"; do
+  if [[ ! "$seed" =~ ^(0|[1-9][0-9]*)$ || "$seen_seeds" == *" $seed "* ]]; then
+    echo "Expected distinct nonnegative integer seeds, got: $seed" >&2
+    exit 2
+  fi
+  seen_seeds+="$seed "
+done
 if (( SMOKE )); then
   TRAIN_PAIRS="${TRAIN_PAIRS:-1536}"
   MAX_STEPS="${MAX_STEPS:-4}"
@@ -27,16 +41,15 @@ if (( SMOKE )); then
 else
   TRAIN_PAIRS="${TRAIN_PAIRS:-4096}"
   MAX_STEPS="${MAX_STEPS:-16}"
-  METHODS=(vanilla_dpo self_inf_flip)
+  METHODS=(vanilla_dpo self_inf_flip reward_based_filtering_filt10)
   RUN_PREFIX=pku_safety
 fi
 MAX_FLIP_PERCENT="${MAX_FLIP_PERCENT:-10}"
-FLIP_FREQUENCY="${FLIP_FREQUENCY:-0}"
+FLIP_FREQUENCY="${FLIP_FREQUENCY:-1}"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
-if [[ ! "$SEED" =~ ^(0|[1-9][0-9]*)$ ||
-      ! "$TRAIN_PAIRS" =~ ^[1-9][0-9]*$ || ! "$MAX_STEPS" =~ ^[1-9][0-9]*$ ||
+if [[ ! "$TRAIN_PAIRS" =~ ^[1-9][0-9]*$ || ! "$MAX_STEPS" =~ ^[1-9][0-9]*$ ||
       ! "$FLIP_FREQUENCY" =~ ^(0|[1-9][0-9]*)$ ]]; then
-  echo "Use nonnegative integers for seed and FLIP_FREQUENCY, and positive TRAIN_PAIRS and MAX_STEPS." >&2
+  echo "Use a nonnegative integer for FLIP_FREQUENCY, and positive TRAIN_PAIRS and MAX_STEPS." >&2
   exit 2
 fi
 if (( TRAIN_PAIRS < MAX_STEPS * 256 )); then
@@ -61,15 +74,24 @@ fi
 # Keep checkpointing and export enabled for the train-then-eval workflow.
 export DPO_TIMING_ONLY=0
 "$PYTHON_BIN" -c 'import sys; sys.version_info >= (3, 11) or sys.exit("Tunix requires Python 3.11 or newer.")'
-mkdir -p runs
-PILOT_ROOT="$(mktemp -d "$PWD/runs/${RUN_PREFIX}_seed${SEED}_$(date +%Y%m%d_%H%M%S)_XXXXXX")"
+mkdir -p runs_xuesong/runs runs_xuesong/logs
+PILOT_ROOT="$(mktemp -d "$PWD/runs_xuesong/runs/${RUN_PREFIX}_$(date +%Y%m%d_%H%M%S)_XXXXXX")"
+PILOT_LOG_ROOT="$PWD/runs_xuesong/logs/${PILOT_ROOT##*/}"
+mkdir "$PILOT_LOG_ROOT"
 echo "PKU pilot output: $PILOT_ROOT"
+echo "PKU pilot logs: $PILOT_LOG_ROOT"
+echo "Seeds: ${SEEDS[*]}; methods: ${METHODS[*]}"
 
-for method in "${METHODS[@]}"; do
-  run_dir="$PILOT_ROOT/$method"
-  mkdir "$run_dir"
-  "$PYTHON_BIN" - "$run_dir" "$method" "$SFT_MODEL_PATH" "$SEED" "$TRAIN_PAIRS" "$MAX_STEPS" \
-    "$MAX_FLIP_PERCENT" "$FLIP_FREQUENCY" "$SMOKE" <<'PY'
+for seed in "${SEEDS[@]}"; do
+  seed_dir="$PILOT_ROOT/seed$seed"
+  seed_log_dir="$PILOT_LOG_ROOT/seed$seed"
+  mkdir "$seed_dir" "$seed_log_dir"
+  for method in "${METHODS[@]}"; do
+    run_dir="$seed_dir/$method"
+    train_log="$seed_log_dir/$method.train.log"
+    mkdir "$run_dir"
+    "$PYTHON_BIN" - "$run_dir" "$method" "$SFT_MODEL_PATH" "$seed" "$TRAIN_PAIRS" "$MAX_STEPS" \
+      "$MAX_FLIP_PERCENT" "$FLIP_FREQUENCY" "$SMOKE" <<'PY'
 from pathlib import Path
 import sys
 
@@ -94,7 +116,7 @@ qwen2p5_dpo_experiments.prepare_launch_config(
     config_path="examples/dpo/qwen2p5_1p5b_ultrafeedback_from_sft_lora.yaml",
     output_path=str(config_path),
     run_root=run_dir,
-    run_name=f"{Path(run_dir).parent.name}_{method}",
+    run_name=f"{Path(run_dir).parents[1].name}_seed{seed}_{method}",
     profile="full",
     variant=method,
     corruption_config="clean",
@@ -124,40 +146,39 @@ cfg.optimizer_config.warmup_steps = max_steps // 8
 cfg.optimizer_config.decay_steps = max_steps
 OmegaConf.save(cfg, config_path)
 PY
-  echo "Training $method (seed $SEED)"
-  "$PYTHON_BIN" -m tunix.cli.dpo_main "$run_dir/launch.yaml" 2>&1 |
-    tee "$run_dir/train.log"
-  if (( SMOKE )); then
-    completed_steps="$(awk '/DTV flip step=/ {count++} END {print count+0}' "$run_dir/train.log")"
-    if (( completed_steps != MAX_STEPS )); then
-      echo "Smoke expected $MAX_STEPS updates and logged $completed_steps. See $run_dir/train.log." >&2
-      exit 1
+    echo "Training $method (seed $seed)"
+    "$PYTHON_BIN" -m tunix.cli.dpo_main "$run_dir/launch.yaml" 2>&1 |
+      tee "$train_log"
+    if (( SMOKE )); then
+      completed_steps="$(awk '/DTV flip step=/ {count++} END {print count+0}' "$train_log")"
+      if (( completed_steps != MAX_STEPS )); then
+        echo "Smoke expected $MAX_STEPS updates and logged $completed_steps. See $train_log." >&2
+        exit 1
+      fi
+      echo "Clean PKU smoke completed $completed_steps updates. Log: $train_log"
+      continue
     fi
-    echo "Clean PKU smoke completed $completed_steps updates. Log: $run_dir/train.log"
-    exit 0
-  fi
-  echo "Evaluating $method (seed $SEED)"
-  "$PYTHON_BIN" -m examples.dpo.eval_qwen2p5_pku_safety "$run_dir" "$SFT_MODEL_PATH" 2>&1 |
-    tee "$run_dir/eval.log"
-done
-
-"$PYTHON_BIN" - "$PILOT_ROOT" "$SEED" "${METHODS[@]}" <<'PY'
+    echo "Evaluating $method (seed $seed)"
+    "$PYTHON_BIN" -m examples.dpo.eval_qwen2p5_pku_safety "$run_dir" "$SFT_MODEL_PATH" 2>&1 |
+      tee "$seed_log_dir/$method.eval.log"
+    "$PYTHON_BIN" - "$PILOT_ROOT/summary.csv" "$run_dir" "$seed" "$method" <<'PY'
 import csv
 import json
 from pathlib import Path
 import sys
 
-root, seed, *methods = sys.argv[1:]
-root = Path(root)
-rows = [
-    dict(method=method, seed=int(seed), **json.loads(
-        (root / method / "safety_metrics.json").read_text()
-    ))
-    for method in methods
-]
-with (root / "summary.csv").open("w", newline="") as output:
-  writer = csv.DictWriter(output, fieldnames=list(rows[0]))
-  writer.writeheader()
-  writer.writerows(rows)
-print(f"Safety pilot summary: {root / 'summary.csv'}")
+summary_path, run_dir, seed, method = sys.argv[1:]
+metrics = json.loads((Path(run_dir) / "safety_metrics.json").read_text())
+row = dict(method=method, seed=int(seed), **metrics)
+with open(summary_path, "a", newline="") as output:
+    writer = csv.DictWriter(output, fieldnames=list(row))
+    if output.tell() == 0:
+        writer.writeheader()
+    writer.writerow(row)
 PY
+  done
+done
+
+if (( ! SMOKE )); then
+  echo "Safety pilot summary: $PILOT_ROOT/summary.csv"
+fi
