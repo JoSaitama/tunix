@@ -37,7 +37,10 @@ METHODS = {
 GRADALIGN_INTERVAL = 10
 LEARNALIGN_PRE_UPDATES = 10
 LEARNALIGN_PRE_SKIP = 5
-LEARNALIGN_SELECTOR_COMPLETIONS = 691 * 4 * 8
+LEARNALIGN_SELECTOR_CHUNKS = 691
+LEARNALIGN_SELECTOR_COMPLETIONS = LEARNALIGN_SELECTOR_CHUNKS * 4 * 8
+LEARNALIGN_HBM_SAMPLE_CHUNKS = (1, (LEARNALIGN_SELECTOR_CHUNKS + 1) // 2, LEARNALIGN_SELECTOR_CHUNKS)
+LEARNALIGN_XPROF_ENV = "TUNIX_BENCH_LEARNALIGN_XPROF_PYTHON"
 DS_XPROF_ENV = "TUNIX_BENCH_DS_XPROF_PYTHON"
 FIXED_FILTERS = {"random10": "random", "reward10": "reward"}
 ALIGNMENT_METHODS = {"gradalign", "learnalign"}
@@ -174,6 +177,8 @@ class Benchmark:
         self.trace_active = False
         self.memory = {}
         self.ds_xprof_python = None
+        self.learnalign_xprof_python = None
+        self.learnalign_hbm_samples = []
         self.learnalign_selection = None
         self.filter_counts = []
         # The ordinary learner peeks at item 1 to infer its batch size. That
@@ -195,6 +200,14 @@ class Benchmark:
             _require(benchmark.ds_xprof_python.is_file()
                      and os.access(benchmark.ds_xprof_python, os.X_OK),
                      "DS preflight requires an executable XProf Python")
+        if interpreter := os.environ.get(LEARNALIGN_XPROF_ENV):
+            _require((benchmark.method, benchmark.mode, benchmark.memory_phase)
+                     == ("learnalign", "memory", "postselect"),
+                     f"{LEARNALIGN_XPROF_ENV} requires LearnAlign postselect memory mode")
+            benchmark.learnalign_xprof_python = Path(interpreter).absolute()
+            _require(benchmark.learnalign_xprof_python.is_file()
+                     and os.access(benchmark.learnalign_xprof_python, os.X_OK),
+                     "LearnAlign selector capture requires an executable XProf Python")
         return benchmark
 
     def check_config(self, cfg, max_steps):
@@ -365,22 +378,25 @@ class Benchmark:
                 jax.effects_barrier()
         finally:
             self._stop_trace()
-        # Keep XProf's dependencies out of the training interpreter.
         log_path = self.out / "profiler_preflight" / "xprof.log"
         try:
-            with log_path.open("w", encoding="utf-8") as log:
-                result = subprocess.run(
-                    [str(self.ds_xprof_python), "-m", "my_example.rebuttal.grpo_benchmark", "xprof-window",
-                     str(trace_root), *[str(d.id) for d in self.devices]],
-                    check=True, timeout=300, stdout=subprocess.PIPE, stderr=log, text=True,
-                    env={**os.environ, "JAX_PLATFORMS": "cpu"},
-                )
+            payload = self._convert_xprof_trace(self.ds_xprof_python, trace_root, log_path)
         except (subprocess.SubprocessError, OSError) as exc:
             raise RuntimeError(f"DS HBM profiler preflight failed; no training started. See {log_path}") from exc
-        payload = json.loads(result.stdout)
         _dump(self.out / "profiler_preflight" / "xprof_observed.json", payload)
         self.metadata["ds_profiler_preflight"] = "profiler_preflight/xprof_observed.json"
         print("DS HBM PREFLIGHT PASS: all four TPU allocator peaks present", flush=True)
+
+    def _convert_xprof_trace(self, interpreter, trace_root, log_path):
+        # Keep XProf's dependencies out of the training interpreter.
+        with log_path.open("w", encoding="utf-8") as log:
+            result = subprocess.run(
+                [str(interpreter), "-m", "my_example.rebuttal.grpo_benchmark", "xprof-window",
+                 str(trace_root), *[str(d.id) for d in self.devices]],
+                check=True, timeout=300, stdout=subprocess.PIPE, stderr=log, text=True,
+                env={**os.environ, "JAX_PLATFORMS": "cpu"},
+            )
+        return json.loads(result.stdout)
 
     def before_iteration(self):
         step = len(self.rows) + 1
@@ -475,11 +491,74 @@ class Benchmark:
                 "completions": self.selector_completions,
                 "generated_tokens": self.selector_candidate_tokens,
             }
+            if self.learnalign_xprof_python is not None:
+                self._write_learnalign_selector_hbm()
             # The standalone selector is not part of step 11's timing or tokens.
             self.selector_rounds = self.selector_completions = self.selector_candidate_tokens = 0
             self.selector_seconds = 0.0
             print("LearnAlign benchmark: full selector complete; starting post-select window.", flush=True)
             self._open_measurement_window()
+
+    @contextmanager
+    def learnalign_selector_chunk(self, *, index, total, prompt_count, num_rollouts):
+        """Profile a real, prespecified selector chunk without changing its input."""
+        _require(self.learnalign_xprof_python is not None
+                 and self.active_iteration == LEARNALIGN_PRE_UPDATES + 1,
+                 "LearnAlign HBM chunk capture ran outside the selector")
+        _require((total, prompt_count, num_rollouts) == (LEARNALIGN_SELECTOR_CHUNKS, 4, 8),
+                 "LearnAlign HBM requires the unmodified full-pool selector budget")
+        if index not in LEARNALIGN_HBM_SAMPLE_CHUNKS:
+            yield
+            return
+        _require(not self.trace_active, "LearnAlign selector traces must not overlap")
+        root = self.out / "selector_traces" / f"chunk_{index:04d}"
+        root.mkdir(parents=True)
+        trace_root = root / "trace"
+        self._drain()
+        start_completions = self.selector_completions
+        start_tokens = self.selector_candidate_tokens
+        print(f"LearnAlign HBM selector capture: chunk {index}/{total}", flush=True)
+        self._start_trace(trace_root)
+        try:
+            with self.phase(f"learnalign_selector_chunk_{index}"):
+                yield
+                self._drain()
+        finally:
+            self._stop_trace()
+        _require(self.selector_completions - start_completions == prompt_count * num_rollouts
+                 and self.selector_candidate_tokens > start_tokens,
+                 f"LearnAlign chunk {index}: incomplete selector rollout")
+        log_path = root / "xprof.log"
+        try:
+            payload = self._convert_xprof_trace(self.learnalign_xprof_python, trace_root, log_path)
+        except (subprocess.SubprocessError, OSError) as exc:
+            raise RuntimeError(f"LearnAlign HBM chunk {index} failed four-device extraction. See {log_path}") from exc
+        sample = {
+            **payload, "chunk_index": index, "chunk_count": total, "prompts": prompt_count,
+            "rollouts_per_prompt": num_rollouts, "completions": prompt_count * num_rollouts,
+            "generated_tokens": self.selector_candidate_tokens - start_tokens,
+        }
+        _dump(root / "xprof_observed.json", sample)
+        self.learnalign_hbm_samples.append(sample)
+        print(f"LearnAlign HBM chunk {index} PASS", flush=True)
+
+    def _write_learnalign_selector_hbm(self):
+        samples = self.learnalign_hbm_samples
+        _require(tuple(s["chunk_index"] for s in samples) == LEARNALIGN_HBM_SAMPLE_CHUNKS,
+                 "Missing or duplicate LearnAlign selector HBM samples")
+        _dump(self.out / "selector_hbm.json", {
+            "method": self.method, "memory_phase": "selector_sampled",
+            "commit_sha": self.metadata["commit_sha"],
+            "after_optimizer_updates": LEARNALIGN_PRE_UPDATES,
+            "selector_completions": self.learnalign_selection["completions"],
+            "sampled_chunks": list(LEARNALIGN_HBM_SAMPLE_CHUNKS),
+            "samples": samples,
+            "max_device_peak_hbm_gib": max(s["max_device_peak_hbm_gib"] for s in samples),
+            "resident_allocations_verified": False,
+            "qualification": "Observed stack + heap over sampled selector chunks only; "
+                             "not a full-selector peak. Resident buffers not independently verified.",
+        })
+        self.metadata["learnalign_selector_hbm"] = "selector_hbm.json"
 
     def note_selector_rollout(self, count, tokens, *, candidate):
         _require(self.method in ALIGNMENT_METHODS and self.active_iteration is not None,
@@ -887,6 +966,20 @@ def check_run(path):
         _require(memory.get("memory_phase") == summary.get("memory_phase"), f"{path}: memory phase mismatch")
         _require(len(memory["devices"]) == 4, f"{path}: incomplete device inventory")
         _require(any((path / "trace").rglob("*.xplane.pb")), f"{path}: no XPlane trace")
+        if metadata.get("learnalign_selector_hbm") is not None:
+            selector = _load(path / "selector_hbm.json")
+            samples = selector["samples"]
+            ids = {str(d["id"]) for d in metadata["topology"]["devices"]}
+            _require(method == "learnalign" and summary.get("memory_phase") == "postselect"
+                     and selector["memory_phase"] == "selector_sampled"
+                     and selector["commit_sha"] == metadata["commit_sha"]
+                     and selector["selector_completions"] == LEARNALIGN_SELECTOR_COMPLETIONS
+                     and selector["after_optimizer_updates"] == LEARNALIGN_PRE_UPDATES
+                     and tuple(selector["sampled_chunks"]) == LEARNALIGN_HBM_SAMPLE_CHUNKS
+                     and tuple(s["chunk_index"] for s in samples) == LEARNALIGN_HBM_SAMPLE_CHUNKS
+                     and len(ids) == 4 and all(set(s["devices"]) == ids and s["completions"] == 32
+                                              for s in samples),
+                     f"{path}: incomplete LearnAlign selector HBM report")
     return summary, metadata, [r["prompt_order_sha256"] for r in rows]
 
 

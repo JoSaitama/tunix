@@ -260,6 +260,72 @@ class BenchmarkTest(unittest.TestCase):
         self.assertEqual(report["measurement"]["filtered_completions"], 4)
         self.assertEqual(report["measurement"]["actual_filtered_fraction"], 4 / 32)
 
+    def test_learnalign_hbm_opt_in_requires_postselect_memory(self):
+        env = {
+            "TUNIX_BENCH_METHOD": "learnalign", "TUNIX_GRPO_BENCHMARK": "memory",
+            "TUNIX_BENCH_DIAGNOSTICS": "off", "TUNIX_BENCH_WARMUP": "10",
+            "TUNIX_BENCH_STEPS": "2", "TUNIX_BENCH_OUT": str(self.path),
+            "TUNIX_BENCH_RESOURCE": "v5p-16", bench.LEARNALIGN_XPROF_ENV: sys.executable,
+        }
+        with patch.dict(bench.os.environ, env, clear=True):
+            self.assertEqual(bench.Benchmark.from_env().learnalign_xprof_python, Path(sys.executable))
+            bench.os.environ["TUNIX_BENCH_WARMUP"] = "1"
+            with self.assertRaisesRegex(ValueError, "requires LearnAlign postselect memory mode"):
+                bench.Benchmark.from_env()
+
+    def _learnalign_hbm_fixture(self):
+        b = bench.Benchmark("learnalign", "memory", "off", 10, 2, self.path, "v5p-16")
+        b.learnalign_xprof_python = Path(sys.executable)
+        b.active_iteration = 11
+        b.selector_rounds = b.selector_completions = 0
+        b.selector_reference_tokens = b.selector_candidate_tokens = 0
+        b.selector_seconds = 0.0
+        b.metadata = {"commit_sha": "test"}
+        b._drain = Mock()
+        b._start_trace = Mock(side_effect=lambda _: setattr(b, "trace_active", True))
+        b._stop_trace = Mock(side_effect=lambda: setattr(b, "trace_active", False))
+        b.phase = lambda _: nullcontext()
+        b._open_measurement_window = Mock()
+        return b
+
+    def test_learnalign_hbm_samples_full_pool_without_overlapping_postselect(self):
+        b = self._learnalign_hbm_fixture()
+        b._convert_xprof_trace = Mock(side_effect=[
+            {"max_device_peak_hbm_gib": value, "devices": {str(i): {} for i in range(4)}}
+            for value in (12, 14, 13)
+        ])
+        seen = []
+        with b.selector_round():
+            for index in range(1, 692):
+                with b.learnalign_selector_chunk(index=index, total=691, prompt_count=4, num_rollouts=8):
+                    b.note_selector_rollout(32, 100, candidate=True)
+                    if b.trace_active:
+                        seen.append(index)
+                self.assertFalse(b.trace_active)
+            b._open_measurement_window.assert_not_called()
+        self.assertEqual(seen, [1, 346, 691])
+        self.assertEqual(b._convert_xprof_trace.call_count, 3)
+        b._open_measurement_window.assert_called_once()
+        self.assertEqual(b.learnalign_selection["completions"], 22112)
+        self.assertEqual(b.selector_completions, 0)
+        report = json.loads((self.path / "selector_hbm.json").read_text())
+        self.assertEqual(report["sampled_chunks"], seen)
+        self.assertEqual(report["max_device_peak_hbm_gib"], 14)
+        self.assertEqual(sum(s["completions"] for s in report["samples"]), 96)
+        self.assertFalse(report["resident_allocations_verified"])
+
+    def test_learnalign_hbm_invalid_trace_stops_before_postselect(self):
+        b = self._learnalign_hbm_fixture()
+        b._convert_xprof_trace = Mock(side_effect=subprocess.CalledProcessError(1, "xprof"))
+        with self.assertRaisesRegex(RuntimeError, "failed four-device extraction"):
+            with b.selector_round(), b.learnalign_selector_chunk(
+                index=1, total=691, prompt_count=4, num_rollouts=8,
+            ):
+                b.note_selector_rollout(32, 100, candidate=True)
+        self.assertFalse(b.trace_active)
+        b._open_measurement_window.assert_not_called()
+        self.assertFalse((self.path / "selector_hbm.json").exists())
+
     def test_disk_guard_rejects_small_volume(self):
         with patch.object(bench.shutil, "disk_usage", return_value=SimpleNamespace(free=5 * 2**30)):
             with self.assertRaisesRegex(ValueError, "need 6 GiB"):

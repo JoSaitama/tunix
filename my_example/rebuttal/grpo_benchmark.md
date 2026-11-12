@@ -249,6 +249,41 @@ substitute the probe, a snapshot, or an allocator lifetime peak.
 Even a successful extraction reports the observed window peak, not an
 independent certification of resident-buffer coverage or a whole-run peak.
 
+### GradAlign and LearnAlign phase HBM
+
+Run each phase separately on the same idle four-chip worker with the training
+virtualenv active. Pass a fresh job directory under an existing parent and
+an absolute path to the separate XProf interpreter.
+
+```bash
+bash my_example/rebuttal/run_alignment_hbm.sh gradalign "$GRAD_JOB" "$XPROF_PY"
+bash my_example/rebuttal/run_alignment_hbm.sh learnalign-prelearn "$PRE_JOB" "$XPROF_PY"
+bash my_example/rebuttal/run_alignment_hbm.sh learnalign-postselect "$POST_JOB" "$XPROF_PY"
+```
+
+- `gradalign` traces the complete first selector (30 reference and 160
+  candidate prompts, 4 rollouts each) plus the first actor update. This
+  window includes first-use compilation and is not a typical non-selector step.
+- `learnalign-prelearn` traces actor updates 2–3 before any selection.
+- `learnalign-postselect` runs all 2,764 prompts with 8 rollouts each after
+  10 prelearning updates (the timing benchmark budget, not the formal default).
+  It profiles selector chunks 1, 346, and 691 (4 prompts each), separately
+  covering generation, reference log-probabilities, and both grouped feature
+  subbatches through device-to-host transfer. XProf must validate all four
+  devices after each sampled chunk or the job stops. It completes the original
+  full-pool selection, then traces actor updates 11–12 in the same process.
+
+The outer job `exit_code` is 0 only after the training-window XProf check
+succeeds. Read per-device and max observed GiB/chip in `xprof_observed.json`.
+For LearnAlign selection read `run/selector_hbm.json`, or inspect individual
+results and parser logs under `run/selector_traces`. The selector maximum
+is across the three sampled windows, not the full pool. It is a separate
+result from prelearning and postselection. Do not use these runs for timing:
+trace export, drain and conversion add overhead. The disk preflight is not
+a trace size limit; postselect creates four traces, so budget space for all
+four before starting. If a trace is missing allocator data, preserve artifacts
+and report the affected phase as missing rather than substituting another phase.
+
 Historical 691-step logs are separate: report complete-job wall time only from
 verified launch/finish timestamps for each run and state which phases are
 included. Tqdm or TensorBoard actor-only metrics are not replacements for full

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -473,74 +474,82 @@ class PromptGradientEstimator:
             grouped_feature_fn = self._feature_function(
                 grouped_feature_rollouts
             )
-        for start in range(0, len(examples), self.selection_micro_batch_size):
-            chunk = examples[start : start + self.selection_micro_batch_size]
-            (
-                train_example,
-                clean_outcomes,
-                selector_rewards,
-                advantages,
-                mismatch_selected,
-                mismatch_effective,
-            ) = self._generate_binary_train_example(
-                chunk,
-                num_rollouts=num_rollouts,
-                apply_mismatch=apply_mismatch,
-            )
-            actor_mesh = self.rl_cluster.cluster_config.role_to_mesh[
-                rl_cluster_lib.Role.ACTOR
-            ]
-            with actor_mesh, self.rl_cluster._get_logical_axis_rules_cm(  # pylint: disable=protected-access
-                rl_cluster_lib.Role.ACTOR
-            ):
-                if execution_mode == "dual":
-                    if grouped_feature_fn is None:
-                        raise RuntimeError(
-                            "grouped LearnAlign feature path is unavailable"
+        benchmark = getattr(self.rl_cluster, "_training_benchmark", None)
+        capture_chunk = (benchmark.learnalign_selector_chunk
+                         if getattr(benchmark, "learnalign_xprof_python", None) else None)
+        batch_size = self.selection_micro_batch_size
+        chunk_count = (len(examples) + batch_size - 1) // batch_size
+        for start in range(0, len(examples), batch_size):
+            chunk = examples[start : start + batch_size]
+            with (capture_chunk(index=start // batch_size + 1, total=chunk_count,
+                                prompt_count=len(chunk), num_rollouts=num_rollouts)
+                  if capture_chunk else nullcontext()):
+                (
+                    train_example,
+                    clean_outcomes,
+                    selector_rewards,
+                    advantages,
+                    mismatch_selected,
+                    mismatch_effective,
+                ) = self._generate_binary_train_example(
+                    chunk,
+                    num_rollouts=num_rollouts,
+                    apply_mismatch=apply_mismatch,
+                )
+                actor_mesh = self.rl_cluster.cluster_config.role_to_mesh[
+                    rl_cluster_lib.Role.ACTOR
+                ]
+                with actor_mesh, self.rl_cluster._get_logical_axis_rules_cm(  # pylint: disable=protected-access
+                    rl_cluster_lib.Role.ACTOR
+                ):
+                    if execution_mode == "dual":
+                        if grouped_feature_fn is None:
+                            raise RuntimeError(
+                                "grouped LearnAlign feature path is unavailable"
+                            )
+                        legacy_features = legacy_feature_fn(
+                            self.rl_cluster.actor_trainer.model,
+                            self._with_reference_logps(train_example),
                         )
-                    legacy_features = legacy_feature_fn(
-                        self.rl_cluster.actor_trainer.model,
-                        self._with_reference_logps(train_example),
-                    )
-                    grouped_features = self._evaluate_grouped_features(
-                        grouped_feature_fn=grouped_feature_fn,
-                        model=self.rl_cluster.actor_trainer.model,
-                        train_example=train_example,
-                        prompt_count=len(chunk),
-                        total_rollouts=num_rollouts,
-                        feature_rollouts=grouped_feature_rollouts,
-                    )
-                    legacy_host_features = np.asarray(
-                        jax.device_get(legacy_features)
-                    )
-                    host_features = np.asarray(jax.device_get(grouped_features))
-                    equivalence_legacy_features.append(legacy_host_features)
-                    equivalence_grouped_features.append(host_features)
-                elif execution_mode == "grouped" or (execution_mode == "legacy" and num_rollouts > 4):
-                    if grouped_feature_fn is None:
-                        raise RuntimeError(
-                            "grouped LearnAlign feature path is unavailable"
+                        grouped_features = self._evaluate_grouped_features(
+                            grouped_feature_fn=grouped_feature_fn,
+                            model=self.rl_cluster.actor_trainer.model,
+                            train_example=train_example,
+                            prompt_count=len(chunk),
+                            total_rollouts=num_rollouts,
+                            feature_rollouts=grouped_feature_rollouts,
                         )
-                    features = self._evaluate_grouped_features(
-                        grouped_feature_fn=grouped_feature_fn,
-                        model=self.rl_cluster.actor_trainer.model,
-                        train_example=train_example,
-                        prompt_count=len(chunk),
-                        total_rollouts=num_rollouts,
-                        feature_rollouts=grouped_feature_rollouts,
-                    )
-                    host_features = np.asarray(jax.device_get(features))
-                elif execution_mode == "legacy":
-                    train_example = self._with_reference_logps(train_example)
-                    features = legacy_feature_fn(
-                        self.rl_cluster.actor_trainer.model,
-                        train_example,
-                    )
-                    host_features = np.asarray(jax.device_get(features))
-                else:
-                    raise AssertionError(
-                        f"unexpected feature execution mode: {execution_mode}"
-                    )
+                        legacy_host_features = np.asarray(
+                            jax.device_get(legacy_features)
+                        )
+                        host_features = np.asarray(jax.device_get(grouped_features))
+                        equivalence_legacy_features.append(legacy_host_features)
+                        equivalence_grouped_features.append(host_features)
+                    elif execution_mode == "grouped" or (execution_mode == "legacy" and num_rollouts > 4):
+                        if grouped_feature_fn is None:
+                            raise RuntimeError(
+                                "grouped LearnAlign feature path is unavailable"
+                            )
+                        features = self._evaluate_grouped_features(
+                            grouped_feature_fn=grouped_feature_fn,
+                            model=self.rl_cluster.actor_trainer.model,
+                            train_example=train_example,
+                            prompt_count=len(chunk),
+                            total_rollouts=num_rollouts,
+                            feature_rollouts=grouped_feature_rollouts,
+                        )
+                        host_features = np.asarray(jax.device_get(features))
+                    elif execution_mode == "legacy":
+                        train_example = self._with_reference_logps(train_example)
+                        features = legacy_feature_fn(
+                            self.rl_cluster.actor_trainer.model,
+                            train_example,
+                        )
+                        host_features = np.asarray(jax.device_get(features))
+                    else:
+                        raise AssertionError(
+                            f"unexpected feature execution mode: {execution_mode}"
+                        )
             if not np.isfinite(host_features).all():
                 raise FloatingPointError(
                     f"{self.method} selector produced non-finite features in "
