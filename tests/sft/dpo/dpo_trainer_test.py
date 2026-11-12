@@ -461,6 +461,66 @@ class DPOTrainerTest(parameterized.TestCase):
     self.assertEqual(int(aux["dbc/num_negative_scores"]), negative_count)
     self.assertEqual(int(aux["dbc/num_samples_flipped"]), flip_count)
 
+  @parameterized.parameters(
+      (32, 10, 4),
+      (64, 10, 6),
+      (128, 10, 12),
+      (256, 10, 26),
+      (512, 10, 52),
+      (64, 12.5, 8),
+      (10, 10, 2),  # Round up when exactly between two even counts.
+      (7, 100, 6),
+      (32, 0, 0),
+  )
+  def test_configurable_flip_quota_rounds_to_even(
+      self, window_size, percent, expected
+  ):
+    self.assertEqual(dpo_lib._even_flip_quota(window_size, percent), expected)
+
+  @parameterized.parameters(
+      (0, (1, 2, 3, 4, 5, 6, 7)),
+      (1, (1, 3, 5, 7)),
+      (2, (1, 4, 7)),
+  )
+  def test_configurable_flip_frequency_counts_optimizer_updates(
+      self, frequency, expected
+  ):
+    scheduled = jax.jit(lambda step: dpo_lib._flip_scheduled(step, frequency))
+    enabled_steps = tuple(
+        step + 1 for step in range(7) if bool(scheduled(jnp.uint32(step)))
+    )
+    self.assertEqual(enabled_steps, expected)
+
+  @parameterized.parameters(
+      ([-6, -5, -4, -3, -2, -1] + [2] * 26, 4, 67 / 32),
+      ([-3, -2, -1] + [2] * 29, 3, 2.0),
+      ([0] + [2] * 31, 0, 62 / 32),
+  )
+  def test_configurable_flip_reverses_only_selected_negative_gradients(
+      self, values, count, expected_grad
+  ):
+    grads = {"w": jnp.array(values, dtype=jnp.float32)[:, None]}
+    losses = jnp.arange(len(values), dtype=jnp.float32)
+    aggregate = jax.jit(lambda completed_updates: (
+        dpo_lib.aggregate_self_influence_flip_step(
+            grads, losses, {"metric": losses}, quota=4,
+            enabled=dpo_lib._flip_scheduled(completed_updates, 1),
+        )
+    ))
+
+    for completed_updates in (0, 1, 2, 3):
+      enabled = completed_updates % 2 == 0
+      final_grads, final_loss, aux = aggregate(jnp.uint32(completed_updates))
+      np.testing.assert_allclose(
+          final_grads["w"], [expected_grad if enabled else np.mean(values)],
+          atol=1e-6,
+      )
+      np.testing.assert_allclose(final_loss, np.mean(losses), atol=1e-6)
+      np.testing.assert_allclose(aux["metric"], np.mean(losses), atol=1e-6)
+      self.assertEqual(int(aux["dbc/flip_enabled"]), int(enabled))
+      self.assertEqual(int(aux["dbc/flip_quota"]), 4 if enabled else 0)
+      self.assertEqual(int(aux["dbc/num_samples_flipped"]), count if enabled else 0)
+
   def test_aggregate_random_curated_step_keeps_requested_count_deterministically(
       self,
   ):

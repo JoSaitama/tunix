@@ -8757,3 +8757,11 @@ This file tracks engineering changes made in this repository.
 - 文件：`tunix/examples/data/pku_saferlhf_dpo.py`、`tunix/sft/dpo/dpo_trainer.py`、`examples/dpo/qwen2p5_dpo_experiments.py`、`examples/dpo/run_qwen2p5_pku_safety_pilot.sh`、`examples/dpo/eval_qwen2p5_pku_safety.py`、`examples/dpo/eval_qwen2p5_rewardbench_v2.py`、`tests/sft/dpo/dpo_trainer_test.py`、`develop.md`。
 - 验证：`bash -n examples/dpo/run_qwen2p5_pku_safety_pilot.sh`、`--help`、Python 源码和脚本内嵌 Python 编译、`git diff --check` 均通过。CPU JAX/JIT 隔离运行验证了梯度聚合、最负样本选择、负样本不足、零翻转、满 256 对窗口和同分顺序。模拟数据验证了安全标签、prompt 去重及切分隔离。模拟模型和评测依赖运行了实际串行脚本，验证了共享权重和 seed、两组启动顺序和 CSV 汇总。
 - 待办：本机缺少 Tunix 全量运行依赖，尚未运行完整 trainer 测试套件或 TPU 训练。默认最多取 4096 对、16 个更新步，实际有效样本数以官方数据及 tokenizer 长度过滤日志为准。
+
+## 2026-11-12 - Configurable PKU DPO gradient flip and clean smoke
+
+- 改动范围：PKU pilot 使用 `self_inf_flip`。通过 `MAX_FLIP_PERCENT` 和 `FLIP_FREQUENCY` 配置反号，并将两项写入 `launch.yaml`。DTV 分数使用原始梯度，名额按整窗样本数取最近偶数，居中时向上取。只选择最低的严格负分，负分不足时翻转全部负分。梯度反号后按整窗样本数平均。频率使用已完成的 optimizer 更新数，`1` 对应第 1、3、5 步。旧 `self_inf_flip10` 配置仍可复现原有向下取整的结果。
+- Clean smoke：`--smoke` 用 PKU 官方 clean 标签，保留 batch 8 与累积 32，默认抽最多 1536 对并跑 4 个更新步。执行反号组训练、训练内验证及导出，并检查是否记录了全部更新步。终端日志记录每一步是否启用翻转、名额、负分数和实际翻转数。
+- 文件：`tunix/sft/dpo/dpo_trainer.py`、`tests/sft/dpo/dpo_trainer_test.py`、`examples/dpo/qwen2p5_dpo_experiments.py`、`examples/dpo/run_qwen2p5_pku_safety_pilot.sh`、`develop.md`。
+- 验证：`bash -n`、启动器 `--help`、Python 语法检查及 `git diff --check` 均通过。CPU JAX/JIT 隔离验证通过，覆盖偶数名额、频率 0/1/2、负分不足、普通更新及旧版名额。模拟四设备的 2×2 JAX mesh 验证通过。模拟启动器验证了 clean smoke、配置传递、正常 pilot 串行评测、步数不足检测及非法百分比拒绝。
+- 待验证：本机缺少 `metrax`，完整 trainer 套件和 TPU smoke 尚待在服务器运行。

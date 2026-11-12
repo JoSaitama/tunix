@@ -20,6 +20,7 @@ import csv
 import dataclasses
 import os
 import time
+from fractions import Fraction
 from pathlib import Path
 from typing import Any
 
@@ -117,6 +118,8 @@ class DPOTrainingConfig(peft_trainer.TrainingConfig):
   curation_keep_ratio: float = 1.0
   curation_seed: int = 0
   self_influence_dot_threshold: float = 0.0
+  max_flip_percent: float = 10.0
+  flip_frequency: int = 0
   late_flip_ratio: float = 0.0
   late_flip_start_step: int | None = None
   late_flip_seed: int = 123
@@ -128,6 +131,10 @@ class DPOTrainingConfig(peft_trainer.TrainingConfig):
           "curation_keep_ratio must be between 0.0 and 1.0 inclusive. "
           f"Received: {self.curation_keep_ratio!r}"
       )
+    if not 0.0 <= self.max_flip_percent <= 100.0:
+      raise ValueError("max_flip_percent must be between 0 and 100.")
+    if type(self.flip_frequency) is not int or self.flip_frequency < 0:
+      raise ValueError("flip_frequency must be a nonnegative integer.")
 
 
 @nnx.jit(static_argnums=(4,))
@@ -268,6 +275,7 @@ def _normalize_curation_variant(variant: str) -> str:
       "random_pair_filtering": "random_pair_filtering",
       "reward_based_filtering": "reward_based_filtering",
       "self_inf_batch": "self_inf_batch",
+      "self_inf_flip": "self_inf_flip",
       "self_inf_flip10": "self_inf_flip10",
       "self_influence_batch": "self_inf_batch",
       "self_inf_norm": "self_inf_norm_batch",
@@ -305,7 +313,8 @@ def _normalize_curation_variant(variant: str) -> str:
         "'reward-based-filtering', 'self_inf_batch', 'self-inf-batch', "
         "'self_inf_norm', 'self-inf-norm', 'dtv_norm', "
         "'self_inf_loo', 'self-inf-loo', 'self_inf_loo_cos', "
-        "'self-inf-loo-cos', 'self_inf_flip10', or 'self_influence_batch'. "
+        "'self-inf-loo-cos', 'self_inf_flip', 'self_inf_flip10', "
+        "or 'self_influence_batch'. "
         f"Received: {variant!r}"
     )
   return alias_map[normalized_variant]
@@ -759,26 +768,50 @@ def _self_influence_batch_scores(
   raise ValueError(f"Unknown self-influence score_mode: {score_mode!r}")
 
 
-def aggregate_self_influence_flip10_step(
+def _even_flip_quota(window_size: int, max_flip_percent: float) -> int:
+  """Rounds the percentage of a window to the nearest feasible even count."""
+  half_quota = Fraction(str(max_flip_percent)) * window_size / 200
+  return 2 * min(int(half_quota + Fraction(1, 2)), window_size // 2)
+
+
+def _flip_scheduled(completed_updates: jax.Array, frequency: int) -> jax.Array:
+  """Schedules the first optimizer update and every frequency + 1 thereafter."""
+  return completed_updates % (frequency + 1) == 0
+
+
+def aggregate_self_influence_flip_step(
     per_sample_grads: Any,
     per_sample_losses: jax.Array,
     per_sample_aux: dict[str, jax.Array],
+    *,
+    quota: int,
+    enabled: bool | jax.Array,
 ) -> tuple[Any, jax.Array, dict[str, jax.Array]]:
-  """Reverses the lowest negative DTV gradients, capped at 10% of the window."""
-  scores = _self_influence_batch_scores(per_sample_grads, score_mode="full")
+  """Reverses up to quota negative DTV gradients and averages the full window."""
+  window_size = per_sample_losses.shape[0]
 
-  def reject_nonfinite(_):
-    def fail():
-      raise FloatingPointError("DPO gradient flip encountered nonfinite DTV scores.")
+  def select_flips():
+    scores = _self_influence_batch_scores(per_sample_grads, score_mode="full")
 
-    jax.debug.callback(fail)
+    def reject_nonfinite():
+      def fail():
+        raise FloatingPointError(
+            "DPO gradient flip encountered nonfinite DTV scores."
+        )
 
-  jax.lax.cond(jnp.all(jnp.isfinite(scores)), lambda _: None, reject_nonfinite, None)
-  quota = scores.shape[0] // 10
-  order = jnp.argsort(scores, stable=True)
-  ranks = jnp.empty_like(order).at[order].set(jnp.arange(scores.shape[0]))
-  negative = scores < 0
-  flip_mask = negative & (ranks < quota)
+      jax.debug.callback(fail)
+
+    jax.lax.cond(jnp.all(jnp.isfinite(scores)), lambda: None, reject_nonfinite)
+    order = jnp.argsort(scores, stable=True)
+    ranks = jnp.empty_like(order).at[order].set(jnp.arange(window_size))
+    negative = scores < 0
+    return negative & (ranks < quota), negative.sum(dtype=jnp.int32)
+
+  flip_mask, negative_count = jax.lax.cond(
+      enabled,
+      select_flips,
+      lambda: (jnp.zeros(window_size, dtype=bool), jnp.int32(-1)),
+  )
 
   def signed_mean(grad):
     sample_mask = flip_mask.reshape(
@@ -789,12 +822,26 @@ def aggregate_self_influence_flip10_step(
   final_grads = jax.tree.map(signed_mean, per_sample_grads)
   aux = jax.tree.map(lambda value: jnp.mean(value, axis=0), per_sample_aux)
   aux.update({
-      "dbc/flip_quota": jnp.asarray(quota, dtype=jnp.float32),
-      "dbc/num_negative_scores": negative.sum().astype(jnp.float32),
+      "dbc/flip_enabled": jnp.asarray(enabled, dtype=jnp.float32),
+      "dbc/flip_quota": jnp.where(enabled, quota, 0).astype(jnp.float32),
+      "dbc/num_negative_scores": negative_count.astype(jnp.float32),
       "dbc/num_samples_flipped": flip_mask.sum().astype(jnp.float32),
       "dbc/flip_ratio": flip_mask.mean(),
   })
   return final_grads, per_sample_losses.mean(), aux
+
+
+def aggregate_self_influence_flip10_step(
+    per_sample_grads: Any,
+    per_sample_losses: jax.Array,
+    per_sample_aux: dict[str, jax.Array],
+) -> tuple[Any, jax.Array, dict[str, jax.Array]]:
+  """Runs the original fixed 10% method used by existing configurations."""
+  return aggregate_self_influence_flip_step(
+      per_sample_grads, per_sample_losses, per_sample_aux,
+      quota=per_sample_losses.shape[0] // 10,
+      enabled=True,
+  )
 
 
 def aggregate_self_influence_curated_step(
@@ -1252,6 +1299,7 @@ class CuratedDPOTrainer(DPOTrainer):
         "dbc/self_inf_dot_mean": np.mean,
         "dbc/self_inf_dot_std": np.mean,
         "dbc/self_inf_dot_threshold": np.mean,
+        "dbc/flip_enabled": np.mean,
         "dbc/flip_quota": np.mean,
         "dbc/num_negative_scores": np.mean,
         "dbc/num_samples_flipped": np.mean,
@@ -1477,6 +1525,21 @@ class CuratedDPOTrainer(DPOTrainer):
     filter_diag_aux = self._pop_filter_diagnostic_aux(aux)
     super()._post_process_train_step(aux)
     self._write_filter_diagnostics(filter_diag_aux)
+    if self.curation_variant == "self_inf_flip":
+      enabled, quota, negatives, flipped = jax.device_get((
+          aux["dbc/flip_enabled"],
+          aux["dbc/flip_quota"],
+          aux["dbc/num_negative_scores"],
+          aux["dbc/num_samples_flipped"],
+      ))
+      logging.info(
+          "DTV flip step=%d enabled=%d quota=%d negatives=%s flipped=%d",
+          self._train_steps + 1,
+          int(enabled),
+          int(quota),
+          str(int(negatives)) if enabled else "n/a",
+          int(flipped),
+      )
     assert self._buffered_train_metrics is not None
     for metric_name, op in self._dbc_aux_metrics_to_log.items():
       if metric_name not in aux:
@@ -1533,7 +1596,15 @@ class CuratedDPOTrainer(DPOTrainer):
       window_seed: int | jax.Array,
   ) -> tuple[jax.Array, dict[str, jax.Array]]:
     """Applies the configured curation across the window, then updates once."""
-    if self.curation_variant == "self_inf_flip10":
+    if self.curation_variant == "self_inf_flip":
+      final_grads, final_loss, final_aux = aggregate_self_influence_flip_step(
+          per_sample_grads, per_sample_losses, per_sample_aux,
+          quota=_even_flip_quota(
+              per_sample_losses.shape[0], self.dpo_config.max_flip_percent
+          ),
+          enabled=_flip_scheduled(window_seed, self.dpo_config.flip_frequency),
+      )
+    elif self.curation_variant == "self_inf_flip10":
       final_grads, final_loss, final_aux = aggregate_self_influence_flip10_step(
           per_sample_grads, per_sample_losses, per_sample_aux
       )
