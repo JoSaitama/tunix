@@ -5,20 +5,20 @@ This module imports no JAX at import time; report checks run on CPU.
 from __future__ import annotations
 
 import argparse
-from contextlib import contextmanager
 import csv
 import dataclasses
 import hashlib
-from importlib.metadata import PackageNotFoundError, version
 import json
 import logging
 import os
-from pathlib import Path
 import shutil
 import statistics
 import subprocess
 import threading
 import time
+from contextlib import contextmanager
+from importlib.metadata import PackageNotFoundError, version
+from pathlib import Path
 
 METHODS = {
     "vanilla": "Trainer",
@@ -38,6 +38,7 @@ GRADALIGN_INTERVAL = 10
 LEARNALIGN_PRE_UPDATES = 10
 LEARNALIGN_PRE_SKIP = 5
 LEARNALIGN_SELECTOR_COMPLETIONS = 691 * 4 * 8
+DS_XPROF_ENV = "TUNIX_BENCH_DS_XPROF_PYTHON"
 FIXED_FILTERS = {"random10": "random", "reward10": "reward"}
 ALIGNMENT_METHODS = {"gradalign", "learnalign"}
 VALUATION_ACTORS = {"dtv", "dtv-loo", "norm-top50", "pcgrad", "cagrad", *FIXED_FILTERS}
@@ -172,6 +173,7 @@ class Benchmark:
         self.thread = threading.local()
         self.trace_active = False
         self.memory = {}
+        self.ds_xprof_python = None
         self.learnalign_selection = None
         self.filter_counts = []
         # The ordinary learner peeks at item 1 to infer its batch size. That
@@ -180,12 +182,20 @@ class Benchmark:
 
     @classmethod
     def from_env(cls):
-        return cls(
+        benchmark = cls(
             os.environ["TUNIX_BENCH_METHOD"], os.environ["TUNIX_GRPO_BENCHMARK"],
             os.environ["TUNIX_BENCH_DIAGNOSTICS"], int(os.environ["TUNIX_BENCH_WARMUP"]),
             int(os.environ["TUNIX_BENCH_STEPS"]), os.environ["TUNIX_BENCH_OUT"],
             os.environ["TUNIX_BENCH_RESOURCE"],
         )
+        if interpreter := os.environ.get(DS_XPROF_ENV):
+            _require((benchmark.method, benchmark.mode) == ("grpo-ds", "memory"),
+                     f"{DS_XPROF_ENV} requires GRPO+DS memory mode")
+            benchmark.ds_xprof_python = Path(interpreter).absolute()
+            _require(benchmark.ds_xprof_python.is_file()
+                     and os.access(benchmark.ds_xprof_python, os.X_OK),
+                     "DS preflight requires an executable XProf Python")
+        return benchmark
 
     def check_config(self, cfg, max_steps):
         _require(os.environ.get("TUNIX_EXPERIMENT_SEED") == "13", "Expected seed 13")
@@ -288,24 +298,89 @@ class Benchmark:
                 result[str(d.id)] = {"stats": None, "error": str(exc)}
         return result
 
-    def _start_trace(self):
+    def _start_trace(self, trace_root=None):
         check_disk(self.out, float(os.environ.get("TUNIX_BENCH_MIN_FREE_GIB", "6")))
+        trace_root = trace_root or self.out / "trace"
         options_type = getattr(self.jax.profiler, "ProfileOptions", None)
         options = options_type() if options_type else None
         kwargs = {}
-        if options is not None:
+        if self.ds_xprof_python is not None:
+            _require(options is not None, "DS diagnostic requires JAX ProfileOptions")
+            requested = {
+                "host_tracer_level": 2,
+                "python_tracer_level": 0,
+                "advanced_configuration": {
+                    "tpu_trace_mode": "TRACE_ONLY_XLA",
+                    "tpu_num_chips_to_profile_per_task": len(self.devices),
+                },
+            }
+            # JAX 0.8.1 can assign the dict but reading its protobuf-map
+            # getter raises TypeError. Log the request, not the getter.
+            if hasattr(type(options), "device_tracer_level"):
+                requested["device_tracer_level"] = 1
+            for name, value in requested.items():
+                setattr(options, name, value)
+            self.metadata["ds_profiler_requested_options"] = requested
+            window = ([self.warmup + 1, self.warmup + self.steps]
+                      if trace_root == self.out / "trace" else "preflight")
+            print(f"DS HBM trace start: {trace_root}; window={window}; "
+                  f"options={json.dumps(requested)}", flush=True)
+            kwargs["profiler_options"] = options
+        elif options is not None:
             if hasattr(options, "tpu_num_chips_to_profile_per_task"):
                 options.tpu_num_chips_to_profile_per_task = len(self.devices)
             options.host_tracer_level = 2
             options.python_tracer_level = 0
             kwargs["profiler_options"] = options
-        self.jax.profiler.start_trace(str(self.out / "trace"), **kwargs)
+        self.jax.profiler.start_trace(str(trace_root), **kwargs)
         self.trace_active = True
 
     def _stop_trace(self):
         if self.trace_active:
             self.trace_active = False
             self.jax.profiler.stop_trace()
+            if self.ds_xprof_python is not None:
+                print("DS HBM trace stopped and exported", flush=True)
+
+    def _run_ds_profiler_preflight(self, mesh):
+        """Verify four-device memory collection in this process before training."""
+        import numpy as np
+
+        jax = self.jax
+        shape = (512 * len(self.devices), 512)
+        sharding = jax.sharding.NamedSharding(
+            mesh, jax.sharding.PartitionSpec(mesh.axis_names[0], None)
+        )
+        probe = jax.jit(lambda x: x * 2 + 1, in_shardings=sharding, out_shardings=sharding)
+        probe = probe.lower(jax.ShapeDtypeStruct(shape, np.float32, sharding=sharding)).compile()
+        trace_root = self.out / "profiler_preflight" / "trace"
+        self._start_trace(trace_root)
+        try:
+            with jax.profiler.TraceAnnotation("benchmark/ds_hbm_preflight"):
+                value = jax.device_put(np.ones(shape, dtype=np.float32), sharding)
+                result = probe(value)
+                result.block_until_ready()
+                result.delete()
+                value.delete()
+                jax.effects_barrier()
+        finally:
+            self._stop_trace()
+        # Keep XProf's dependencies out of the training interpreter.
+        log_path = self.out / "profiler_preflight" / "xprof.log"
+        try:
+            with log_path.open("w", encoding="utf-8") as log:
+                result = subprocess.run(
+                    [str(self.ds_xprof_python), "-m", "my_example.rebuttal.grpo_benchmark", "xprof-window",
+                     str(trace_root), *[str(d.id) for d in self.devices]],
+                    check=True, timeout=300, stdout=subprocess.PIPE, stderr=log, text=True,
+                    env={**os.environ, "JAX_PLATFORMS": "cpu"},
+                )
+        except (subprocess.SubprocessError, OSError) as exc:
+            raise RuntimeError(f"DS HBM profiler preflight failed; no training started. See {log_path}") from exc
+        payload = json.loads(result.stdout)
+        _dump(self.out / "profiler_preflight" / "xprof_observed.json", payload)
+        self.metadata["ds_profiler_preflight"] = "profiler_preflight/xprof_observed.json"
+        print("DS HBM PREFLIGHT PASS: all four TPU allocator peaks present", flush=True)
 
     def before_iteration(self):
         step = len(self.rows) + 1
@@ -585,6 +660,8 @@ class Benchmark:
         self._write_reports()
 
     def _run_with_compile_log(self, learner, dataset, mesh):
+        if self.ds_xprof_python is not None:
+            self._run_ds_profiler_preflight(mesh)
         logger = logging.getLogger("jax")
         handler = _CompileLog(self)
         old_propagate = logger.propagate
@@ -838,11 +915,9 @@ def check_comparable(runs):
             by_stream[key] = meta, prompts
 
 
-def observed_xprof_peaks(run):
-    """Extract XProf's window peaks without certifying resident-buffer coverage."""
-    summary, metadata, _ = check_run(run)
-    _require(summary["mode"] == "memory", "Expected a memory run")
-    traces = sorted(Path(run).glob("trace/plugins/profile/*/*.xplane.pb"))
+def xprof_window(trace_root, device_ids):
+    """Check all four allocator peaks in one trace (preflight or training)."""
+    traces = sorted(Path(trace_root).glob("plugins/profile/*/*.xplane.pb"))
     _require(len(traces) == 1, "Expected exactly one local-worker XPlane file")
     from xprof.convert import raw_to_tool_data
 
@@ -851,7 +926,7 @@ def observed_xprof_peaks(run):
     )
     data = json.loads(raw) if raw else {}
     profiles = data.get("memoryProfilePerAllocator", {})
-    ids = {str(device["id"]) for device in metadata["topology"]["devices"]}
+    ids = {str(device) for device in device_ids}
     _require(len(ids) == 4 and ids <= set(profiles),
              f"Incomplete XProf coverage; memory IDs: {sorted(profiles)}")
     devices = {}
@@ -869,14 +944,22 @@ def observed_xprof_peaks(run):
                            "capacity_bytes": capacity,
                            "peak_time_ps": int(profile.get("peakStatsTimePs", 0))}
     return {
-        "collector": "XProf Memory Profile", "method": summary["method"],
-        "source_run": str(Path(run).resolve()), "trace_file": str(traces[0]),
-        "commit_sha": metadata["commit_sha"], "devices": devices,
-        "memory_phase": summary.get("memory_phase"),
-        "iterations_inclusive": [summary["warmup_iterations"] + 1, summary["actor_optimizer_end"]],
+        "collector": "XProf Memory Profile", "trace_file": str(traces[0]), "devices": devices,
         "max_device_peak_hbm_gib": max(d["peak_hbm_gib"] for d in devices.values()),
         "resident_allocations_verified": False,
         "qualification": "Observed window stack + heap; resident buffers not independently verified.",
+    }
+
+
+def observed_xprof_peaks(run):
+    """Extract XProf's window peaks without certifying resident-buffer coverage."""
+    summary, metadata, _ = check_run(run)
+    _require(summary["mode"] == "memory", "Expected a memory run")
+    return {
+        **xprof_window(Path(run) / "trace", [d["id"] for d in metadata["topology"]["devices"]]),
+        "method": summary["method"], "source_run": str(Path(run).resolve()),
+        "commit_sha": metadata["commit_sha"], "memory_phase": summary.get("memory_phase"),
+        "iterations_inclusive": [summary["warmup_iterations"] + 1, summary["actor_optimizer_end"]],
     }
 
 
@@ -921,6 +1004,9 @@ def main():
     xprof.add_argument("evidence", type=Path)
     observed = sub.add_parser("xprof-observed", help="Extract all four observed peaks with XProf")
     observed.add_argument("run", type=Path)
+    window = sub.add_parser("xprof-window", help="Validate a standalone four-device XProf trace")
+    window.add_argument("trace_root", type=Path)
+    window.add_argument("device_ids", nargs=4)
     disk = sub.add_parser("disk-check", help="Refuse capture with inadequate free space")
     disk.add_argument("path", type=Path)
     disk.add_argument("--min-free-gib", type=float, default=6)
@@ -930,6 +1016,9 @@ def main():
         return
     if args.command == "xprof-observed":
         print(json.dumps(observed_xprof_peaks(args.run), indent=2, allow_nan=False))
+        return
+    if args.command == "xprof-window":
+        print(json.dumps(xprof_window(args.trace_root, args.device_ids), indent=2, allow_nan=False))
         return
     if args.command == "disk-check":
         print(f"Free space before capture: {check_disk(args.path, args.min_free_gib):.2f} GiB")

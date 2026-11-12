@@ -213,6 +213,42 @@ breakdowns and timestamps, not an automatic resident-buffer qualification.
 Preserve or transfer raw traces for provenance. The extraction does not
 initialize TPU and may be run on another compatible machine after transfer.
 
+### GRPO+DS HBM diagnostic
+
+If DS traces convert to an empty allocator map, use the dedicated launcher
+from the repository root with the training virtualenv active and a separate
+XProf Python. The job directory must be new, with an existing parent.
+
+```bash
+bash my_example/rebuttal/run_grpo_ds_hbm.sh "$JOB" "$XPROF_PY"
+```
+
+The launcher enables an opt-in diagnostic only for DS memory mode. After
+model initialization, the same JAX process traces a small sharded operation
+before training. The offline XProf subprocess must find valid stack-plus-heap
+records for all four expected device IDs before DS begins. Both traces
+explicitly request XLA tracing and four chips via the options setter, and log
+the requested options without reading the JAX 0.8.1 protobuf-map getter.
+These are requests, not a runtime guarantee of coverage.
+
+The benchmark then warms up one update and traces the contiguous complete
+updates 2–3, including candidate refills, reward/advantage computation,
+group selection/assembly, and actor updates. No probe ops are added inside
+the measured window. The clean data, seed, actor and 691-step LR schedule
+are unchanged. Preserve the probe artifacts under `run/profiler_preflight`
+and the independent training trace under `run/trace`. The probe's peaks
+are not training measurements. Its extra compile and trace session may
+affect allocator/profiler state; don't use diagnostic runs for timing.
+
+Use the outer job's `exit_code`: 0 requires both training validation and
+successful four-device extraction into `xprof_observed.json`. The inner
+`run/exit_code` records only the benchmark process outcome. If the probe
+fails, check `run/profiler_preflight/xprof.log` and `run/stdout.log`.
+If only training extraction fails, keep the two traces and don't
+substitute the probe, a snapshot, or an allocator lifetime peak.
+Even a successful extraction reports the observed window peak, not an
+independent certification of resident-buffer coverage or a whole-run peak.
+
 Historical 691-step logs are separate: report complete-job wall time only from
 verified launch/finish timestamps for each run and state which phases are
 included. Tqdm or TensorBoard actor-only metrics are not replacements for full

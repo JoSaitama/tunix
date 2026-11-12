@@ -9,6 +9,7 @@ import tempfile
 from types import SimpleNamespace
 import time
 import unittest
+from contextlib import nullcontext
 from unittest.mock import Mock, patch
 
 from my_example.rebuttal import grpo_benchmark as bench
@@ -264,6 +265,84 @@ class BenchmarkTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "need 6 GiB"):
                 bench.check_disk(self.path, 6)
 
+    def test_ds_diagnostic_is_opt_in_and_memory_only(self):
+        env = {
+            "TUNIX_BENCH_METHOD": "grpo-ds", "TUNIX_GRPO_BENCHMARK": "memory",
+            "TUNIX_BENCH_DIAGNOSTICS": "off", "TUNIX_BENCH_WARMUP": "1",
+            "TUNIX_BENCH_STEPS": "2", "TUNIX_BENCH_OUT": str(self.path),
+            "TUNIX_BENCH_RESOURCE": "v5p-16",
+        }
+        with patch.dict(bench.os.environ, env, clear=True):
+            self.assertIsNone(bench.Benchmark.from_env().ds_xprof_python)
+            bench.os.environ[bench.DS_XPROF_ENV] = sys.executable
+            self.assertEqual(bench.Benchmark.from_env().ds_xprof_python, Path(sys.executable))
+            bench.os.environ["TUNIX_GRPO_BENCHMARK"] = "timing"
+            with self.assertRaisesRegex(ValueError, r"requires GRPO\+DS memory mode"):
+                bench.Benchmark.from_env()
+
+    def test_ds_profiler_options_do_not_read_legacy_getter(self):
+        class Options:
+            @property
+            def advanced_configuration(self):
+                raise TypeError("cannot read protobuf map")
+
+            @advanced_configuration.setter
+            def advanced_configuration(self, config):
+                self.config = config
+
+        b = self.bench
+        b.ds_xprof_python = Path(sys.executable)
+        b.devices = tuple(range(4))
+        profiler = SimpleNamespace(ProfileOptions=Options, start_trace=Mock(), stop_trace=Mock())
+        b.jax = SimpleNamespace(profiler=profiler)
+        with patch.object(bench, "check_disk"):
+            b._start_trace()
+            b._stop_trace()
+        kwargs = profiler.start_trace.call_args.kwargs
+        self.assertEqual(kwargs["profiler_options"].config, {
+            "tpu_trace_mode": "TRACE_ONLY_XLA", "tpu_num_chips_to_profile_per_task": 4,
+        })
+        self.assertNotIn("device_tracer_level", b.metadata["ds_profiler_requested_options"])
+        profiler.stop_trace.assert_called_once()
+        self.assertFalse(b.trace_active)
+
+    def test_ds_preflight_failure_prevents_training(self):
+        b = self.bench
+        b.ds_xprof_python = Path(sys.executable)
+        learner = Mock()
+        with (
+            patch.object(b, "_run_ds_profiler_preflight", side_effect=RuntimeError("no TPU peaks")),
+            self.assertRaisesRegex(RuntimeError, "no TPU peaks"),
+        ):
+            b._run_with_compile_log(learner, None, None)
+        learner.train.assert_not_called()
+
+    def test_ds_memory_window_covers_refills_and_actor_updates(self):
+        b = bench.Benchmark("grpo-ds", "memory", "off", 1, 2, self.path, "v5p-16")
+        b.metadata, b.learner_entry = {}, time.perf_counter()
+        b.actor = SimpleNamespace(train_steps=0)
+        b.cluster = SimpleNamespace(global_steps=0)
+        b._optimizer_steps = lambda: b.actor.train_steps
+        b._drain = Mock()
+        b._memory_snapshot = Mock()
+        b._start_trace = Mock(side_effect=lambda: setattr(b, "trace_active", True))
+        b._stop_trace = Mock(side_effect=lambda: setattr(b, "trace_active", False))
+        b.jax = SimpleNamespace(profiler=SimpleNamespace(TraceAnnotation=lambda *a, **k: nullcontext()))
+        for i in (1, 2, 3):
+            b.before_iteration()
+            for prompts in (["a", "b", "c", "d"], ["e", "f", "g", "h"]):
+                self.assertEqual(b.trace_active, i >= 2)
+                b.note_rollout(16, 100)
+                b.note_ds_candidate(prompts, eligible=2, selected=2)
+            self.assertEqual(b.trace_active, i >= 2)
+            b.actor.train_steps = b.cluster.global_steps = i
+            self.assertEqual(b.after_iteration(), i == 3)
+        b._start_trace.assert_called_once()
+        b._stop_trace.assert_called_once()
+        self.assertFalse(b.trace_active)
+        self.assertEqual(b.end_optimizer_step - b.start_optimizer_step, 2)
+        self.assertEqual(bench.summarize(b.rows[1:], b.window_seconds)["candidate_batches"], 4)
+
     def test_compilation_attributed_but_not_conflated_with_cache_hits(self):
         b = self.bench
         b.active_iteration = 16
@@ -356,6 +435,9 @@ class BenchmarkTest(unittest.TestCase):
             observed = bench.observed_xprof_peaks(self.path)
             self.assertEqual(observed["devices"]["3"]["peak_hbm_bytes"], 103)
             self.assertFalse(observed["resident_allocations_verified"])
+            probe = bench.xprof_window(self.path / "trace", [0, 1, 2, 3])
+            self.assertEqual(probe["devices"], observed["devices"])
+            self.assertNotIn("iterations_inclusive", probe)
             del profiles["3"]
             with self.assertRaisesRegex(ValueError, "Incomplete XProf coverage"):
                 bench.observed_xprof_peaks(self.path)
