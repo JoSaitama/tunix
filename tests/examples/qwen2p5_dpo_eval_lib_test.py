@@ -16,8 +16,10 @@ from pathlib import Path
 from types import SimpleNamespace
 import importlib.util
 import sys
+from unittest import mock
 
 from absl.testing import absltest
+import numpy as np
 
 
 def _load_eval_module():
@@ -57,6 +59,34 @@ class Qwen2p5DPOEvalLibTest(absltest.TestCase):
         training_config=SimpleNamespace(metrics_prefix="legacy")
     )
     self.assertEqual(self.eval_lib._resolve_metrics_prefix(trainer), "legacy")
+
+  def test_preference_batch_metrics_accepts_numpy_prompt_batch(self):
+    trainer = mock.Mock(algorithm="dpo")
+    aux = {
+        name: np.array([0.0, 1.0])
+        for name in (
+            "rewards/accuracy", "rewards/margin", "rewards/chosen",
+            "rewards/rejected", "log_probs/chosen", "log_probs/rejected",
+        )
+    }
+    with mock.patch.object(
+        self.eval_lib.dpo_trainer_lib,
+        "dpo_loss_fn_per_sample",
+        return_value=(np.array([0.5, 0.6]), aux),
+    ):
+      metrics = self.eval_lib.iter_preference_batch_metrics(
+          trainer=trainer,
+          prompts=np.array(["first", "second"]),
+          chosen_responses=np.array(["a", "b"]),
+          rejected_responses=np.array(["c", "d"]),
+      )
+
+    self.assertEqual([row["rewards_accuracy"] for row in metrics], [0.0, 1.0])
+    trainer._prepare_inputs.assert_called_once_with({
+        "prompts": ["first", "second"],
+        "chosen_responses": ["a", "b"],
+        "rejected_responses": ["c", "d"],
+    })
 
 
 if __name__ == "__main__":

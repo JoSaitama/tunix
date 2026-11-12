@@ -79,7 +79,10 @@ def main():
       "scoring_backend": rewardbench.SCORING_BACKEND,
   }
   result = json.dumps(summary, indent=2)
-  (args.run_dir / "safety_metrics.json").write_text(result + "\n")
+  metrics_path = args.run_dir / "safety_metrics.json"
+  temporary_path = metrics_path.with_suffix(".json.tmp")
+  temporary_path.write_text(result + "\n")
+  temporary_path.replace(metrics_path)
   print(result)
 
 

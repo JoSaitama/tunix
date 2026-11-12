@@ -213,7 +213,7 @@ def iter_preference_batch_metrics(
     chosen_responses: Sequence[str],
     rejected_responses: Sequence[str],
 ) -> list[dict[str, float]]:
-  if not prompts:
+  if len(prompts) == 0:
     return []
   training_input = {
       "prompts": list(prompts),

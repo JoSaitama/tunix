@@ -2,7 +2,7 @@
 set -euo pipefail
 
 if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
-  echo "Usage: bash $0 [--smoke] /path/to/sft/exported_model [seed ...]"
+  echo "Usage: bash $0 [--smoke | --resume RUN_DIR] /path/to/sft/exported_model [seed ...]"
   echo "Default seed: 0. Defaults for gradient flip: MAX_FLIP_PERCENT=10 FLIP_FREQUENCY=1."
   echo "Optional environment setting: PYTHON_BIN."
   echo "TRAIN_PAIRS and MAX_STEPS default to 4096 and 16 (pilot), or 1536 and 4 (smoke)."
@@ -11,12 +11,16 @@ if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
   exit 0
 fi
 SMOKE=0
+RESUME_ROOT=""
 if [[ "${1:-}" == "--smoke" ]]; then
   SMOKE=1
   shift
+elif [[ "${1:-}" == "--resume" && $# -ge 3 ]]; then
+  RESUME_ROOT="$(cd "$2" && pwd -P)"
+  shift 2
 fi
-if [[ $# -lt 1 ]]; then
-  echo "Usage: bash $0 [--smoke] /path/to/sft/exported_model [seed ...]" >&2
+if [[ $# -lt 1 || "$1" == --* ]]; then
+  echo "Usage: bash $0 [--smoke | --resume RUN_DIR] /path/to/sft/exported_model [seed ...]" >&2
   exit 2
 fi
 
@@ -98,9 +102,25 @@ if jax.default_backend() != "tpu" or (
 print(f"Local TPU ready: {topology}")
 PY
 mkdir -p runs_xuesong/runs runs_xuesong/logs
-PILOT_ROOT="$(mktemp -d "$PWD/runs_xuesong/runs/${RUN_PREFIX}_$(date +%Y%m%d_%H%M%S)_XXXXXX")"
+RUNS_ROOT="$(cd runs_xuesong/runs && pwd -P)"
+if [[ -n "$RESUME_ROOT" ]]; then
+  if [[ "$(dirname "$RESUME_ROOT")" != "$RUNS_ROOT" ||
+        "${RESUME_ROOT##*/}" != pku_safety_* ||
+        "${RESUME_ROOT##*/}" == pku_safety_smoke_* ]]; then
+    echo "Resume expects a formal PKU run directory under runs_xuesong/runs." >&2
+    exit 2
+  fi
+  PILOT_ROOT="$RESUME_ROOT"
+else
+  PILOT_ROOT="$(mktemp -d "$RUNS_ROOT/${RUN_PREFIX}_$(date +%Y%m%d_%H%M%S)_XXXXXX")"
+fi
+if ! mkdir "$PILOT_ROOT/.launcher.lock"; then
+  echo "Cannot lock PKU run directory: $PILOT_ROOT" >&2
+  exit 1
+fi
+trap 'rmdir "$PILOT_ROOT/.launcher.lock"' EXIT
 PILOT_LOG_ROOT="$PWD/runs_xuesong/logs/${PILOT_ROOT##*/}"
-mkdir "$PILOT_LOG_ROOT"
+mkdir -p "$PILOT_LOG_ROOT"
 echo "PKU pilot output: $PILOT_ROOT"
 echo "PKU pilot logs: $PILOT_LOG_ROOT"
 echo "Seeds: ${SEEDS[*]}; methods: ${METHODS[*]}"
@@ -108,13 +128,21 @@ echo "Seeds: ${SEEDS[*]}; methods: ${METHODS[*]}"
 for seed in "${SEEDS[@]}"; do
   seed_dir="$PILOT_ROOT/seed$seed"
   seed_log_dir="$PILOT_LOG_ROOT/seed$seed"
-  mkdir "$seed_dir" "$seed_log_dir"
+  mkdir -p "$seed_dir" "$seed_log_dir"
   for method in "${METHODS[@]}"; do
     run_dir="$seed_dir/$method"
     train_log="$seed_log_dir/$method.train.log"
-    mkdir "$run_dir"
+    eval_log="$seed_log_dir/$method.eval.log"
+    mkdir -p "$run_dir"
+    train_required=1
+    if [[ -f "$run_dir/safety_metrics.json" ||
+          ( -s "$run_dir/exported_model/model.safetensors" &&
+            ! -f "$run_dir/train.pending" &&
+            ( -f "$run_dir/export.ready" || -f "$eval_log" ) ) ]]; then
+      train_required=0
+    fi
     "$PYTHON_BIN" - "$run_dir" "$method" "$SFT_MODEL_PATH" "$seed" "$TRAIN_PAIRS" "$MAX_STEPS" \
-      "$MAX_FLIP_PERCENT" "$FLIP_FREQUENCY" "$SMOKE" <<'PY'
+      "$MAX_FLIP_PERCENT" "$FLIP_FREQUENCY" "$SMOKE" "$train_required" <<'PY'
 from pathlib import Path
 import sys
 
@@ -124,7 +152,7 @@ from examples.dpo import qwen2p5_dpo_experiments
 
 (
     run_dir, method, sft_path, seed, train_pairs, max_steps,
-    max_flip_percent, flip_frequency, smoke,
+    max_flip_percent, flip_frequency, smoke, train_required,
 ) = sys.argv[1:]
 seed, train_pairs, max_steps = int(seed), int(train_pairs), int(max_steps)
 try:
@@ -135,6 +163,24 @@ if not 0 <= max_flip_percent <= 100:
     sys.exit("MAX_FLIP_PERCENT must be a number between 0 and 100.")
 smoke = smoke == "1"
 config_path = Path(run_dir) / "launch.yaml"
+adapter = "tunix.examples.data.pku_saferlhf_dpo:create_dataset"
+train_data_module = (
+    f"{adapter}(split='train', subset='train', "
+    f"limit={train_pairs}, shuffle_seed={seed})"
+)
+if train_required == "0":
+    cfg = OmegaConf.load(config_path)
+    if (
+        Path(cfg.actor_model_config.model_path).resolve() != Path(sft_path).resolve()
+        or Path(cfg.reference_model_config.model_path).resolve() != Path(sft_path).resolve()
+        or cfg.train_data_module != train_data_module
+        or cfg.training_config.max_steps != max_steps
+        or cfg.dpo_config.max_flip_percent != max_flip_percent
+        or cfg.dpo_config.flip_frequency != int(flip_frequency)
+    ):
+        sys.exit(f"Resume settings differ from {config_path}.")
+    sys.exit(0)
+
 qwen2p5_dpo_experiments.prepare_launch_config(
     config_path="examples/dpo/qwen2p5_1p5b_ultrafeedback_from_sft_lora.yaml",
     output_path=str(config_path),
@@ -151,11 +197,7 @@ qwen2p5_dpo_experiments.prepare_launch_config(
     curation_seed=seed,
 )
 cfg = OmegaConf.load(config_path)
-adapter = "tunix.examples.data.pku_saferlhf_dpo:create_dataset"
-cfg.train_data_module = (
-    f"{adapter}(split='train', subset='train', "
-    f"limit={train_pairs}, shuffle_seed={seed})"
-)
+cfg.train_data_module = train_data_module
 eval_pairs = 16 if smoke else 128
 cfg.eval_data_module = f"{adapter}(split='train', subset='eval', limit={eval_pairs})"
 cfg.dpo_config.max_flip_percent = max_flip_percent
@@ -172,9 +214,17 @@ cfg.optimizer_config.warmup_steps = max_steps // 8
 cfg.optimizer_config.decay_steps = max_steps
 OmegaConf.save(cfg, config_path)
 PY
-    echo "Training $method (seed $seed)"
-    "$PYTHON_BIN" -m tunix.cli.dpo_main "$run_dir/launch.yaml" 2>&1 |
-      tee "$train_log"
+    if (( train_required )); then
+      echo "Training $method (seed $seed)"
+      if (( ! SMOKE )); then
+        touch "$run_dir/train.pending"
+      fi
+      "$PYTHON_BIN" -m tunix.cli.dpo_main "$run_dir/launch.yaml" 2>&1 |
+        tee -a "$train_log"
+      if (( ! SMOKE )); then
+        mv "$run_dir/train.pending" "$run_dir/export.ready"
+      fi
+    fi
     if (( SMOKE )); then
       completed_steps="$(awk '/DTV flip step=/ {count++} END {print count+0}' "$train_log")"
       if (( completed_steps != MAX_STEPS )); then
@@ -184,9 +234,13 @@ PY
       echo "Clean PKU smoke completed $completed_steps updates. Log: $train_log"
       continue
     fi
-    echo "Evaluating $method (seed $seed)"
-    "$PYTHON_BIN" -m examples.dpo.eval_qwen2p5_pku_safety "$run_dir" "$SFT_MODEL_PATH" 2>&1 |
-      tee "$seed_log_dir/$method.eval.log"
+    if [[ -f "$run_dir/safety_metrics.json" ]]; then
+      echo "Using saved evaluation for $method (seed $seed)"
+    else
+      echo "Evaluating $method (seed $seed)"
+      "$PYTHON_BIN" -m examples.dpo.eval_qwen2p5_pku_safety "$run_dir" "$SFT_MODEL_PATH" 2>&1 |
+        tee -a "$eval_log"
+    fi
     "$PYTHON_BIN" - "$PILOT_ROOT/summary.csv" "$run_dir" "$seed" "$method" <<'PY'
 import csv
 import json
@@ -196,15 +250,23 @@ import sys
 
 summary_path, run_dir, seed, method = sys.argv[1:]
 metrics = json.loads((Path(run_dir) / "safety_metrics.json").read_text())
-row = dict(method=method, seed=int(seed), **metrics)
-with open(summary_path, "a", newline="") as output:
+summary_path = Path(summary_path)
+rows = {}
+if summary_path.exists():
+    with summary_path.open(newline="") as saved:
+        rows = {(row["seed"], row["method"]): row for row in csv.DictReader(saved)}
+row = dict(method=method, seed=seed, **metrics)
+rows[seed, method] = row
+temporary_summary = summary_path.with_suffix(".csv.tmp")
+with temporary_summary.open("w", newline="") as output:
     writer = csv.DictWriter(output, fieldnames=list(row))
-    if output.tell() == 0:
-        writer.writeheader()
-    writer.writerow(row)
+    writer.writeheader()
+    writer.writerows(rows.values())
+temporary_summary.replace(summary_path)
 exported_model = Path(run_dir) / "exported_model"
-shutil.rmtree(exported_model)
-print(f"Saved safety metrics and removed temporary export: {exported_model}")
+if exported_model.exists():
+    shutil.rmtree(exported_model)
+    print(f"Saved safety metrics and removed temporary export: {exported_model}")
 PY
   done
 done
