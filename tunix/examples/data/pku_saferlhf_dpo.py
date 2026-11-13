@@ -3,7 +3,9 @@
 import logging
 import random
 
+from datasets import Dataset
 from datasets import load_dataset
+from examples.dpo.preference_noise import apply_prompt_response_mismatch_to_hf_dataset
 from grain import python as grain
 
 from tunix.examples.data import preference_common
@@ -21,8 +23,12 @@ def create_dataset(
     subset: str = "all",
     limit: int | None = None,
     shuffle_seed: int = 42,
+    mismatch_scope: str = "none",
+    mismatch_ratio: float = 0.0,
+    mismatch_seed: int = 123,
+    mismatch_mode: str = "response_pair",
 ):
-  """Keeps one safe/unsafe pair per prompt and reserves official test prompts."""
+  """Builds safety preference pairs with optional training-only mismatch."""
   if split not in ("train", "test"):
     raise ValueError(f"Expected train or test, got {split!r}.")
   subset = preference_common.normalize_subset(subset)
@@ -30,6 +36,13 @@ def create_dataset(
     raise ValueError("The test split only supports subset='all'.")
   if limit is not None and limit <= 0:
     raise ValueError("limit must be positive.")
+  mismatch_scope = preference_common.normalize_corruption_scope(mismatch_scope)
+  preference_common.validate_ratio("mismatch_ratio", mismatch_ratio)
+  apply_mismatch = mismatch_scope != "none" and mismatch_ratio > 0.0
+  if apply_mismatch and (
+      mismatch_scope != "global" or (split, subset) != ("train", "train")
+  ):
+    raise ValueError("PKU mismatch requires global scope on the training subset.")
 
   splits = load_dataset(_DATASET_NAME)
   seen = set()
@@ -75,6 +88,17 @@ def create_dataset(
       "PKU-SafeRLHF-30K %s/%s: selected %d of %d eligible unique prompts.",
       split, subset, len(selected), len(rows),
   )
+  if apply_mismatch:
+    selected = apply_prompt_response_mismatch_to_hf_dataset(
+        Dataset.from_list(selected),
+        ratio=mismatch_ratio,
+        seed=mismatch_seed,
+        mode=mismatch_mode,
+    )
+    logging.info(
+        "PKU-SafeRLHF-30K mismatch: %d of %d training rows before length filtering.",
+        int(len(selected) * mismatch_ratio), len(selected),
+    )
   return grain.MapDataset.source(selected).map(
       preference_common.to_preference_record
   )

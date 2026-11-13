@@ -1,15 +1,22 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+USAGE="Usage: bash $0 [--mismatch20] [--smoke | --resume RUN_DIR] /path/to/sft/exported_model [seed ...]"
 if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
-  echo "Usage: bash $0 [--smoke | --resume RUN_DIR] /path/to/sft/exported_model [seed ...]"
+  echo "$USAGE"
   echo "Default seed: 0. Defaults for gradient flip: MAX_FLIP_PERCENT=10 FLIP_FREQUENCY=1."
   echo "Pilot methods: vanilla_dpo self_inf_flip random_flip reward_flip."
+  echo "--mismatch20: global cross_response_flip on 20% of training pairs; runs vanilla_dpo and self_inf_flip at frequencies 1 and 2."
   echo "Optional environment setting: PYTHON_BIN."
   echo "TRAIN_PAIRS and MAX_STEPS default to 4096 and 16 (pilot), or 1536 and 4 (smoke)."
   echo "Requires one worker with four local v5p TPU devices."
   echo "Output: runs_xuesong/runs and runs_xuesong/logs."
   exit 0
+fi
+CORRUPTION_CONFIG=clean
+if [[ "${1:-}" == "--mismatch20" ]]; then
+  CORRUPTION_CONFIG=global_mismatch20
+  shift
 fi
 SMOKE=0
 RESUME_ROOT=""
@@ -21,10 +28,9 @@ elif [[ "${1:-}" == "--resume" && $# -ge 3 ]]; then
   shift 2
 fi
 if [[ $# -lt 1 || "$1" == --* ]]; then
-  echo "Usage: bash $0 [--smoke | --resume RUN_DIR] /path/to/sft/exported_model [seed ...]" >&2
+  echo "$USAGE" >&2
   exit 2
 fi
-
 SFT_MODEL_PATH="$(cd "$1" && pwd -P)"
 shift
 SEEDS=(0)
@@ -44,11 +50,18 @@ if (( SMOKE )); then
   MAX_STEPS="${MAX_STEPS:-4}"
   METHODS=(self_inf_flip)
   RUN_PREFIX=pku_safety_smoke
+  if [[ "$CORRUPTION_CONFIG" == global_mismatch20 ]]; then
+    RUN_PREFIX=pku_safety_smoke_mismatch20
+  fi
 else
   TRAIN_PAIRS="${TRAIN_PAIRS:-4096}"
   MAX_STEPS="${MAX_STEPS:-16}"
   METHODS=(vanilla_dpo self_inf_flip random_flip reward_flip)
   RUN_PREFIX=pku_safety
+  if [[ "$CORRUPTION_CONFIG" == global_mismatch20 ]]; then
+    METHODS=(vanilla_dpo self_inf_flip_freq1 self_inf_flip_freq2)
+    RUN_PREFIX=pku_safety_mismatch20
+  fi
 fi
 MAX_FLIP_PERCENT="${MAX_FLIP_PERCENT:-10}"
 FLIP_FREQUENCY="${FLIP_FREQUENCY:-1}"
@@ -76,6 +89,12 @@ if [[ -f .env || -f my_example/.env ]]; then
     source my_example/.env
   fi
   set +a
+fi
+MISMATCH_MODE=response_pair
+if [[ "$CORRUPTION_CONFIG" == global_mismatch20 ]]; then
+  # Match the original UltraFeedback mismatch-20 experiment.
+  MISMATCH_MODE=cross_response_flip
+  export DPO_MISMATCH_MODE="$MISMATCH_MODE"
 fi
 # Use the four chips on this VM, including when it is part of a larger slice.
 export JAX_PLATFORMS=tpu
@@ -111,6 +130,11 @@ if [[ -n "$RESUME_ROOT" ]]; then
     echo "Resume expects a formal PKU run directory under runs_xuesong/runs." >&2
     exit 2
   fi
+  if [[ "${RESUME_ROOT##*/}" == pku_safety_mismatch20_* && "$CORRUPTION_CONFIG" == clean ]] ||
+     [[ "${RESUME_ROOT##*/}" != pku_safety_mismatch20_* && "$CORRUPTION_CONFIG" != clean ]]; then
+    echo "Resume must use the original run's --mismatch20 setting." >&2
+    exit 2
+  fi
   PILOT_ROOT="$RESUME_ROOT"
 else
   PILOT_ROOT="$(mktemp -d "$RUNS_ROOT/${RUN_PREFIX}_$(date +%Y%m%d_%H%M%S)_XXXXXX")"
@@ -125,12 +149,23 @@ mkdir -p "$PILOT_LOG_ROOT"
 echo "PKU pilot output: $PILOT_ROOT"
 echo "PKU pilot logs: $PILOT_LOG_ROOT"
 echo "Seeds: ${SEEDS[*]}; methods: ${METHODS[*]}"
+if [[ "$CORRUPTION_CONFIG" != clean ]]; then
+  echo "Training corruption: $CORRUPTION_CONFIG ($MISMATCH_MODE)"
+fi
 
 for seed in "${SEEDS[@]}"; do
   seed_dir="$PILOT_ROOT/seed$seed"
   seed_log_dir="$PILOT_LOG_ROOT/seed$seed"
   mkdir -p "$seed_dir" "$seed_log_dir"
   for method in "${METHODS[@]}"; do
+    variant="$method"
+    method_frequency="$FLIP_FREQUENCY"
+    case "$method" in
+      self_inf_flip_freq[12])
+        variant=self_inf_flip
+        method_frequency="${method##*freq}"
+        ;;
+    esac
     run_dir="$seed_dir/$method"
     train_log="$seed_log_dir/$method.train.log"
     eval_log="$seed_log_dir/$method.eval.log"
@@ -143,7 +178,8 @@ for seed in "${SEEDS[@]}"; do
       train_required=0
     fi
     "$PYTHON_BIN" - "$run_dir" "$method" "$SFT_MODEL_PATH" "$seed" "$TRAIN_PAIRS" "$MAX_STEPS" \
-      "$MAX_FLIP_PERCENT" "$FLIP_FREQUENCY" "$SMOKE" "$train_required" <<'PY'
+      "$MAX_FLIP_PERCENT" "$method_frequency" "$SMOKE" "$train_required" \
+      "$variant" "$CORRUPTION_CONFIG" "$MISMATCH_MODE" <<'PY'
 from pathlib import Path
 import sys
 
@@ -154,6 +190,7 @@ from examples.dpo import qwen2p5_dpo_experiments
 (
     run_dir, method, sft_path, seed, train_pairs, max_steps,
     max_flip_percent, flip_frequency, smoke, train_required,
+    variant, corruption_config, mismatch_mode,
 ) = sys.argv[1:]
 seed, train_pairs, max_steps = int(seed), int(train_pairs), int(max_steps)
 try:
@@ -165,9 +202,17 @@ if not 0 <= max_flip_percent <= 100:
 smoke = smoke == "1"
 config_path = Path(run_dir) / "launch.yaml"
 adapter = "tunix.examples.data.pku_saferlhf_dpo:create_dataset"
+corruption_args = ""
+if corruption_config != "clean":
+    spec = qwen2p5_dpo_experiments._get_corruption_spec(corruption_config)
+    corruption_args = (
+        f", mismatch_scope={spec['mismatch_scope']!r}, "
+        f"mismatch_ratio={spec['mismatch_ratio']}, "
+        f"mismatch_seed={spec['mismatch_seed']}, mismatch_mode={mismatch_mode!r}"
+    )
 train_data_module = (
     f"{adapter}(split='train', subset='train', "
-    f"limit={train_pairs}, shuffle_seed={seed})"
+    f"limit={train_pairs}, shuffle_seed={seed}{corruption_args})"
 )
 if train_required == "0":
     cfg = OmegaConf.load(config_path)
@@ -188,8 +233,8 @@ qwen2p5_dpo_experiments.prepare_launch_config(
     run_root=run_dir,
     run_name=f"{Path(run_dir).parents[1].name}_seed{seed}_{method}",
     profile="full",
-    variant=method,
-    corruption_config="clean",
+    variant=variant,
+    corruption_config=corruption_config,
     sft_model_path=sft_path,
     curation_threshold="",
     curation_keep_ratio="",
@@ -232,7 +277,7 @@ PY
         echo "Smoke expected $MAX_STEPS updates and logged $completed_steps. See $train_log." >&2
         exit 1
       fi
-      echo "Clean PKU smoke completed $completed_steps updates. Log: $train_log"
+      echo "PKU smoke ($CORRUPTION_CONFIG) completed $completed_steps updates. Log: $train_log"
       continue
     fi
     if [[ -f "$run_dir/safety_metrics.json" ]]; then
