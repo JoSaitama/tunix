@@ -326,6 +326,101 @@ class BenchmarkTest(unittest.TestCase):
         b._open_measurement_window.assert_not_called()
         self.assertFalse((self.path / "selector_hbm.json").exists())
 
+    def test_gradalign_segmented_runs_all_rollouts_but_traces_three_chunks(self):
+        b = bench.Benchmark("gradalign", "memory", "off", 0, 1, self.path, "v5p-16")
+        b.segmented_xprof_python = Path(sys.executable)
+        b.actor = SimpleNamespace(train_steps=0)
+        b.metadata, b.learner_entry = {}, time.perf_counter()
+        b._optimizer_steps = Mock(return_value=0)
+        b._drain, b._memory_snapshot = Mock(), Mock()
+        b._start_trace = Mock(side_effect=lambda *_: setattr(b, "trace_active", True))
+        b._stop_trace = Mock(side_effect=lambda: setattr(b, "trace_active", False))
+        b._convert_xprof_trace = Mock(return_value={"devices": {str(i): {} for i in range(4)}})
+        b.jax = SimpleNamespace(profiler=SimpleNamespace(TraceAnnotation=lambda *a, **k: nullcontext()))
+        b.before_iteration()
+        b._start_trace.assert_not_called()
+        with b.selector_round():
+            for candidate, total in ((False, 8), (True, 40)):
+                for index in range(1, total + 1):
+                    prompts = 2 if not candidate and index == 8 else 4
+                    with b.gradalign_selector_chunk(index=index, total=total, prompt_count=prompts,
+                                                    num_rollouts=4, candidate=candidate):
+                        b.note_selector_rollout(prompts * 4, prompts * 8, candidate=candidate)
+            self.assertFalse(b.trace_active)
+        self.assertEqual(b.selector_completions, 760)
+        self.assertEqual([s["label"] for s in b.hbm_segments], list(bench.GRADALIGN_HBM_SEGMENTS))
+        self.assertEqual(b._start_trace.call_count, 4)
+        b._start_trace.assert_called_with()
+        self.assertTrue(b.trace_active)
+
+    def test_segmented_ds_report_refuses_missing_candidate_windows(self):
+        metadata = {"segmented_hbm": True, "commit_sha": "test",
+                    "topology": {"devices": [{"id": i} for i in range(4)]}}
+        summary = {"method": "grpo-ds", "mode": "memory", "warmup_iterations": 1,
+                   "measurement": {"iterations": 1, "candidate_batches": 2}}
+        segments = [{"label": label, "iteration": 2, "devices": {str(i): {} for i in range(4)},
+                     "max_device_peak_hbm_gib": peak}
+                    for peak, label in enumerate(
+                        ("candidate-01", "candidate-02", "batch-assembly", "actor-update"), 1)]
+        with patch.object(bench, "check_run", return_value=(summary, metadata, [])):
+            bench._dump(self.path / "hbm_segments.json", segments)
+            self.assertEqual(bench.segmented_hbm_peaks(self.path)["max_device_peak_hbm_gib"], 4)
+            bench._dump(self.path / "hbm_segments.json", segments[1:])
+            with self.assertRaisesRegex(ValueError, "Missing, duplicate or out-of-order"):
+                bench.segmented_hbm_peaks(self.path)
+
+    def test_segmented_ds_actor_trace_only_wraps_measured_update(self):
+        b = bench.Benchmark("grpo-ds", "memory", "off", 1, 1, self.path, "v5p-16")
+        b.segmented_xprof_python = Path(sys.executable)
+        with patch.object(b, "hbm_segment", return_value=nullcontext()) as capture:
+            b.active_iteration = 1
+            with b.phase("actor_update"):
+                capture.assert_not_called()
+            b.active_iteration = 2
+            with b.phase("actor_update"):
+                capture.assert_called_once_with("actor-update")
+            self.assertIsNone(getattr(b.thread, "phase", None))
+
+    def test_segmented_gradalign_report_adds_real_selected_training_trace(self):
+        ids = {str(i): {} for i in range(4)}
+        metadata = {"segmented_hbm": True, "commit_sha": "test",
+                    "topology": {"devices": [{"id": i} for i in range(4)]}}
+        summary = {"method": "gradalign", "mode": "memory", "warmup_iterations": 0,
+                   "measurement": {"iterations": 1}}
+        bench._dump(self.path / "hbm_segments.json", [
+            {"label": label, "iteration": 1, "devices": ids,
+             "max_device_peak_hbm_gib": 11, "completions": count}
+            for label, count in zip(bench.GRADALIGN_HBM_SEGMENTS, (16, 8, 16))
+        ])
+        with (
+            patch.object(bench, "check_run", return_value=(summary, metadata, [])),
+            patch.object(bench, "xprof_window", return_value={"devices": ids, "max_device_peak_hbm_gib": 12}) as xprof,
+        ):
+            report = bench.segmented_hbm_peaks(self.path)
+        xprof.assert_called_once_with(self.path / "trace", set(ids),
+                                      inventory_path=self.path / "training_xplane_inventory.json")
+        self.assertEqual(report["segments"][-1]["label"], "train-first")
+        self.assertEqual(report["max_device_peak_hbm_gib"], 12)
+
+    def test_host_only_xplane_is_identified_before_xprof_conversion(self):
+        from my_example.rebuttal.xplane_inventory import inspect_xplane
+
+        def wire(field, value):
+            return bytes([field * 8 + 2, len(value)]) + value
+
+        trace = self.path / "plugins/profile/session/test.xplane.pb"
+        trace.parent.mkdir(parents=True)
+        host = wire(1, wire(2, b"/host:CPU") + wire(3, wire(4, b"")))
+        trace.write_bytes(host + wire(3, b"warning"))
+        inventory = self.path / "inventory.json"
+        with self.assertRaisesRegex(ValueError, "No TPU device events"):
+            bench.xprof_window(self.path, range(4), inventory_path=inventory)
+        report = json.loads(inventory.read_text())
+        self.assertEqual(report["planes"], [{"name": "/host:CPU", "lines": 1, "events": 1}])
+        self.assertEqual(report["warnings"], ["warning"])
+        trace.write_bytes(host + wire(1, wire(2, b"/device:TPU:0") + wire(3, wire(4, b""))))
+        self.assertTrue(inspect_xplane(trace)["has_tpu_device_events"])
+
     def test_disk_guard_rejects_small_volume(self):
         with patch.object(bench.shutil, "disk_usage", return_value=SimpleNamespace(free=5 * 2**30)):
             with self.assertRaisesRegex(ValueError, "need 6 GiB"):

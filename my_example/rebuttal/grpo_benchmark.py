@@ -42,6 +42,8 @@ LEARNALIGN_SELECTOR_COMPLETIONS = LEARNALIGN_SELECTOR_CHUNKS * 4 * 8
 LEARNALIGN_HBM_SAMPLE_CHUNKS = (1, (LEARNALIGN_SELECTOR_CHUNKS + 1) // 2, LEARNALIGN_SELECTOR_CHUNKS)
 LEARNALIGN_XPROF_ENV = "TUNIX_BENCH_LEARNALIGN_XPROF_PYTHON"
 DS_XPROF_ENV = "TUNIX_BENCH_DS_XPROF_PYTHON"
+SEGMENTED_XPROF_ENV = "TUNIX_BENCH_SEGMENTED_XPROF_PYTHON"
+GRADALIGN_HBM_SEGMENTS = ("reference-first", "reference-tail", "candidate-first")
 FIXED_FILTERS = {"random10": "random", "reward10": "reward"}
 ALIGNMENT_METHODS = {"gradalign", "learnalign"}
 VALUATION_ACTORS = {"dtv", "dtv-loo", "norm-top50", "pcgrad", "cagrad", *FIXED_FILTERS}
@@ -177,6 +179,8 @@ class Benchmark:
         self.trace_active = False
         self.memory = {}
         self.ds_xprof_python = None
+        self.segmented_xprof_python = None
+        self.hbm_segments = []
         self.learnalign_xprof_python = None
         self.learnalign_hbm_samples = []
         self.learnalign_selection = None
@@ -208,6 +212,21 @@ class Benchmark:
             _require(benchmark.learnalign_xprof_python.is_file()
                      and os.access(benchmark.learnalign_xprof_python, os.X_OK),
                      "LearnAlign selector capture requires an executable XProf Python")
+        if interpreter := os.environ.get(SEGMENTED_XPROF_ENV):
+            _require(benchmark.mode == "memory" and (
+                (benchmark.method, benchmark.warmup, benchmark.steps) in {
+                    ("grpo-ds", 1, 1), ("gradalign", 0, 1),
+                    ("learnalign", 1, 2), ("learnalign", LEARNALIGN_PRE_UPDATES, 2),
+                }
+            ), "Unsupported segmented HBM method or window")
+            _require(benchmark.ds_xprof_python is None and benchmark.learnalign_xprof_python is None,
+                     "Do not combine legacy and segmented HBM profiling options")
+            benchmark.segmented_xprof_python = Path(interpreter).absolute()
+            _require(benchmark.segmented_xprof_python.is_file()
+                     and os.access(benchmark.segmented_xprof_python, os.X_OK),
+                     "Segmented HBM capture requires an executable XProf Python")
+            if benchmark.memory_phase == "postselect":
+                benchmark.learnalign_xprof_python = benchmark.segmented_xprof_python
         return benchmark
 
     def check_config(self, cfg, max_steps):
@@ -389,10 +408,15 @@ class Benchmark:
 
     def _convert_xprof_trace(self, interpreter, trace_root, log_path):
         # Keep XProf's dependencies out of the training interpreter.
+        command = [
+            str(interpreter), "-m", "my_example.rebuttal.grpo_benchmark", "xprof-window",
+            str(trace_root), *[str(d.id) for d in self.devices],
+        ]
+        if self.segmented_xprof_python is not None:
+            command.extend(("--inventory", str(log_path.with_name("xplane_inventory.json"))))
         with log_path.open("w", encoding="utf-8") as log:
             result = subprocess.run(
-                [str(interpreter), "-m", "my_example.rebuttal.grpo_benchmark", "xprof-window",
-                 str(trace_root), *[str(d.id) for d in self.devices]],
+                command,
                 check=True, timeout=300, stdout=subprocess.PIPE, stderr=log, text=True,
                 env={**os.environ, "JAX_PLATFORMS": "cpu"},
             )
@@ -430,7 +454,8 @@ class Benchmark:
     def _open_measurement_window(self):
         if self.mode == "memory":
             self.memory["window_start"] = self._memory_snapshot()
-            self._start_trace()
+            if not (self.segmented_xprof_python is not None and self.method in {"grpo-ds", "gradalign"}):
+                self._start_trace()
         self.previous_boundary = self.window_start = time.perf_counter()
         setup = self.window_start - self.warmup_end
         if self.learnalign_selection is not None:
@@ -498,6 +523,69 @@ class Benchmark:
             self.selector_seconds = 0.0
             print("LearnAlign benchmark: full selector complete; starting post-select window.", flush=True)
             self._open_measurement_window()
+        elif self.segmented_xprof_python is not None:
+            _require(self.active_iteration == 1
+                     and tuple(s["label"] for s in self.hbm_segments) == GRADALIGN_HBM_SEGMENTS
+                     and self.selector_completions == 760,
+                     "Incomplete GradAlign reference/candidate HBM coverage")
+            self._drain()
+            self.memory["window_start"] = self._memory_snapshot()
+            self._start_trace()
+
+    @contextmanager
+    def _trace_hbm_segment(self, root, label):
+        _require(not self.trace_active, "HBM segment traces must not overlap")
+        root.mkdir(parents=True)
+        self._drain()
+        print(f"HBM capture: {label} -> {root}", flush=True)
+        self._start_trace(root / "trace")
+        try:
+            with self.phase(label):
+                yield
+                self._drain()
+        finally:
+            self._stop_trace()
+
+    def _read_hbm_segment(self, root, label, interpreter, **details):
+        log_path = root / "xprof.log"
+        try:
+            payload = self._convert_xprof_trace(interpreter, root / "trace", log_path)
+        except (subprocess.SubprocessError, OSError) as exc:
+            raise RuntimeError(f"HBM segment {label} failed four-device extraction. See {log_path}") from exc
+        result = {**payload, "label": label, "iteration": self.active_iteration, **details}
+        _dump(root / "xprof_observed.json", result)
+        print(f"HBM segment {label} PASS", flush=True)
+        return result
+
+    @contextmanager
+    def hbm_segment(self, label, **details):
+        _require(self.segmented_xprof_python is not None, "Expected opt-in segmented HBM")
+        _require(not any(s["label"] == label for s in self.hbm_segments), f"Duplicate HBM segment {label}")
+        root = self.out / "hbm_segments" / label
+        with self._trace_hbm_segment(root, label):
+            yield
+        self.hbm_segments.append(
+            self._read_hbm_segment(root, label, self.segmented_xprof_python, **details)
+        )
+        _dump(self.out / "hbm_segments.json", self.hbm_segments)
+
+    @contextmanager
+    def gradalign_selector_chunk(self, *, index, total, prompt_count, num_rollouts, candidate):
+        _require(self.active_iteration == 1 and num_rollouts == 4
+                 and total == (40 if candidate else 8)
+                 and prompt_count == (2 if not candidate and index == 8 else 4),
+                 "GradAlign HBM requires the unmodified first-round selector budget")
+        labels = {(False, 1): "reference-first", (False, 8): "reference-tail", (True, 1): "candidate-first"}
+        label = labels.get((candidate, index))
+        if label is None:
+            yield
+            return
+        start = self.selector_completions
+        with self.hbm_segment(label, chunk_index=index, chunk_count=total,
+                              prompts=prompt_count, completions=prompt_count * num_rollouts):
+            yield
+            _require(self.selector_completions - start == prompt_count * num_rollouts,
+                     f"GradAlign segment {label}: incomplete selector rollout")
 
     @contextmanager
     def learnalign_selector_chunk(self, *, index, total, prompt_count, num_rollouts):
@@ -510,37 +598,21 @@ class Benchmark:
         if index not in LEARNALIGN_HBM_SAMPLE_CHUNKS:
             yield
             return
-        _require(not self.trace_active, "LearnAlign selector traces must not overlap")
         root = self.out / "selector_traces" / f"chunk_{index:04d}"
-        root.mkdir(parents=True)
-        trace_root = root / "trace"
-        self._drain()
         start_completions = self.selector_completions
         start_tokens = self.selector_candidate_tokens
-        print(f"LearnAlign HBM selector capture: chunk {index}/{total}", flush=True)
-        self._start_trace(trace_root)
-        try:
-            with self.phase(f"learnalign_selector_chunk_{index}"):
-                yield
-                self._drain()
-        finally:
-            self._stop_trace()
+        label = f"learnalign_selector_chunk_{index}"
+        with self._trace_hbm_segment(root, label):
+            yield
         _require(self.selector_completions - start_completions == prompt_count * num_rollouts
                  and self.selector_candidate_tokens > start_tokens,
                  f"LearnAlign chunk {index}: incomplete selector rollout")
-        log_path = root / "xprof.log"
-        try:
-            payload = self._convert_xprof_trace(self.learnalign_xprof_python, trace_root, log_path)
-        except (subprocess.SubprocessError, OSError) as exc:
-            raise RuntimeError(f"LearnAlign HBM chunk {index} failed four-device extraction. See {log_path}") from exc
-        sample = {
-            **payload, "chunk_index": index, "chunk_count": total, "prompts": prompt_count,
-            "rollouts_per_prompt": num_rollouts, "completions": prompt_count * num_rollouts,
-            "generated_tokens": self.selector_candidate_tokens - start_tokens,
-        }
-        _dump(root / "xprof_observed.json", sample)
+        sample = self._read_hbm_segment(
+            root, label, self.learnalign_xprof_python, chunk_index=index, chunk_count=total,
+            prompts=prompt_count, rollouts_per_prompt=num_rollouts, completions=prompt_count * num_rollouts,
+            generated_tokens=self.selector_candidate_tokens - start_tokens,
+        )
         self.learnalign_hbm_samples.append(sample)
-        print(f"LearnAlign HBM chunk {index} PASS", flush=True)
 
     def _write_learnalign_selector_hbm(self):
         samples = self.learnalign_hbm_samples
@@ -574,7 +646,10 @@ class Benchmark:
         prior = getattr(self.thread, "phase", None)
         self.thread.phase = label
         try:
-            if self.trace_active:
+            if label == "actor_update" and self.ds_hbm_active():
+                with self.hbm_segment("actor-update"):
+                    yield
+            elif self.trace_active:
                 with self.jax.profiler.TraceAnnotation(
                     f"benchmark/{label}", iteration=self.active_iteration
                 ):
@@ -583,6 +658,10 @@ class Benchmark:
                 yield
         finally:
             self.thread.phase = prior
+
+    def ds_hbm_active(self):
+        return (self.segmented_xprof_python is not None and self.method == "grpo-ds"
+                and self.active_iteration == self.warmup + 1)
 
     def after_iteration(self):
         step = self.active_iteration
@@ -727,6 +806,8 @@ class Benchmark:
                 else "optimizer and batch GRPO gradient"
             )},
         }
+        if self.segmented_xprof_python is not None:
+            self.metadata["segmented_hbm"] = True
         self.metadata["main_setup_seconds"] = time.perf_counter() - self.main_start
         self.metadata["model_tokenizer_cluster_load_seconds"] = load_seconds
         self.metadata["launcher_to_main_seconds"] = (
@@ -788,7 +869,9 @@ class Benchmark:
         _dump(self.out / "compiler_events.json", self.compiler_events)
         _dump(self.out / "metadata.json", {**self.metadata, "batching": self.batching})
         if self.mode == "memory":
-            memory = memory_report(self.memory, list(self.out.glob("trace/**/*.xplane.pb")))
+            traces = (self.out.rglob("*.xplane.pb") if self.segmented_xprof_python is not None
+                      else self.out.glob("trace/**/*.xplane.pb"))
+            memory = memory_report(self.memory, list(traces))
             if self.memory_phase is not None:
                 memory["memory_phase"] = self.memory_phase
             _dump(self.out / "memory.json", memory)
@@ -965,7 +1048,8 @@ def check_run(path):
         memory = _load(path / "memory.json")
         _require(memory.get("memory_phase") == summary.get("memory_phase"), f"{path}: memory phase mismatch")
         _require(len(memory["devices"]) == 4, f"{path}: incomplete device inventory")
-        _require(any((path / "trace").rglob("*.xplane.pb")), f"{path}: no XPlane trace")
+        trace_root = path / ("hbm_segments" if metadata.get("segmented_hbm") and method == "grpo-ds" else "trace")
+        _require(any(trace_root.rglob("*.xplane.pb")), f"{path}: no XPlane trace")
         if metadata.get("learnalign_selector_hbm") is not None:
             selector = _load(path / "selector_hbm.json")
             samples = selector["samples"]
@@ -1008,10 +1092,18 @@ def check_comparable(runs):
             by_stream[key] = meta, prompts
 
 
-def xprof_window(trace_root, device_ids):
+def xprof_window(trace_root, device_ids, *, inventory_path=None):
     """Check all four allocator peaks in one trace (preflight or training)."""
     traces = sorted(Path(trace_root).glob("plugins/profile/*/*.xplane.pb"))
     _require(len(traces) == 1, "Expected exactly one local-worker XPlane file")
+    if inventory_path is not None:
+        from my_example.rebuttal.xplane_inventory import inspect_xplane
+
+        inventory = inspect_xplane(traces[0])
+        _dump(Path(inventory_path), inventory)
+        _require(not inventory["errors"], f"XPlane collector reported errors; see {inventory_path}")
+        _require(inventory["has_tpu_device_events"],
+                 f"No TPU device events in XPlane; see {inventory_path}")
     from xprof.convert import raw_to_tool_data
 
     raw, _ = raw_to_tool_data.xspace_to_tool_data(
@@ -1044,15 +1136,66 @@ def xprof_window(trace_root, device_ids):
     }
 
 
-def observed_xprof_peaks(run):
+def observed_xprof_peaks(run, *, inventory_path=None):
     """Extract XProf's window peaks without certifying resident-buffer coverage."""
     summary, metadata, _ = check_run(run)
     _require(summary["mode"] == "memory", "Expected a memory run")
     return {
-        **xprof_window(Path(run) / "trace", [d["id"] for d in metadata["topology"]["devices"]]),
+        **xprof_window(Path(run) / "trace", [d["id"] for d in metadata["topology"]["devices"]],
+                       inventory_path=inventory_path),
         "method": summary["method"], "source_run": str(Path(run).resolve()),
         "commit_sha": metadata["commit_sha"], "memory_phase": summary.get("memory_phase"),
         "iterations_inclusive": [summary["warmup_iterations"] + 1, summary["actor_optimizer_end"]],
+    }
+
+
+def segmented_hbm_peaks(run):
+    """Publish a sampled maximum only when all planned windows are present."""
+    path = Path(run)
+    summary, metadata, _ = check_run(path)
+    _require(metadata.get("segmented_hbm") is True and summary["mode"] == "memory",
+             "Expected an opt-in segmented HBM run")
+    method = summary["method"]
+    warmup, steps = summary["warmup_iterations"], summary["measurement"]["iterations"]
+    ids = {str(d["id"]) for d in metadata["topology"]["devices"]}
+    if method == "grpo-ds":
+        _require((warmup, steps) == (1, 1), "Expected DS update 2 only")
+        count = summary["measurement"]["candidate_batches"]
+        segments = _load(path / "hbm_segments.json")
+        expected = [f"candidate-{i:02d}" for i in range(1, count + 1)] + ["batch-assembly", "actor-update"]
+        _require(all(s["iteration"] == 2 for s in segments), "Wrong DS segment iteration")
+    elif method == "gradalign":
+        _require((warmup, steps) == (0, 1), "Expected GradAlign update 1 only")
+        segments = _load(path / "hbm_segments.json")
+        expected = [*GRADALIGN_HBM_SEGMENTS, "train-first"]
+        _require(all(s["iteration"] == 1 for s in segments)
+                 and [s["completions"] for s in segments] == [16, 8, 16],
+                 "Wrong GradAlign selector sample budget")
+    else:
+        _require(method == "learnalign", "Unsupported segmented HBM report")
+        if summary["memory_phase"] == "postselect":
+            segments = _load(path / "selector_hbm.json")["samples"]
+            expected = [f"learnalign_selector_chunk_{i}" for i in LEARNALIGN_HBM_SAMPLE_CHUNKS]
+        else:
+            segments, expected = [], []
+        expected.append(summary["memory_phase"])
+    labels = expected if method == "grpo-ds" else expected[:-1]
+    _require([s["label"] for s in segments] == labels, "Missing, duplicate or out-of-order HBM windows")
+    if method != "grpo-ds":
+        peak = xprof_window(path / "trace", ids, inventory_path=path / "training_xplane_inventory.json")
+        segment = {**peak, "label": expected[-1], "iterations_inclusive": [warmup + 1, warmup + steps]}
+        _dump(path / "training_hbm_observed.json", segment)
+        segments.append(segment)
+    _require(len(ids) == 4 and all(set(s["devices"]) == ids for s in segments),
+             "Missing four-device HBM coverage")
+    return {
+        "method": method, "memory_phase": summary.get("memory_phase"),
+        "commit_sha": metadata["commit_sha"], "source_run": str(path.resolve()),
+        "iterations_inclusive": [warmup + 1, warmup + steps],
+        "segments": segments, "max_device_peak_hbm_gib": max(s["max_device_peak_hbm_gib"] for s in segments),
+        "resident_allocations_verified": False,
+        "qualification": "Maximum observed stack + heap across listed windows only; "
+                         "not an exact continuous or full-run peak. Resident buffers not independently verified.",
     }
 
 
@@ -1100,6 +1243,9 @@ def main():
     window = sub.add_parser("xprof-window", help="Validate a standalone four-device XProf trace")
     window.add_argument("trace_root", type=Path)
     window.add_argument("device_ids", nargs=4)
+    window.add_argument("--inventory", type=Path)
+    segmented = sub.add_parser("xprof-segmented", help="Validate and aggregate all segmented HBM windows")
+    segmented.add_argument("run", type=Path)
     disk = sub.add_parser("disk-check", help="Refuse capture with inadequate free space")
     disk.add_argument("path", type=Path)
     disk.add_argument("--min-free-gib", type=float, default=6)
@@ -1111,7 +1257,11 @@ def main():
         print(json.dumps(observed_xprof_peaks(args.run), indent=2, allow_nan=False))
         return
     if args.command == "xprof-window":
-        print(json.dumps(xprof_window(args.trace_root, args.device_ids), indent=2, allow_nan=False))
+        print(json.dumps(xprof_window(args.trace_root, args.device_ids, inventory_path=args.inventory),
+                         indent=2, allow_nan=False))
+        return
+    if args.command == "xprof-segmented":
+        print(json.dumps(segmented_hbm_peaks(args.run), indent=2, allow_nan=False))
         return
     if args.command == "disk-check":
         print(f"Free space before capture: {check_disk(args.path, args.min_free_gib):.2f} GiB")

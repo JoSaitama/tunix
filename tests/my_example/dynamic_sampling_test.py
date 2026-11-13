@@ -13,6 +13,7 @@ import sys
 import tempfile
 from types import ModuleType, SimpleNamespace
 import unittest
+from contextlib import contextmanager
 from unittest import mock
 
 import numpy as np
@@ -171,6 +172,7 @@ class PipelineTest(unittest.TestCase):
     def setUp(self):
         jax = ModuleType("jax")
         jax.tree = SimpleNamespace(map=tree_map)
+        jax.block_until_ready = mock.Mock(side_effect=lambda value: value)
         jnp = ModuleType("jax.numpy")
         jnp.pad, jnp.concatenate = np.pad, np.concatenate
         tunix, rl, cl = ModuleType("tunix"), ModuleType("tunix.rl"), ModuleType("tunix.rl.rl_cluster")
@@ -217,6 +219,45 @@ class PipelineTest(unittest.TestCase):
         summary=json.loads((Path(self.tmp.name)/"ds_summary.json").read_text())
         self.assertEqual(summary["generated_groups"],8)
         self.assertEqual(summary["selected_groups"],4)
+
+    def test_segmented_hbm_includes_rejected_batch_and_preserves_selection(self):
+        learner = self.learner()
+        labels = []
+
+        @contextmanager
+        def segment(label, **_):
+            labels.append(label)
+            yield
+
+        learner.rl_cluster._training_benchmark = SimpleNamespace(
+            segmented_xprof_python="test", ds_hbm_active=lambda: True,
+            hbm_segment=segment, note_ds_candidate=mock.Mock(),
+        )
+        first = batch(0, [[0] * 4] * 4)
+        result = learner._fill_training_batch(iter([first, batch(4)]), 4)
+        self.assertEqual(labels, ["candidate-01", "candidate-02", "batch-assembly"])
+        np.testing.assert_array_equal(result.prompt_ids[:, 0], np.repeat(np.arange(4, 8), 4))
+        self.assertEqual(sys.modules["jax"].block_until_ready.call_count, 3)
+
+    def test_segment_failure_never_queues_a_partial_update(self):
+        learner = self.learner()
+
+        @contextmanager
+        def segment(label, **_):
+            yield
+            raise RuntimeError(f"No TPU data: {label}")
+
+        learner.rl_cluster._training_benchmark = SimpleNamespace(
+            segmented_xprof_python="test", ds_hbm_active=lambda: True,
+            hbm_segment=segment, note_ds_candidate=mock.Mock(),
+        )
+        q = queue.Queue()
+        with self.assertRaisesRegex(RuntimeError, "No TPU data: candidate-01"):
+            learner._prepare_data(iter([batch(0), batch(4)]), 1, 4, 1, 4, q, mode="train")
+        self.assertIsNone(q.get_nowait())
+        self.assertTrue(q.empty())
+        self.assertEqual(len(learner.calls), 1)
+        self.assertEqual(learner._ds_updates, 0)
 
     def test_hbm_controlled_fixture_fills_in_exactly_two_rounds(self):
         from my_example.test_ds_hbm import controlled_hbm_rewards

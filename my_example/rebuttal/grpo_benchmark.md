@@ -249,7 +249,40 @@ substitute the probe, a snapshot, or an allocator lifetime peak.
 Even a successful extraction reports the observed window peak, not an
 independent certification of resident-buffer coverage or a whole-run peak.
 
-### GradAlign and LearnAlign phase HBM
+### Segmented HBM for GRPO+DS, GradAlign and LearnAlign
+
+If a continuous trace has no TPU events, use the opt-in segmented path.
+Run one phase at a time on the idle four-chip worker, with the training
+virtualenv active, a fresh job directory and a separate XProf interpreter:
+
+```bash
+bash my_example/rebuttal/run_alignment_hbm.sh "$PHASE" "$JOB" "$XPROF_PY" --segmented
+```
+
+| Phase | Capture windows |
+| --- | --- |
+| `grpo-ds` | Update 2: every actual refill batch including rejected candidates, then batch assembly and actor update. Update 1 warms up without tracing. |
+| `gradalign` | First-round reference chunks 1 and 8 (4 and 2 prompts), candidate chunk 1, then the first selected training batch through the actor update. The full selector still runs. |
+| `learnalign-prelearn` | Training updates 2–3, before selection. |
+| `learnalign-postselect` | Chunks 1, 346, and 691 of the unmodified full selector after update 10, then training updates 11–12 in the same run. |
+
+Every captured window must have TPU device events in the raw XPlane and
+valid XProf window stack-plus-heap peaks for all four devices. No toy
+preflight is used as evidence. Per-segment XPlane inventory, converter logs,
+and successful extracts are retained under `run/hbm_segments` (DS/GradAlign)
+or `run/selector_traces` (LearnAlign). The final non-DS training window is
+under `run/trace` with its inventory in `run/training_xplane_inventory.json`.
+An invalid window stops its job. Only an outer `exit_code` of 0 and a final
+`xprof_observed.json` mean that every planned window passed. Independent
+phases may be run even if another fails.
+
+Use the per-window peaks in `segments` and the overall maximum of those
+windows. They are sampled observations, not full-training peaks or an
+independent certification of resident-buffer coverage. Do not use profiled
+runs for timing. Traces are kept and multiple windows may require substantial
+space; the default 6 GiB check before a trace is not a size guarantee.
+
+### Original alignment HBM modes
 
 Run each phase separately on the same idle four-chip worker with the training
 virtualenv active. Pass a fresh job directory under an existing parent and

@@ -19,6 +19,7 @@ import os
 from pathlib import Path
 import sys
 import time
+from contextlib import nullcontext
 
 import numpy as np
 
@@ -174,40 +175,49 @@ class DynamicSamplingMixin:
             repeated["trajectory_ids"] = [
                 f"ds_{self._ds_candidate_batches}_{i}_{r}"
                 for i in range(target) for r in range(group_size)]
-            self._ds_capture, self._ds_rewards = True, None
-            try:
-                example = super()._generate_and_compute_advantage(repeated, cluster_lib.Mode.TRAIN)
-                if self._ds_rewards is None:
-                    raise RuntimeError("DS did not capture observed training rewards")
-                rewards, prompts = self._ds_rewards
-            finally:
-                self._ds_capture, self._ds_rewards = False, None
-            if rewards.shape != (target * group_size,):
-                raise ValueError("DS rewards do not match complete candidate groups")
-            if any(len(set(prompts[i*group_size:(i+1)*group_size])) != 1 for i in range(target)):
-                raise ValueError("DS received a group with different prompts")
-            if len(example.advantages) != len(rewards):
-                raise ValueError("DS prepared examples/rewards are misaligned")
-            grouped = rewards.reshape(target, group_size)
-            eligible = eligible_groups(grouped)
-            chosen = np.flatnonzero(eligible)[:target-kept]
-            if benchmark is not None:
-                benchmark.note_ds_candidate(prompts[::group_size], int(eligible.sum()), len(chosen))
-            self._ds_rounds += 1
-            self._ds_generated += target
-            self._ds_nonconstant += int(eligible.sum())
-            self._ds_selected += len(chosen)
-            self._record_round(grouped, eligible, chosen, prompts, generation_batch)
-            if len(chosen):
-                flat = (chosen[:, None] * group_size + np.arange(group_size)).reshape(-1)
-                selected.append(jax.tree.map(lambda x: x[flat], example))
-                kept += len(chosen)
-            if int(self.rl_cluster.actor_trainer.train_steps) != initial_actor_step:
-                raise RuntimeError("Actor changed while DS was refilling a batch")
-            # Drop references to rejected full batches before another generation.
-            del example
+            capture = (getattr(benchmark, "segmented_xprof_python", None) is not None
+                       and benchmark.ds_hbm_active())
+            with (benchmark.hbm_segment(f"candidate-{generation_batch:02d}", candidate_batch=generation_batch)
+                  if capture else nullcontext()):
+                self._ds_capture, self._ds_rewards = True, None
+                try:
+                    example = super()._generate_and_compute_advantage(repeated, cluster_lib.Mode.TRAIN)
+                    if self._ds_rewards is None:
+                        raise RuntimeError("DS did not capture observed training rewards")
+                    rewards, prompts = self._ds_rewards
+                finally:
+                    self._ds_capture, self._ds_rewards = False, None
+                if rewards.shape != (target * group_size,):
+                    raise ValueError("DS rewards do not match complete candidate groups")
+                if any(len(set(prompts[i*group_size:(i+1)*group_size])) != 1 for i in range(target)):
+                    raise ValueError("DS received a group with different prompts")
+                if len(example.advantages) != len(rewards):
+                    raise ValueError("DS prepared examples/rewards are misaligned")
+                grouped = rewards.reshape(target, group_size)
+                eligible = eligible_groups(grouped)
+                chosen = np.flatnonzero(eligible)[:target-kept]
+                if benchmark is not None:
+                    benchmark.note_ds_candidate(prompts[::group_size], int(eligible.sum()), len(chosen))
+                self._ds_rounds += 1
+                self._ds_generated += target
+                self._ds_nonconstant += int(eligible.sum())
+                self._ds_selected += len(chosen)
+                self._record_round(grouped, eligible, chosen, prompts, generation_batch)
+                if len(chosen):
+                    flat = (chosen[:, None] * group_size + np.arange(group_size)).reshape(-1)
+                    selected.append(jax.tree.map(lambda x: x[flat], example))
+                    kept += len(chosen)
+                if int(self.rl_cluster.actor_trainer.train_steps) != initial_actor_step:
+                    raise RuntimeError("Actor changed while DS was refilling a batch")
+                if capture:
+                    jax.block_until_ready((example, selected))
+                # Drop references to rejected full batches before another generation.
+                del example
             if kept == target:
-                combined = concatenate_examples(selected, self.rl_cluster.rollout.pad_id())
+                with (benchmark.hbm_segment("batch-assembly") if capture else nullcontext()):
+                    combined = concatenate_examples(selected, self.rl_cluster.rollout.pad_id())
+                    if capture:
+                        jax.block_until_ready(combined)
                 self._ds_updates += 1
                 self._write_summary(status="prepared", generation_batches=generation_batch)
                 if benchmark is None:

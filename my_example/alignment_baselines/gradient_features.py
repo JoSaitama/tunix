@@ -477,6 +477,11 @@ class PromptGradientEstimator:
         benchmark = getattr(self.rl_cluster, "_training_benchmark", None)
         capture_chunk = (benchmark.learnalign_selector_chunk
                          if getattr(benchmark, "learnalign_xprof_python", None) else None)
+        if self.method == "gradalign" and getattr(benchmark, "segmented_xprof_python", None) is not None:
+            # The caller uses False for reference and True for candidates,
+            # independently of whether mismatch is enabled.
+            def capture_chunk(**kwargs):
+                return benchmark.gradalign_selector_chunk(candidate=apply_mismatch, **kwargs)
         batch_size = self.selection_micro_batch_size
         chunk_count = (len(examples) + batch_size - 1) // batch_size
         for start in range(0, len(examples), batch_size):
