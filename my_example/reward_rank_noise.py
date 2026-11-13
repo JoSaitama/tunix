@@ -236,6 +236,8 @@ class RewardRankNoiseGRPOLearner(GRPOLearner):
         completions,
         mode: rl_cluster_lib.Mode,
         step: int | None = None,
+        *,
+        _filter_audit_capture=None,
         **kwargs,
     ) -> np.ndarray:
         clean_rewards = super()._compute_rewards(
@@ -254,5 +256,7 @@ class RewardRankNoiseGRPOLearner(GRPOLearner):
             num_generations=self.algo_config.num_generations,
             config=self.noise_config,
         )
+        if _filter_audit_capture is not None:
+            _filter_audit_capture((audit.selected_groups, audit.effective_groups))
         self._buffer_noise_metrics(audit, mode, step)
         return audit.corrupted_rewards

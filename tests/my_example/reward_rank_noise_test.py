@@ -141,22 +141,30 @@ class RewardRankNoiseTest(unittest.TestCase):
         prompts = ["prompt-a"] * 4
         completions = ["a", "b", "c", "d"]
 
+        capture = mock.Mock()
         with mock.patch.object(
             GRPOLearner, "_compute_rewards", return_value=clean
-        ):
+        ) as compute:
             train_rewards = learner._compute_rewards(
                 prompts,
                 completions,
                 mode=rl_cluster_lib.Mode.TRAIN,
+                _filter_audit_capture=capture,
             )
             eval_rewards = learner._compute_rewards(
                 prompts,
                 completions,
                 mode=rl_cluster_lib.Mode.EVAL,
+                _filter_audit_capture=capture,
             )
 
         np.testing.assert_allclose(train_rewards, [-1.0, 2.0, 0.0, 4.0])
         np.testing.assert_allclose(eval_rewards, clean)
+        capture.assert_called_once()
+        selected, effective = capture.call_args.args[0]
+        np.testing.assert_array_equal(selected, [True])
+        np.testing.assert_array_equal(effective, [True])
+        self.assertTrue(all("_filter_audit_capture" not in call.kwargs for call in compute.call_args_list))
         self.assertTrue(learner.rl_cluster.buffered)
 
 

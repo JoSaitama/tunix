@@ -39,6 +39,7 @@ MetricFn = rl_learner.MetricFn
 @flax.struct.dataclass(frozen=True)
 class TrainExample(common.TrainExample):
   filter_random_values: jax.Array | None = None
+  filter_audit_metadata: jax.Array | None = None
 
 
 @dataclasses.dataclass(slots=True, kw_only=True)
@@ -348,11 +349,16 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
 
     with phase("reward_advantage"), self.rl_cluster.perf.span("advantage_computation"):
       # Compute rewards and advantages
+      audit = getattr(self.rl_cluster, "_grpo_filter_audit", None)
+      noise_flags = []
+      reward_kwargs = {k: v for k, v in training_input.items() if k != "prompts"}
+      if audit is not None and audit.fraction and mode == rl_cluster_lib.Mode.TRAIN:
+        reward_kwargs["_filter_audit_capture"] = noise_flags.append
       rewards = self._compute_rewards(
           prompts=training_input["prompts"],
           completions=completion_text,
           mode=mode,
-          **{k: v for k, v in training_input.items() if k != "prompts"},
+          **reward_kwargs,
       )
       advantage_estimator = function_registry.get_advantage_estimator(
           self.algo_config.advantage_estimator
@@ -391,6 +397,11 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
         )
         self.rl_cluster.buffer_metrics(user_defined_metric, mode=mode)
 
+    audit_metadata = None
+    if audit is not None and mode == rl_cluster_lib.Mode.TRAIN:
+      audit_metadata = jax.device_put(
+          audit.encode_rollouts(training_input["prompts"], noise_flags)
+      )
     return TrainExample(
         prompt_ids=prompt_ids,
         prompt_mask=prompt_mask,
@@ -402,6 +413,7 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
         filter_random_values=self._fixed_filter_random_values(
             len(advantages)
         ),
+        filter_audit_metadata=audit_metadata,
     )
 
   def _fixed_filter_random_values(self, batch_size: int) -> jax.Array:

@@ -557,6 +557,7 @@ class RLLearner(abc.ABC, Generic[TConfig]):
     """Main entry point for the training loop."""
     full_batch_iterator = iter(train_ds)
     benchmark = getattr(self.rl_cluster, "_training_benchmark", None)
+    filter_audit = getattr(self.rl_cluster, "_grpo_filter_audit", None)
     benchmark_batch_size = getattr(benchmark, "first_batch_size", None)
     if benchmark_batch_size is None:
       first_item = next(full_batch_iterator)
@@ -615,6 +616,11 @@ class RLLearner(abc.ABC, Generic[TConfig]):
           self, full_batch_size, mini_batch_size, train_micro_batch_size,
           service_target_batch_size, grad_acc_steps,
       )
+    if filter_audit is not None:
+      filter_audit.configure_loop(
+          self, full_batch_size, mini_batch_size, train_micro_batch_size,
+          service_target_batch_size, grad_acc_steps,
+      )
 
     while True:  # loop over M
       try:
@@ -660,6 +666,8 @@ class RLLearner(abc.ABC, Generic[TConfig]):
           )
 
         if benchmark is not None and benchmark.after_iteration():
+          break
+        if filter_audit is not None and filter_audit.after_iteration():
           break
 
         if (

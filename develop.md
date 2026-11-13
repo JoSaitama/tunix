@@ -13686,3 +13686,250 @@ This file tracks engineering changes made in this repository.
 
 - 改动范围与文件：无代码改动，仅更新 `develop.md`。提供本地显式提交和推送清单，以及 Eric 单 worker 快进拉取后的后台队列命令。沿用 DTV flip 的 clean GSM8K、accuracy reward、4×4、691 步与完整 pre/post 评测。按 0/5/13/21/42 顺序执行，使用 `random batch`、固定比例 0.1、频率 2。队列和每 seed 的目录用上海时间戳结尾，分别保存提交和退出码。
 - 验证与待办：本地、服务器、后台三段 `bash -n` 通过。模拟验证五 seed 顺序、参数透传、目录命名以及 seed13 失败后停止，`git diff --check` 通过。未实际提交、推送、拉取或启动 TPU。
+
+## 2026-11-12 — 排查 GRPO+DS XProf 空内存设备映射
+
+- 改动范围与文件：无代码改动，仅更新 `develop.md`。用户 grpo-ds_20261112_102728 退出码 0，但离线转换返回空 allocator map。XProf 导入/转换已执行，非 RUN 路径或环境缺失；当前不能确定是采集缺失、原 trace 不完整还是解析兼容性。
+- 核对与方案：现有 `check_run` 仅确认四设备清单与 XPlane 文件存在，不校验内存事件，所以训练 PASS 不等于峰值有效。先读取实际 trace 大小、测量窗口、版本及 profiler 日志，对比同 worker 成功的 Random/PODS；不重跑墙钟、不填零值、不拿 heap-only lifetime counter 替代 stack+heap 峰值，不自动重试采集。
+- 验证：静态核对 `_start_trace`、`_stop_trace`、`check_run` 和 `observed_xprof_peaks`；`git diff --check -- develop.md` 通过。未修改训练代码或访问服务器，具体原因待诊断输出。
+
+## 2026-11-12 — DS 0.14 MiB trace 的有界补采
+
+- 改动范围与文件：无代码改动，仅更新 `develop.md`。用户 DS XPlane 为 142333 bytes，Random/PODS 约 1.7 GiB 且已成功解析；空内存设备映射与极小 trace 强烈支持设备侧内存数据未成功采集，但未确认具体原因。当前约 7.5GB 空间、日志无 ENOSPC，不认定磁盘故障；Grain profiling 版本警告不能独立解释 TPU HBM 缺失。
+- 处理：保留旧产物，空闲同 worker 用新进程按原 DS 1+2 窗口只补采一次，结束后同一后台任务调用独立 XProf 环境解析四设备，将解析失败传播到队列退出码。若仍为空，停止重复采集并调查 profiler，而不是重复墙钟或填写假峰值。空间不足时先转移已完成的原 trace，不自动删除。
+- 验证与待办：核对 launcher 的 DS memory 默认与离线接口；`git diff --check -- develop.md` 通过。未连接服务器、执行补采或修改代码。
+
+## 2026-11-12 — DS 第二次空映射后停止重试并读取原始 XSpace
+
+- 改动范围与文件：无代码改动，仅更新 `develop.md`。用户同配置补采仍返回空 memory IDs；停止继续排训练和安装升级。不将两次失败视为 DS 算法必然导致，也不把缺测填零。
+- 检查：DS 复用同一 benchmark 的 start/stop trace，无专属停用 profiler 分支。依据 OpenXLA 官方 `xplane.proto`，提供独立 XProf 环境中的只读部分 protobuf 描述符，读取所有 DS 小文件的 XSpace errors/warnings 与 plane/line/event 数；文件大于64MiB跳过，避免重读成功的多GB trace。
+- 验证与待办：本地 protobuf wire-format 构造样例验证 errors/warnings/plane/event 解析通过，`git diff --check -- develop.md` 通过。未实际读取远端 trace，尚未确定底层故障；下一步由采集器原始错误和设备事件是否存在决定，不调整过滤、生成或正式训练配置。
+
+## 2026-11-12 — 确认 DS 两次采集均为 host-only
+
+- 改动范围与文件：无代码改动，仅更新 `develop.md`。用户提供两次 XSpace 均只有 `/host:CPU` 与 `Task Environment`，无 TPU plane；errors/warnings 为空。确定当前原始文件不含可供恢复的设备峰值，不能通过换解析器、网页或忽略覆盖校验补出 HBM。
+- 数据核对：两次测量均完成 2 optimizer updates、6 candidate batches、96 completions、32 update completions、19117 tokens，剔除 15 零方差组及 1 超额组；第 2、3 步记录编译。编译及约52秒窗口仅是线索，尚无证据证明时长上限或编译导致丢采。
+- 静态发现：`Benchmark._start_trace` 未显式记录有效 profiler options，芯片数使用顶层 hasattr 分支；JAX 官方文档将此选项列为 advanced_configuration，需先确认服务器0.8.1实际接口。memory check 只查文件存在，不能等同四设备采集有效。建议修补采集参数可观测性与覆盖验收，不修改 DS 算法、不重跑墙钟、不原样第三次补采。
+- 验证：静态检查 start/stop、窗口 drain、DS 计数及 check_run，核对 JAX profiling 官方文档；`git diff --check -- develop.md` 通过。未执行服务器命令、TPU 初始化、代码变更或 Git 提交。
+
+## 2026-11-12 — 暂停 DS HBM 排查，继续其他方法采集
+
+- 改动范围与文件：无代码改动，仅更新 `develop.md`。按用户安排将 DS HBM 标为 pending，保留已完成 timing 和两个 host-only 原始 trace；不重试、不升级环境、不影响其他方法训练或采集。
+- 新证据：服务器 jax/jaxlib 0.8.1、libtpu 0.0.30；ProfileOptions 可构造，顶层 device_tracer_level 不可用，读取 advanced_configuration 时 protobuf Map 的 Python 转换抛 TypeError。此为只读诊断 getter 失败，不证明 setter 不可用，更不能单独认定为 DS 丢采根因。
+- 验收与风险：其他方法每次单独采集并确认四设备 XProf stack+heap 窗口峰值；退出码0不是充分条件。DS 缺测不填0、不用快照冒充峰值。磁盘此前约7.5GB、成功 trace 约1.7GB/份，避免一次排队所有方法。
+- 验证：复核用户诊断输出；`git diff --check -- develop.md` 通过。未执行训练、TPU 初始化、远端操作、提交或推送。
+## 2026-11-12 — 复核GSM8K GRPO mismatch实现
+
+- 改动范围：无实验代码改动；沿正式suite、learner构造、reward计算、advantage计算、evaluation及LearnAlign/GradAlign selector路径复核当前mismatch语义，仅更新日志。
+- 修改文件：仅`develop.md`。
+- 核心实现：mismatch为确定性的prompt-group reward-rank reversal。对每个prompt及noise seed计算SHA-256稳定分数，分数小于配置fraction时选中该prompt组；同一seed下20%集合严格嵌套于40%集合，实际比例为确定性近似值。
+- 污染操作：每个prompt的4条completion保持文本和顺序不变，只把该组clean summed rewards按反向排名重新分配。例如`[4,0,2,-1] -> [-1,2,0,4]`。reward多重集、组内mean和std不变，但completion对应的reward及随后GRPO advantage符号/次序改变；tie组可能被选中但完全不发生有效变化。
+- 作用范围：`RewardRankNoiseGRPOLearner`先正常计算dense training reward，再仅在TRAIN mode反转reward，之后标准GRPO按污染reward计算组内标准化advantage；EVAL直接返回clean rewards，pre/post 1319题评测不受污染。fraction为0时仍使用原始`GRPOLearner`。
+- 公平性：suite把相同fraction和对应experiment seed传给每种method，因此同seed、同prompt在Baseline/Random/Reward/DTV/DTV-Loo中具有相同确定性污染身份；在线生成的response可能因模型轨迹不同而不同，但prompt污染集合规则一致。
+- Alignment扩展：LearnAlign所有selector candidates及GradAlign candidates对binary exact-correctness selector rewards应用同一rank reversal；GradAlign held-out validation direction保持clean。被选中prompt进入实际GRPO update后，dense reward再按相同prompt规则独立污染。
+- 审计指标：记录configured fraction、selected-group fraction、effective-group fraction、changed-completion fraction和reward-assignment mean absolute delta；`selected`不等于`effective`，尤其在tie或对称reward组中。
+- 验证：静态检查`my_example/reward_rank_noise.py`、`train.py`、`run_reward_rank_noise_suite.sh`、alignment selector路径、标准GRPO advantage实现及对应unit tests；未运行训练或修改模型代码。
+
+## 2026-11-12 — 确认 GSM8K Gradient-norm Top-50% 的筛选方向
+
+- 改动范围与文件：无代码改动，仅更新 `develop.md`。该 baseline 按每题四条 completion 的 policy 梯度 L2 范数降序保留两条，过滤较小的两条；同范数按原顺序打破平局。更新平均保留项的 full 梯度（含 KL），不重算 advantage。
+- 验证：静态检查 `my_example/rebuttal/gradient_norm_trainer.py` 的 `group_top50_mask` 和训练更新分支，`git diff --check -- develop.md` 通过。未运行训练。
+
+## 2026-11-12 — DS HBM 改为有界单迭代采集方案
+
+- 改动范围与文件：无代码改动，仅更新 `develop.md`。用户已完成其他方法 HBM，现恢复 DS 排查；提供现有 launcher 的 1 warmup + 1 measured 命令，只采完整第2步，成功后才考虑独立进程 2+1 采第3步，不自动循环重试。
+- 口径：算法、seed13、clean、候选补采、actor 更新和691步 schedule不变；改变的是采集窗口。不能认定52秒触发某个 profiler 时限。两个分开窗口若成功只能报告其 observed maximum，不声称连续窗口或全训练峰值；独立常驻覆盖确认仍需保留。
+- 验收：训练 check 后立即用独立 XProf 环境调用 xprof-observed，验证四设备 stack+heap；解析成功才发布 xprof_observed.json、退出0。失败仍保留原始数据并停止，不修改 JAX/libtpu，也不重跑 timing。启动前6GiB磁盘检查，不删除旧文件。
+- 验证：两种单步 launcher --dry-run通过，nohup/退出码/解析组合命令 bash -n通过，git diff --check通过。未运行 TPU、远端操作、Git提交或推送。
+
+## 2026-11-12 — DS 单迭代 HBM 仍未通过覆盖验收
+
+- 改动范围与文件：无代码改动，仅更新 `develop.md`。用户第2步单独采集在 xprof-observed 仍返回 memory IDs=[]；按既定停止条件不继续第3步，不再将缩短窗口作为已验证修复。最新文件未直接读取，不能凭转换结果断言其原始 planes 与前两次完全相同。
+- 核对：Benchmark.run 为 DS 与其他方法共用 trace 生命周期；DynamicSamplingMixin 仅覆盖同步过滤/补采与队列交付，没有专属 profiler stop。未发现足以确认根因的 Python 分支。当前确定的是四设备内存采集/转换验收失败，不是此 traceback 证明训练失败。
+- 后续范围：需独立 profiler 对照与有效配置/启动停止日志定位，兼容0.8.1的 setter 必须先验证，不能把先进配置修改当成确定修复。保持正式 DS 算法和已测 timing不变；暂将 HBM 标缺测，不以 heap-only snapshot、Vanilla峰值或推算替代。未执行远端/TPU、升级、训练代码修改或 Git提交。
+- 验证：静态复查 Benchmark.run/_run_with_compile_log 与 DynamicSamplingMixin._fill_training_batch/_prepare_data；git diff --check -- develop.md通过。
+
+## 2026-11-12 — 实现 GRPO+DS 同窗口 HBM 诊断采集
+
+- 改动范围：仅新增可选的 DS memory benchmark 路径，保留 clean seed13、四芯片单 worker、原补采与筛选、actor update 和691步 LR schedule；预热一次、连续采完整训练第2–3步。正式训练与已有 timing 不变。
+- 文件：`my_example/rebuttal/grpo_benchmark.py`、`my_example/rebuttal/run_grpo_ds_hbm.sh`、`my_example/rebuttal/grpo_benchmark.md`、`tests/my_example/grpo_benchmark_test.py`、`develop.md`。
+- 机制：同进程先用四设备小型 JIT 运算生成独立 XPlane，单独的 XProf 环境验证四设备 stack+heap，否则训练前失败。JAX 0.8.1 仅写入 advanced_configuration，不读 protobuf getter；记录请求参数与窗口。训练 trace 单独验收；外层退出0要求真实训练 trace 解析通过，不使用 probe、快照或 allocator lifetime peak 替代。
+- 验证：JAX/JAXlib 0.8.1 本地 setter 测试通过；四个 CPU 模拟设备完成真实 JIT 与 XPlane 导出（XProf 转换模拟）。`JAX_PLATFORMS=cpu python -m unittest discover -s tests/my_example -p grpo_benchmark_test.py` 22项通过；shell 语法、launcher dry-run、benchmark 模块 Ruff、git diff --check通过。
+- 风险/待办：没有实际 TPU 或远端测试；libtpu 运行时对请求的处理及 DS trace 是否完整要实测，预检通过不保证后续采集成功。采集仅覆盖第2–3步，不能自动认证常驻覆盖或完整训练峰值；不重跑既有 timing。
+
+## 2026-11-13 — 设计 GradAlign / LearnAlign HBM 分阶段测量
+
+- 改动范围：无代码改动，仅更新 `develop.md`。用户 DS 新队列已到训练 trace 的最终 XProf 转换，allocator map 仍为空；保留原产物与 timing，DS HBM 继续缺测，不再原样重试。
+- GradAlign：现有 memory 0+1 包含首轮30条 validation prompts、160条 candidates 各4 rollouts（共760）和第1次更新。优先测此完整窗口；长 trace 若失败，另设计对真实 reference/candidate 分块和 actor update 的短窗，不以单独更新代表 selector。
+- LearnAlign：现有 1+2 覆盖预学习第2–3步，10+2 覆盖完整 selector 之后的第11–12步，不覆盖 selector 本身。拟新增 benchmark-only chunk 采集 hook，在保持2764 prompts×8 rollouts、正式分块与全池排名的前提下，按预注册索引（首/中/尾）短采真实 selector 分块，复用同次 run 的 post-select 采集；只称 sampled/observed peak。10步预学习是当前 benchmark 配置，不冒充正式训练默认75步。features 回传主机、最终 NumPy 排序不是全池 TPU 张量。
+- 验证与风险：静态核对 launcher、benchmark selector 边界、两个 curriculum 与 estimator；核对 XProf 窗口峰值口径。四设备 stack+heap、窗口/阶段、同硬件版本和常驻覆盖单独核验。未启动 TPU 或修改代码；连续全阶段真峰值不能由短窗保证。
+
+## 2026-11-13 — 实现 GradAlign / LearnAlign HBM 采集入口
+
+- 改动范围：复用 GradAlign 完整首轮 0+1 与 LearnAlign 预学习 1+2；LearnAlign 10+2 可选开启 selector 分块采集，只在实际全池的第1、346、691块启停，保持原数据、估计和排名。每块即时四设备 XProf 验收；通过后同一进程采选择后第11–12次更新。DS 默认和正式训练/墙钟路径不改。
+- 文件：`my_example/alignment_baselines/gradient_features.py`、`my_example/rebuttal/grpo_benchmark.py`、`my_example/rebuttal/run_alignment_hbm.sh`、`my_example/rebuttal/grpo_benchmark.md`、`tests/my_example/grpo_benchmark_test.py`、`develop.md`。
+- 验证：`JAX_PLATFORMS=cpu python -m unittest discover -s tests/my_example -p grpo_benchmark_test.py` 25项通过；alignment 测试运行36项，2项因本地未安装 metrax 无法通过导入，其余通过。三种实际 launcher 参数 dry-run、shell语法、Ruff benchmark 及修改文件语法/未定义名检查、git diff --check通过。
+- 口径与待办：首轮 GradAlign 峰值含首次编译。LearnAlign 选择峰值仅为三个短窗观测的最大值，不替代全阶段精确峰值。任何窗口缺少四设备数据则标缺测并保留 trace；10+2 共四份 trace，需预留存储；磁盘阈值不等于文件大小上限。未运行真实 TPU、远端命令或 Git 提交推送。
+
+## 2026-11-13 — 区分旧 DS 报错与新 Alignment HBM 日志
+
+- 改动范围与文件：无代码改动，仅更新 `develop.md`。用户贴出的路径是已有 DS 单步目录 `rebuttal_grpo_gsm8k_ds_hbm_step2_seed13_clean_20261112_153304`，报告 method=grpo-ds、optimizer 1→2；训练窗口校验通过，XProf 仍无 allocator 数据，不能用于判定 GradAlign/LearnAlign 结果。
+- 验证与待办：本地确认提交 `9fb6d51` 和新入口的三个 phase 名称；`git diff --check -- develop.md` 通过。服务器实际运行状态未核实，提供按 phase 查找日志、退出码和结果 JSON 的只读命令，不重跑 DS。
+
+## 2026-11-13 — GradAlign 完整首轮 trace 缺少可解析的 HBM
+
+- 改动范围与文件：无代码改动，仅更新 `develop.md`。用户首轮 GradAlign benchmark 校验通过：完成760条 selector rollout、164784个 selector tokens 和1次 actor update；窗口721.827秒，含首次编译，不用作正式墙钟。
+- 问题与待办：最终 XProf 转换返回空 allocator map，不能认定训练失败、OOM 或已定位 profiler 根因；新 GradAlign 原始 trace 尚未检查。保留产物，先看内外层退出码与 XPlane 大小，不重复录制完整首轮。若需要补采，按真实 reference chunk、candidate chunk 和 actor update 分短窗，不改选择池和 rollout；只报窗口观测，不补填全首轮精确峰值。
+- 验证：静态核对 GradAlign 0+1 launcher 和四设备提取 gate、核对 XProf 官方窗口峰值定义；`git diff --check -- develop.md` 通过。未运行 TPU、远端或 Git 操作。
+
+## 2026-11-13 — GradAlign 退出码与原始 trace 定位
+
+- 改动范围与文件：无代码改动，仅更新 `develop.md`。用户核实内层退出0、外层1、唯一 XPlane 4,685,698 bytes；直接失败点为 XProf 未提取 allocator 记录，不是文件未生成或训练 OOM。体积不足以证明 host-only，也不能断言721.8秒窗口导致丢采。
+- 验证与待办：复查入口顺序和 `xprof_window` 校验；依据 OpenXLA XSpace schema 提供只读 plane/event/error/warning 检查，本地 synthetic protobuf 通过，`git diff --check -- develop.md` 通过。待用户查看原始 planes 区分设备采集缺失与已有设备事件但无可用内存记录；不重跑、未连接远端。
+
+## 2026-11-13 — GradAlign 原始 XPlane 确认仅含 host 事件
+
+- 改动范围与文件：无代码改动，仅更新 `develop.md`。用户提供原始文件 inventory：`/host:CPU` 两条线、273196 个事件；`Task Environment` 无事件；无 TPU plane，errors/warnings 为空。确定此文件没有可恢复的 TPU HBM 数据，但不能由此确定底层丢采原因，也不能断定与 DS 根因相同。
+- 验证与待办：复核用户只读输出，`git diff --check -- develop.md` 通过。保留原始产物与已测 timing，当前 HBM 记缺测；不要重复解析或重跑完整窗口。若补采，另行实现真实阶段短窗与四设备验收。
+
+## 2026-11-13 — GradAlign 首轮短窗补采设计
+
+- 改动范围与文件：无代码改动，仅更新 `develop.md`。拟新增独立 `gradalign-segmented` HBM 入口，保留旧入口和 timing。使用原 selector 第1轮、完整30 reference +160 candidate、4 rollout/题、原排序和首个训练更新。首轮只开启四个窗口：reference #1（4题）、#8（2题）、candidate #1（4题）、排序后的首个完整训练 batch（含训练 rollout 和 actor update）。
+- 实现边界：复用 LearnAlign estimator 的分块 hook 并显式标注 reference/candidate；短窗从真实生成前到特征回主机后，不改变批尺寸与采样 RNG。仅新模式跳过 before_iteration 的长 trace，在 selector 完整结束后打开普通训练 trace；计数与 timing 起点不重置。每段需四设备通过 stack+heap 验收，首段失败即停；已有效的局部产物保留，不汇总成完整结果。
+- 验证与风险：静态核对 curriculum、estimator、before_iteration/selector_round 和训练更新边界；`git diff --check -- develop.md` 通过。实施后拟测试 trace 不重叠、完整760 selector rollout与1次 optimizer update、失败传播和旧入口兼容。四窗最大值仅为 sampled phase peak，需预留磁盘；不保证短窗修复 runtime 丢采。未运行训练、远端或 Git 写入。
+
+## 2026-11-13 — 扩展为 DS、GradAlign、LearnAlign 共用 HBM 方案
+
+- 改动范围与文件：无代码改动，仅更新 `develop.md`。按用户要求把三者纳入同一 opt-in 短窗采集和验收。DS 首先覆盖原第2步全部真实补采批（生成、logps、reward/advantage、筛选）及最终组装和 actor update；不再录整步。GradAlign 参考首/尾、候选首块和首个训练 batch；LearnAlign 预学习、全池首/中/尾及选择后更新沿用原预算。
+- 公共机制：真实窗口落盘后立即检查 XSpace errors/warnings、planes/事件，再转换并校验四个 allocator 的窗口 stack+heap，区分 host-only、设备记录存在但内存转换/覆盖不足等；每窗独立保留 trace 和结果，失败终止该方法，不跨方法阻塞。玩具 preflight 仅诊断，不作为训练采集成功证明。任一计划窗口缺失不发布完整方法峰值；保留已通过窗口，汇总仅称观测峰值。
+- 验证与待办：核对 DS 补采/组装、现有 selector hook/actor update phase 与 XProf 官方两种采集方式；`git diff --check -- develop.md` 通过。若真实最短窗口依旧 host-only，需改变诊断条件（同环境已知成功路径对照或按需采集），不自动重试、不给三方法编造结果。未改训练/采集代码或执行 TPU、远端、Git。
+
+## 2026-11-13 — 实现 DS、GradAlign、LearnAlign 分段 HBM
+
+- 改动范围：新增 `run_alignment_hbm.sh … --segmented`。DS 预热1步，仅测第2步全部候选批、组装和 actor 更新；GradAlign 完整首轮内测三个指定 selector 窗口及选后训练；LearnAlign 预学习及全池首/中/尾和选后窗口保持原设计。默认训练、旧 launcher 行为和已有 timing 不变。
+- 文件：`my_example/dynamic_sampling.py`、`my_example/alignment_baselines/gradient_features.py`、`my_example/rebuttal/{grpo_benchmark.py,grpo_benchmark.md,run_alignment_hbm.sh,xplane_inventory.py}`、`tests/my_example/{grpo_benchmark_test.py,dynamic_sampling_test.py}`、`develop.md`。
+- 验收：真实窗口逐段落盘，内存映射读取原始 plane/事件、errors 和 warnings，再用四设备 XProf stack+heap 窗口峰值校验。host-only、缺失窗口或无有效 allocator 均不发布整项峰值；中途已通过的数据保留。输出为观测窗口最大值，不冒充连续首轮或全训练峰值。
+- 验证：JAX_PLATFORMS=cpu 的 grpo_benchmark、dynamic_sampling、alignment_curriculum 分别30、25、2项通过；四组 launcher 参数 dry-run、shell语法、Ruff（benchmark/解析器全检查，其他变更 E9/F）、git diff --check通过。未执行 TPU、远端或 Git 写入。
+- 风险/待办：同一空闲四芯片 worker 实测；短窗不保证修复底层 TPU 丢采。失败需看对应 `xplane_inventory.json` 与 `xprof.log`，不重复原长窗口。磁盘 guard 不保证全部 trace 都放得下。
+
+## 2026-11-13 — ziao1 worker0 启动前退出排查
+
+- 改动范围与文件：无代码改动，仅更新 `develop.md`。本地分段代码已在 `dbc0c70`。原启动块以 `set -e` 执行静默 `test -x`，ziao1 需单独核实 XProf 环境，不假定 ziao2 的 venv 同步；尚无服务器输出可确认具体退出点。
+- 验证与待办：核对独立 XProf import、磁盘检查、active-job 与 tracked code guard、日志及退出码写入顺序；核对固定 XProf 2.24.2 PyPI 页面；`git diff --check -- develop.md` 通过。给出无 TPU 的只读诊断和仅在 venv 确认不存在时的独立安装选项；不执行远端命令、安装、训练或 Git 写入。
+
+## 2026-11-13 — ziao1 worker0 确认缺少 XProf 解释器
+
+- 改动范围与文件：无代码改动，仅更新 `develop.md`。用户确认主机 `t1v-n-a9c72b46-w-0`、HEAD `dbc0c70`、训练 venv 可用但 XProf 解释器缺失；旧启动块会在 `test -x` 处退出。提供独立 XProf 2.24.2 安装、CPU 导入验证及单项启动命令；不覆盖异常既有 venv。
+- 验证与待办：核对用户输出与当前入口，`git diff --check -- develop.md` 通过。约11G 可用不保证多份 trace 的空间，安装后复查并一次跑一项。未实际安装、远端运行或修改训练环境。
+
+## 2026-11-13 — ziao1 GRPO+DS 分段 HBM 已通过
+
+- 改动范围与文件：无代码改动，仅更新 `develop.md`。用户日志显示 `Alignment HBM EXTRACTION PASS (grpo-ds)`，结果已发布在 `rebuttal_grpo_gsm8k_grpo-ds_hbm_segmented_seed13_clean_20261113_035210/xprof_observed.json`；峰值数字未提供，不作推测。
+- 验证与待办：核对 PASS 位于最终 JSON 原子改名之后；汇总要求第2步所有实际候选批、组装和 actor 更新均有四设备结果。给出只读汇总命令，建议确认外层退出0、按最大观测 GiB/chip 报告，不作墙钟或全程峰值。未执行远端命令，`git diff --check -- develop.md` 通过。
+
+## 2026-11-13 — 提供 ziao1 GradAlign 分段 HBM 启动命令
+
+- 改动范围与文件：无代码改动，仅更新 `develop.md`。沿用 DS 已通过的 ziao1 worker0、`dbc0c70` 和独立 XProf 环境，指定 `gradalign --segmented`、clean seed13、首轮完整计算与四段采集，后台独立目录用时间戳命名。
+- 验证与待办：launcher 0+1 dry-run、后台命令 bash -n、`git diff --check -- develop.md` 通过。运行前复查磁盘和 worker 空闲，外层退出0与最终 JSON 才算通过。未启动远端任务。
+
+## 2026-11-13 — ziao1 GradAlign 分段 HBM 已通过
+
+- 改动范围与文件：无代码改动，仅更新 `develop.md`。用户日志显示 `Alignment HBM EXTRACTION PASS (gradalign)`，最终 JSON 已写入 `rebuttal_grpo_gsm8k_gradalign_hbm_segmented_seed13_clean_20261113_042217/xprof_observed.json`，峰值数字尚未提供。
+- 验证与待办：按已核对的 `segments` 和 `max_device_peak_hbm_gib` 字段提供只读命令，并检查外层退出码；结果为首轮四个采集窗口的最大观测值。未执行远端命令；`git diff --check -- develop.md` 通过。
+
+## 2026-11-13 — 提供 LearnAlign 三阶段 HBM 启动命令
+
+- 改动范围与文件：无代码改动，仅更新 `develop.md`。ziao1 worker0 沿用已通过 DS 与 GradAlign 的环境。先单独预学习1+2，再独立运行10+2，后者跑完整候选池并短采第1、346、691块和第11–12步。分三阶段报告，不混用 overall 与阶段峰值。
+- 验证与待办：两组现有 launcher dry-run、后台命令 bash -n、`git diff --check -- develop.md` 通过。每项确认外层退出0及最终 JSON；第二项留四份 trace，检查剩余空间，未启动远端任务。
+
+## 2026-11-13 — LearnAlign 预学习已通过，准备 selector 与选择后采集
+
+- 改动范围与文件：无代码改动，仅更新 `develop.md`。用户报告 `learnalign-prelearn` 最终提取 PASS，给出第2–3步的逐芯片与最大峰值只读命令，以及 ziao1 worker0 的 `learnalign-postselect --segmented` 启动命令；没有收到峰值数值。
+- 验证与待办：核对已有 launcher 分支与输出字段，`git diff --check -- develop.md` 通过。第二次留四份 trace，先查磁盘与 worker 状态；确认外层退出0再分别报告 selector sampled peak 与第11–12步峰值。未启动远端任务。
+
+## 2026-11-13 — 对齐 LearnAlign 墙钟与 HBM 三阶段口径
+
+- 无代码改动，仅更新 `develop.md`。静态核对：墙钟为提前学习第6–10步、完整全池选择、第11–60步；HBM 为提前学习第2–3步、selector 三个分块、第11–12步，后两阶段合在同次启动。表按阶段对齐，不声称相同采样窗口或全阶段精确峰值。`git diff --check -- develop.md` 通过；未启动远端任务。
+
+## 2026-11-13 — 提供 worker1 PPO 历史 checkpoint 配对结果汇总
+
+- 无代码改动，仅更新 `develop.md`。只读核对相邻 DTV_PPO 的 historical/fixed checkpoint CSV 生成器，确认按来源 checkpoint、训练 seed、完成轮数和 comparison 分组，CSV 的 `seed` 为 probe rollout seed，`delta_return=left_return-right_return`。给出 worker1 本地标准库汇总命令，不传输原始结果；仅报告描述统计，不将同一历史 seed 的 probe 当独立训练 seeds。
+- 验证：用本地 HalfCheetah smoke CSV 加 historical 字段在内存测试，五组汇总正常；`git diff --check -- develop.md` 通过。未访问远端 CSV 或执行服务器命令，真实结果待用户运行。
+
+## 2026-11-13 — LearnAlign selector 首块通过后的静默区间
+
+- 无代码改动，仅更新 `develop.md`。静态核对只有第1、346、691块打印 HBM 采集进度；第2–345块仍正常执行但没有逐块日志。用户首块 PASS 不能证明卡住或已完成；按既有完整选择墙钟约2小时估算下一采样点量级约1小时，非硬超时。提供只读日志/进程/退出码/磁盘检查。未访问远端；`git diff --check -- develop.md` 通过。
+
+## 2026-11-13 — LearnAlign 运行中静默与进程活动核验
+
+- 无代码改动，仅更新 `develop.md`。用户确认 PID 1152596 存在、未写退出码、剩余磁盘约9.2G，但没有最新服务器时间和进程活动差值。提供按指定 job 读取日志静默时长与两次进程 CPU 时间的只读检查；两者仅为线索，不能证明 TPU 进度或死锁。未访问服务器或停止任务；`git diff --check -- develop.md` 通过。
+
+## 2026-11-13 — LearnAlign 首块后静默 27 分钟
+
+- 无代码改动，仅更新 `develop.md`。用户日志最后写入 05:33:06 UTC，截至 06:00:26 静默 27 分钟；15 秒内进程累计 CPU 时间增加 1 秒，主线程两次在 futex 等待。尚未超出预计到第346块的时间量级，CPU 活动不能证明 TPU 分块进度；建议继续观察同一任务。未访问远端或执行训练；`git diff --check -- develop.md` 通过。
+
+## 2026-11-13 — LearnAlign selector 中间分块通过
+
+- 无代码改动，仅更新 `develop.md`。用户日志确认同一任务第1、346块均通过 HBM 验收，先前静默不代表卡在首块。等待第691块、选后第11–12次更新和最终验收；未取得整项峰值。未访问远端或执行训练；`git diff --check -- develop.md` 通过。
+
+## 2026-11-13 — LearnAlign selector 结果可保留，选后采集被磁盘 guard 拦住
+
+- 无代码改动，仅更新 `develop.md`。用户日志确认第1、346、691块全部通过、完整 selector 完成；`selector_hbm.json` 在打开 postselect trace 前写出，应独立验收保留。外层退出1因空闲5.89 GiB低于6 GiB，不是 OOM/XProf 丢采；第11–12步未测。
+- 核对：无 benchmark checkpoint，旧进程退出后不能从 selector HBM 报告恢复选后训练。若必须补齐，可用底层 launcher 的10+2 memory并清除 selector profiler 开关，只录最后一份 trace，但仍需重算选择；否则表内选后HBM记缺测。未启动远端或删除产物；`git diff --check -- develop.md` 通过。
+
+## 2026-11-13 — 记录 LearnAlign Pool selection 观测峰值
+
+- 无代码改动，仅更新 `develop.md`。用户报告 selector 第1、346、691块分别为34.6378、34.8544、34.8544 GiB/chip，故 Pool selection 填34.8544 GiB/chip（采样最大观测值）。Early learning 另取第2–3步已通过的报告，数值未提供；Post-selection 因磁盘门槛未采集，填N/A。核对用户数值取最大值，`git diff --check -- develop.md` 通过。
+
+## 2026-11-13 — 提供 LearnAlign 只录 postselect 的补测命令
+
+- 无代码改动，仅更新 `develop.md`。核实失败 benchmark 无 checkpoint、入选池仅在内存，不能 resume。保留 selector 34.8544；另起相同 clean seed13 10+2，关闭 selector profiler，照常重算全池并只录第11–12步。给出10 GiB保守启动检查，保留原6 GiB采集 guard、原始 XPlane 和四设备验收；不删除任何产物、不执行远端。
+- 验证：真实 launcher 参数 dry-run、后台命令 bash -n、`git diff --check -- develop.md` 通过；仍需在空闲 ziao1 worker0 实测，耗时主要为全池重算。
+
+## 2026-11-13 — 区分 LearnAlign 训练步、selector 分块与 HBM 采样
+
+- 无代码改动，仅更新 `develop.md`。静态核对 postselect-only 的10+2需要12次实际优化器更新，前10步后重算691个 selector 分块（2764题×8=22112条回答，无优化器更新），本次只录第11–12步，不重录 selector 三块。旧失败 run 不能续跑，既有 selector 峰值仍可用。未执行训练或远端操作；`git diff --check -- develop.md` 通过。
+
+## 2026-11-13 — 核对 LearnAlign 补测任务是否已经退出
+
+- 无代码改动，仅更新 `develop.md`。用户 `ps ef | grep seed` 只匹配 grep 且打印环境，不能确定补测成功或失败。给出按目标目录查外层退出码、日志与对应进程的只读命令，不终止任何进程。未执行远端操作；`git diff --check -- develop.md` 通过。
+
+## 2026-11-13 — 复核 rebuttal 的 GRPO 分层过滤率
+
+- 改动范围与文件：无代码改动，仅更新 `develop.md`。区分 Clean 与 Mismatch-20% 的整体过滤率、同一 Mismatch-20% run 内被指定反转与未被指定反转的 prompt 组，以及按训练实际使用的 post-reversal advantage 符号分层的 completion 过滤率。各率分母为该层全部候选，DTV-Loo 使用实际 post-cap mask，零 advantage 单列；指定反转但未改变 reward 的组不等同于有效污染。
+- 验证：用标准库核对仓库上级五份 LOO JSONL（各 691 步、每步 16 条），实际删除 12,233/55,280 = 22.12916064%，而阈值未施加保留下限时为 13,040/55,280 = 23.58900145%。现存 JSONL 无 advantage、prompt ID 和逐组噪声标记；DTV 正式入口也不输出同类逐条 mask。静态核对 noise scalar 聚合、实际 mask 及既有 fixed-checkpoint 审计分层；`git diff --check -- develop.md` 通过。
+- 风险/待办：若能精确验证历史 prompt 顺序，可按 noise hash 为 LOO mask 恢复指派标签，但无逐条 reward 或 advantage 仍不能恢复符号或有效反转。缺失原始联合记录时，既有 `score` 审计可提供独立标注的 fixed-checkpoint 切片，不代表原五 seed 在线训练。未运行 TPU 或访问远端。
+
+## 2026-11-13 — LearnAlign 合并为单行的报告口径
+
+- 无代码改动，仅更新 `develop.md`。核对 benchmark 的提前学习5步、选择后50步和一次完整选择，按用户实测总秒数相加为7523.9900，除以55个更新得136.7998 s/update；相对 Vanilla 原始353.5537697679829/50 为+1834.64%。此为不同窗口下的每步摊销比较；如需固定50个更新，从原CSV取5个提前学习与45个选择后更新并保留全额选择成本，不线性缩放。中位数不能从两个阶段中位数合并；已测 HBM 最大34.8544 GiB/chip须标明选择后缺测。验证：本地数值计算、静态核对报告字段，`git diff --check -- develop.md` 通过。未执行远端操作。
+
+## 2026-11-13 — 设计 GRPO rebuttal 过滤分层离线汇总
+
+- 改动范围与文件：无代码改动，仅更新 `develop.md`。拟新增只读 `my_example/rebuttal/summarize_grpo_filtering.py`，优先读取可追溯的历史联合记录或已完成 Mismatch-20% fixed-checkpoint `unit_utility.csv`，后者必须单列诊断口径；不修改 trainer 或重跑五 seed。
+- 统计与验收：同一 run 内按反转指派、训练实际使用的过滤前 advantage 正/负/零及其交叉分层汇总删除数、候选数和比例；有效反转另列。LOO 用保留下限后的 mask，缺字段或重复行不猜测、不将空层写成 0%，两维边际计数应可还原总体。
+- 验证与待办：静态核对现有 `audit_grpo_utility.py` 的 `score` 路径、`unit_utility.csv` 字段及 `utility_math.py` 已有分层；现存历史 LOO JSONL 不能直接回答正负 advantage。无可用审计结果时才考虑预先固定候选池的无更新打分，明确样本范围。未启动实验或实现脚本；`git diff --check -- develop.md` 通过。
+
+## 2026-11-13 — 只读检查 GCS 的历史 GRPO 过滤记录
+
+- 改动范围与文件：无代码改动，仅更新 `develop.md`。按用户授权只读列出 GCS，未写远端、下载模型或启动 TPU。
+- 验证：`gcloud storage ls` 确认 `gs://node-v5-jason/GRPO_GSM8K/saved_mismatch20/` 的十组正式模型归档与同前缀下 `logs/` 的结果归档。十组均有逐步 skipped-samples CSV；仅 LOO 的五组有 selection JSONL。流式 `gcloud storage cat | shasum -a 256` 核实 LOO seed5 与此前检查的本地副本相同。两份 seed0 stdout 无 advantage 或联合字段。对 GSM8K 和 DTV 前缀按 `**/unit_utility.csv`、`**/audit_summary.json` 查找均无匹配；同样的文件名通配能找到已知 LOO 文件。`git diff --check -- develop.md` 通过。
+- 风险/待办：归档结果未发现足以计算正/负 advantage 分层的逐条联结记录；未检查各 TPU 的本地盘。先找本地 utility 审计产物，缺失时再决定是否做单 checkpoint、无 optimizer update 的诊断。
+
+## 2026-11-13 — LearnAlign 选择后 HBM 补测已通过
+
+- 无代码改动，仅更新 `develop.md`。核对用户附件：ziao1 worker0 补测 `rebuttal_grpo_gsm8k_learnalign-postselect-only_hbm_seed13_clean_20261113_080232` 外层退出0、完成第11–12步，打印最终 `Post-selection HBM PASS`；可关闭 SSH/终端，无需杀进程。日志未包含峰值数值；结果在该目录 `xprof_observed.json`。未访问远端；`git diff --check -- develop.md` 通过。
+
+- 提取命令：无代码改动。按上述固定目录检查外层退出码、`memory_phase`、`iterations_inclusive` 与四设备字段，输出 Post-selection 峰值，并与既有提前学习和 selector 观测值取最大用于单行表。未访问远端或猜测补测数值；`git diff --check -- develop.md` 通过。
+
+## 2026-11-13 — 设计五 seed 短程在线 GRPO 过滤审计
+
+- 改动范围与文件：无代码改动，仅更新 `develop.md`。拟新增 rebuttal 专用 runner 和离线汇总，复用正式 DTV/DTV-Loo 的 group-policy 路径；只做 Mismatch-20%，seed 5/0/13/21/42，每种方法各运行一个短窗口。建议各 32 次真实更新（每方法 2,560 条候选），先做两方法各 1 步 smoke。短跑停止与 691 步 LR schedule 分离，不做评测或保存模型。
+- 记录与验收：将 reward reversal 实际产生的指派/有效标记与训练使用的 advantage 沿 TrainExample 同行传递，使用两个 actor 各自的实际 mask（LOO 取 post-cap），不按后台日志的到达顺序 join。仅记录审计所需标量和 ID，不保存梯度。按方法、seed、污染和符号统计删除数/候选数；核对 4×4、真实更新数、无重复、分层边际与每步删除总数相符。
+- 验证与待办：静态核对 `my_example/reward_rank_noise.py`、GRPO learner、正式 seeded launcher、两个 actor 与外层迭代停止边界；`git diff --check -- develop.md`。短跑只能称 early-training diagnostic，不替代历史全程数据；两方法各自在线训练，同 seed 不意味着后续生成完全相同。未修改实验代码或运行 TPU。
+
+## 2026-11-13 — 实现 Clean / Mismatch-20% 在线过滤审计
+
+- 改动范围：新增 `my_example/rebuttal/{grpo_filter_audit.py,run_grpo_filter_audit.sh}`、`tests/my_example/grpo_filter_audit_test.py`；更新 `my_example/{main.py,reward_rank_noise.py,rebuttal/README.md}`、`tunix/rl/{grpo/grpo_learner.py,rl_learner.py,self_inf_trainer.py,self_inf_loo_trainer.py}`、`tests/my_example/reward_rank_noise_test.py` 和本日志。审计默认关闭，沿用正式 group-policy 评分、full 梯度更新和 691 步 schedule，不加 optimizer 或选择逻辑。
+- 实现：Clean 与 Mismatch-20% 均跑 DTV、DTV-Loo × seed 5/0/13/21/42 × 32 次真实更新。另有四组 seed5 单步 smoke。不评测、不做 benchmark、不保存模型。直接捕获 reward reversal 标记及 actor 处理的同一行 advantage、最终 mask；核对实际 Optax 更新数、逐步删除数、LOO 保留下限、同 seed prompt 顺序/初始 LoRA/污染指派与统一模型和提交。输出逐行决策及合并/逐 seed 分层表。
+- 验证与待办：CPU 审计 7 项（含真实 JAX/NNX DTV/LOO JIT 小模型对照与 4/20 组 dry-run）、benchmark 回归 30 项、Ruff E9/F、`bash -n`、`git diff --check` 通过。完整 reward-rank-noise suite 本机缺 metrax，需服务器 CPU 复核，再执行真实 TPU smoke。未提交、推送、初始化 TPU 或运行远端；报告仅代表前 32 步。

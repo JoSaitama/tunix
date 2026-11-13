@@ -347,6 +347,11 @@ class SelfInfLooTrainer(rl_trainer.Trainer):
     )
     optimizer.update(model, final_grads)
 
+    if getattr(self, "_filter_audit_enabled", False):
+      example = inputs["train_example"]
+      return final_loss, (
+          example.filter_audit_metadata, example.advantages, mask, num_skipped
+      )
     if getattr(self, "_benchmark_quiet", False):
       return final_loss, None
     if self._has_aux:

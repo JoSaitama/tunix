@@ -1,6 +1,6 @@
 # GRPO fixed-checkpoint utility audit (rebuttal only)
 
-This directory is independent of all training entry points. It never resumes a
+The fixed-checkpoint utility audit is independent of training entry points. It never resumes a
 trainer, writes checkpoint weights, changes the benchmark table, or supplies the
 heldout gradient to the actual DTV selector. All model execution and tests must
 be run on the server, not the Mac. The first supported input is the restored
@@ -394,3 +394,35 @@ BF16 cause, validate prior BF16 finite-step results, establish Assumption1, or
 answer which method is better. No follow-on128 scan is launched. If it fails or
 exceeds budget, pause finite-step work and prioritize the reviewer-requested
 gradient-norm top50% TRAINING baseline; disclose the finite-step limitation.
+## Early-training GRPO filtering audit
+
+`run_grpo_filter_audit.sh` uses the ordinary group-policy DTV and DTV-Loo
+updates (LOO minimum retention 25%). The audit is opt-in and separate from the
+cost benchmark and the fixed-checkpoint utility probe. The 691-update optimizer
+schedule stays intact; the learner stops early with no evaluation, checkpoint,
+model export, or TPU trace.
+
+```bash
+bash my_example/rebuttal/run_grpo_filter_audit.sh smoke /path/to/new-smoke-root
+bash my_example/rebuttal/run_grpo_filter_audit.sh full /path/to/new-full-root
+```
+
+Run serially on one idle worker with four local TPU devices. Smoke is four
+one-update runs (both methods and conditions, seed 5). Full is 20 runs:
+Clean and Mismatch-20% × DTV and DTV-Loo × seeds 5/0/13/21/42, with the
+first 32 updates in every run. The queue stops on failure and refuses to
+overwrite its output root. Use a different root for smoke and full.
+
+Each run writes `run.json` and `decisions.jsonl` after its update count
+checks pass. The matrix validator checks matching code/model, initial LoRA
+and prompt order for matched seeds, and equal corruption assignments across
+methods within Mismatch-20%. The summary writes pooled counts and per-seed
+counts; use `summary.md` for the short table and `summary.json` for full
+cross-tabulations, including assignments that did not change rewards.
+Advantages are the actual values used by the actor before filtering. Group
+labels refer to assignment to reward reversal, not necessarily a changed
+reward. All rates divide by candidates in that stratum; empty strata are N/A.
+
+These are early-training online rates, not rates over the original 691
+updates. Matching prompts and seeds does not imply matching completions
+after the training trajectories diverge.
