@@ -3,19 +3,31 @@
 set -euo pipefail
 cd "$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
-if [[ $# -lt 2 || $# -gt 3 ]]; then
-  echo "usage: bash $0 {smoke|full} OUTPUT_ROOT [--dry-run]" >&2
+usage() {
+  printf '%s\n' \
+    "usage: bash $0 {smoke|full} OUTPUT_ROOT [--dry-run]" \
+    "       bash $0 correctness OUTPUT_ROOT {clean|mismatch0.2} [--dry-run]" >&2
   exit 2
-fi
+}
+[[ $# -ge 2 ]] || usage
 mode="$1"
 root="$2"
-dry="${3:-}"
-[[ -n "$root" && ( -z "$dry" || "$dry" == --dry-run ) ]] || exit 2
+shift 2
+conditions=(clean mismatch0.2)
 case "$mode" in
   smoke) steps=1; seeds=(5); summary_args=(--smoke) ;;
   full) steps=32; seeds=(5 0 13 21 42); summary_args=() ;;
-  *) exit 2 ;;
+  correctness)
+    [[ "${1:-}" == clean || "${1:-}" == mismatch0.2 ]] || usage
+    conditions=("$1")
+    steps=32; seeds=(5); summary_args=(--correctness --condition "$1")
+    shift
+    ;;
+  *) usage ;;
 esac
+dry="${1:-}"
+[[ -n "$root" ]] || usage
+[[ $# -eq 0 || ( $# -eq 1 && "$dry" == --dry-run ) ]] || usage
 [[ "$root" == /* ]] || root="$PWD/$root"
 if [[ -z "$dry" ]]; then
   [[ ! -e "$root" && ! -L "$root" ]] || { echo "Refusing existing output: $root" >&2; exit 2; }
@@ -46,8 +58,12 @@ export JAX_PLATFORMS=tpu TPU_PROCESS_BOUNDS=1,1,1 TPU_CHIPS_PER_PROCESS_BOUNDS=2
 export TPU_VISIBLE_CHIPS=0,1,2,3 CLOUD_TPU_TASK_ID=0
 export TUNIX_GRPO_FILTER_AUDIT=1 TUNIX_FILTER_AUDIT_STEPS="$steps"
 export TUNIX_REWARD_MODE=accuracy TUNIX_DISABLE_TFLOPS_MEASUREMENT=1 PYTHONUNBUFFERED=1
+unset TUNIX_FILTER_AUDIT_CORRECTNESS
+if [[ "$mode" == correctness ]]; then
+  export TUNIX_FILTER_AUDIT_CORRECTNESS=1
+fi
 
-for condition in clean mismatch0.2; do
+for condition in "${conditions[@]}"; do
   export TUNIX_FILTER_AUDIT_CONDITION="$condition"
   fraction=0
   [[ "$condition" == clean ]] || fraction=0.2

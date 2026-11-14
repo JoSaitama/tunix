@@ -112,6 +112,104 @@ class FilterAuditTest(unittest.TestCase):
             self.assertEqual(plan.count(f"updates={1 if mode == 'smoke' else 32}"), expected)
         self.assertFalse(destination.exists())
 
+    def test_correctness_pilot_only_plans_two_runs_for_explicit_condition(self):
+        script = Path(audit.__file__).with_name("run_grpo_filter_audit.sh")
+        destination = self.root / "must-not-exist"
+        for condition, fraction in (("clean", "0"), ("mismatch0.2", "0.2")):
+            with self.subTest(condition=condition):
+                plan = subprocess.check_output(
+                    ["bash", script, "correctness", destination, condition, "--dry-run"], text=True,
+                )
+                self.assertEqual(plan.count(f"seed=5 condition={condition} fraction={fraction} updates=32"), 2)
+                self.assertEqual(plan.count("condition="), 2)
+                self.assertIn("method=dtv ", plan)
+                self.assertIn("method=dtv-loo ", plan)
+        for invalid in ([], ["invalid"], ["clean", "mismatch0.2"]):
+            result = subprocess.run(["bash", script, "correctness", destination, *invalid, "--dry-run"],
+                                    capture_output=True, check=False)
+            self.assertEqual(result.returncode, 2)
+        self.assertFalse(destination.exists())
+
+    def test_correctness_uses_gold_not_advantage_or_corruption(self):
+        collector = audit.FilterAudit("dtv-loo", "mismatch0.2", 5, 32, self.root, correctness=True)
+        collector.jax = SimpleNamespace(device_get=lambda x: x)
+        collector.actor = SimpleNamespace(train_steps=0)
+        flags = [(np.array([True, False, True, False]), np.array([True, False, False, False]))]
+        prompts = np.repeat(["p", "q", "r", "s"], 4)
+        completions = ["<answer>1.0</answer>", "<answer>2</answer>", "I think 1", "<answer>...</answer>"] * 4
+        answers = ["1"] * 16
+        with self.assertRaisesRegex(ValueError, "completion texts and gold answers"):
+            collector.encode_rollouts(prompts, flags)
+        metadata = collector.encode_rollouts(prompts, flags, completions=completions, answers=answers)
+        collector.capture((metadata, np.tile([-1., 1., 0., 0.], 4), np.tile([False, True, True, True], 4), 4))
+        rows = collector.batches[0]["rows"]
+        self.assertEqual([row["correct"] for row in rows[:4]], [True, False, False, False])
+        self.assertEqual(rows[0]["advantage"], -1.)
+        self.assertTrue(rows[0]["noise_effective"])
+        self.assertEqual(audit.summarize_correctness(rows), {
+            "all": {"dropped": 4, "total": 16, "drop_rate": .25},
+            "correct": {"dropped": 4, "total": 4, "drop_rate": 1.},
+            "incorrect": {"dropped": 0, "total": 12, "drop_rate": 0.},
+            "only_correct": {"dropped": 4, "total": 4, "drop_rate": 1.},
+        })
+        rows[1]["correct"] = True
+        self.assertEqual(audit.summarize_correctness(rows)["only_correct"]["total"], 3)
+        rows[0].pop("correct")
+        with self.assertRaisesRegex(ValueError, "missing/invalid correctness"):
+            audit.validate_batch(collector.batches[0], 1, "mismatch0.2", "dtv-loo", correctness=True)
+
+    def test_clean_pilot_does_not_require_reversal_flags(self):
+        collector = audit.FilterAudit("dtv", "clean", 5, 32, self.root, correctness=True)
+        collector.jax = SimpleNamespace(device_get=lambda x: x)
+        collector.actor = SimpleNamespace(train_steps=0)
+        metadata = collector.encode_rollouts(np.repeat(["p", "q", "r", "s"], 4), [],
+                                             completions=["<answer>1</answer>"] * 16, answers=["1"] * 16)
+        collector.capture((metadata, np.zeros(16), np.ones(16, dtype=bool), 0))
+        rows = collector.batches[0]["rows"]
+        self.assertTrue(all(row["correct"] and not row["noise_selected"] for row in rows))
+        self.assertIsNone(audit.summarize_correctness(rows)["only_correct"]["drop_rate"])
+
+    def test_correctness_summary_checks_full_two_run_matrix(self):
+        for condition in audit.CONDITIONS:
+            with self.subTest(condition=condition):
+                self.check_correctness_summary(condition)
+
+    def check_correctness_summary(self, condition):
+        root = self.root / condition
+        root.mkdir()
+        for method in audit.METHODS:
+            collector, aux = self.sample(condition=condition, method=method)
+            collector.capture(aux)
+            path = root / method
+            path.mkdir()
+            batch = collector.batches[0]
+            for row in batch["rows"]:
+                row["correct"] = row["completion_index"] == 0
+            (path / "decisions.jsonl").write_text("".join(
+                json.dumps(dict(batch, step=step)) + "\n" for step in range(1, 33)
+            ))
+            audit.write_json(path / "run.json", {
+                "schema": audit.CORRECTNESS_SCHEMA, "scope": "early_training", "method": method,
+                "condition": condition, "seed": 5, "noise_fraction": audit.CONDITIONS[condition],
+                "noise_seed": 5, "shuffle_seed": 47, "optimizer_updates": 32,
+                "schedule_updates": 691, "commit": "same", "model_revision": "same",
+                "jax_version": "same", "devices": ["same"] * 4, "initial_lora_sha256": "same",
+                "correctness_rule": audit.CORRECTNESS_RULE,
+            })
+        args = [sys.executable, "-m", "my_example.rebuttal.grpo_filter_audit", str(root), "--correctness",
+                "--condition", condition]
+        report = json.loads(subprocess.check_output([*args, "--json"], text=True))
+        self.assertEqual(report["condition"], condition)
+        self.assertEqual(report["scope"], "single_seed_early_training")
+        self.assertEqual(report["results"]["dtv"]["correct"]["total"], 128)
+        self.assertEqual(report["results"]["dtv-loo"]["all"]["total"], 512)
+        self.assertIn("128/384 (33.33%)", subprocess.check_output(args, text=True))
+        with self.assertRaisesRegex(ValueError, "incompatible"):
+            audit.read_suite(root)
+        other = "clean" if condition == "mismatch0.2" else "mismatch0.2"
+        with self.assertRaisesRegex(ValueError, "incompatible"):
+            audit.read_suite(root, correctness_condition=other)
+
     def test_actual_actor_jit_masks_and_update_match_unaudited_paths(self):
         from flax import nnx, struct
         import jax.numpy as jnp
@@ -152,7 +250,7 @@ class FilterAuditTest(unittest.TestCase):
                 trainer.loss_fn = lambda model, train_example: (
                     model.weight.get_value() * (3 + train_example.advantages), {}
                 )
-                inputs = Example(jnp.array([3., -1., -1., -1.]), jnp.arange(4))
+                inputs = Example(jnp.array([3., -1., -1., -1.]), jnp.arange(20).reshape(4, 5))
                 # Zero mean in DTV keeps all scores; every LOO score is
                 # negative, so the final LOO mask rescues the first tie among
                 # the three lower-magnitude gradients (index 1).

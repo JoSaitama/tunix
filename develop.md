@@ -13933,3 +13933,30 @@ This file tracks engineering changes made in this repository.
 - 改动范围：新增 `my_example/rebuttal/{grpo_filter_audit.py,run_grpo_filter_audit.sh}`、`tests/my_example/grpo_filter_audit_test.py`；更新 `my_example/{main.py,reward_rank_noise.py,rebuttal/README.md}`、`tunix/rl/{grpo/grpo_learner.py,rl_learner.py,self_inf_trainer.py,self_inf_loo_trainer.py}`、`tests/my_example/reward_rank_noise_test.py` 和本日志。审计默认关闭，沿用正式 group-policy 评分、full 梯度更新和 691 步 schedule，不加 optimizer 或选择逻辑。
 - 实现：Clean 与 Mismatch-20% 均跑 DTV、DTV-Loo × seed 5/0/13/21/42 × 32 次真实更新。另有四组 seed5 单步 smoke。不评测、不做 benchmark、不保存模型。直接捕获 reward reversal 标记及 actor 处理的同一行 advantage、最终 mask；核对实际 Optax 更新数、逐步删除数、LOO 保留下限、同 seed prompt 顺序/初始 LoRA/污染指派与统一模型和提交。输出逐行决策及合并/逐 seed 分层表。
 - 验证与待办：CPU 审计 7 项（含真实 JAX/NNX DTV/LOO JIT 小模型对照与 4/20 组 dry-run）、benchmark 回归 30 项、Ruff E9/F、`bash -n`、`git diff --check` 通过。完整 reward-rank-noise suite 本机缺 metrax，需服务器 CPU 复核，再执行真实 TPU smoke。未提交、推送、初始化 TPU 或运行远端；报告仅代表前 32 步。
+
+## 2026-11-14 — 核实 GSM8K 难度标签
+
+- 无代码改动，仅更新 `develop.md`。核对 [OpenAI 原始数据说明](https://github.com/openai/grade-school-math#dataset-details) 和 [TFDS schema](https://www.tensorflow.org/datasets/catalog/gsm8k#feature_structure)：无逐题官方难度标签。现有在线审计可按 prompt hash 离线关联参考解的算式标记数（复杂度 proxy），但未保存逐条 correctness，不能用 advantage 重建 0–4 条答对数。后者若需要，应区分固定模型预先估计的难度与在线观测成功率。未启动训练；`git diff --check -- develop.md` 通过。
+
+## 2026-11-14 — 汇总 GRPO 正负 advantage 与污染分层过滤率
+
+- 无代码改动，仅更新 `develop.md`。读取上级目录 `rebuttal_grpo_gsm8k_filter_audit_20261113_130114`，用 `python3 -m my_example.rebuttal.grpo_filter_audit` 从 20 个原始 run 重建 Markdown 和 JSON，均与归档相同，`exit_code=0`。每方法每条件为前 32 步、5 seed 共 2,560 条候选。
+- Mismatch-20% 指派反转 vs 未指派：DTV 18/524=3.44% vs 74/2036=3.63%，DTV-Loo 143/524=27.29% vs 388/2036=19.06%；有效反转子集分别为 18/284=6.34% 和 143/288=49.65%，不作因果对照。Clean 正/负分别为 DTV 5.77%/4.98%、LOO 34.35%/43.11%；Mismatch 正/负为 DTV 7.81%/5.97%、LOO 34.00%/41.23%。零 advantage 均未删除；LOO 负高于正的方向在两个条件各 5 seed 一致，但指派反转组的汇总正负排序并非如此。
+- 汇报边界：以上只描述早期训练，不能替代完整 691 步总体结果，也不能把训练 advantage 等同于答对/有用或把有效反转子集差异当作因果效应。未运行训练或访问远端；`git diff --check -- develop.md` 通过。
+
+- Rebuttal 精简稿：无代码改动。按感谢、原完整训练总率与准确率增量、Assumption 1 对应的同题组内参考（DTV 含自身，LOO 排除自身并应用最低保留）、五 seed 前 32 步分层数据组织。对照本地 `summary.md`，保持正/负及指派/未指派顺序；不把分层结果外推至全程。仅更新日志，`git diff --check -- develop.md` 通过。
+
+- Correctness 核查：无代码改动，仅更新本日志。逐行检查在线审计 20 份 `decisions.jsonl`、共 10,240 条，均未保存 `correct` 或 completion 正文；不能由 advantage 推断答对。独立 fixed-checkpoint utility 审计有 correctness 字段，但不能混作同一批在线结果。未启动补测；`git diff --check -- develop.md` 通过。
+
+- Correctness pilot 估时：无代码改动，仅更新本日志。建议优先 seed5、Mismatch-20%、前32步，只添加独立的未污染数值答案正确性标记并沿用最终 mask；最低成本只跑 LOO，若需直接对比则同 seed 再跑 DTV。每方法 128 组/512 候选，报告正确/不正确与可选唯一正确的删除数及分母。历史审计 stdout 无耗时戳；参考已记录的 DTV/LOO 约378秒预热15步、稳定窗口约8秒/步，粗估缓存可用时单进程8–15分钟、两方法串行16–30分钟。结果仅作单 seed 早期描述，未实施或启动；`git diff --check -- develop.md` 通过。
+
+## 2026-11-14 — 实现 DTV / DTV-Loo 短程 correctness 审计
+
+- 改动范围：`my_example/rebuttal/{grpo_filter_audit.py,run_grpo_filter_audit.sh,README.md}`、`tunix/rl/grpo/grpo_learner.py`、`tests/my_example/grpo_filter_audit_test.py`、`develop.md`。新增独立 `correctness` 模式：仅 Mismatch-20%、seed5、DTV 与 DTV-Loo 各前32次真实更新，保留原691步学习率调度；不评测、不存 checkpoint、模型或回答正文。
+- 记录与统计：采用仓库 GSM8K 评测的数值提取器，与未污染标准答案比较；correctness 位随同行 metadata 传给现有 actor 审计，与实际 post-cap mask 联合计数。输出全部、答对、未答对和同题唯一答对的删除数及分母，空层为 N/A；唯一答对为答对子集。未改训练 reward、advantage 或 mask。
+- 验证与待办：10 项 CPU 审计测试通过（含真实 JAX/NNX actor JIT、两组 dry-run、正确性与污染/advantage 独立、Markdown/JSON 汇总）；从历史20组重建原 Markdown 和 JSON 逐字一致；Ruff E9/F、`bash -n` 和 `git diff --check` 通过。未提交推送或运行 TPU；服务器实测后仅作为单 seed 早期描述。
+
+## 2026-11-14 — 将 correctness 短跑分成 Clean 和 Mismatch-20% 两个独立队列
+
+- 改动范围：`my_example/rebuttal/{grpo_filter_audit.py,run_grpo_filter_audit.sh,README.md}`、`tests/my_example/grpo_filter_audit_test.py`、`develop.md`。在前一节尚未提交的实现上追加条件参数；每次只允许显式选择 `clean` 或 `mismatch0.2`，对应噪声 0 或 0.2。每台 v5p-16 用一个空闲 worker、4 颗 TPU，串行跑 DTV/DTV-Loo，均为 seed5、32 更新；各自生成独立汇总，不跨服务器混合记录。
+- 验证：11 项 CPU 审计测试通过，包括两条件 dry-run、Clean 无反转标签、两套独立汇总与拒绝错误条件；历史五 seed 审计的 Markdown/JSON 复算逐字一致。Ruff E9/F、`bash -n`、`git diff --check` 通过。未提交、推送、连接服务器或启动 TPU，真实运行仍待验证。

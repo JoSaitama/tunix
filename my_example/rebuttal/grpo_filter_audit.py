@@ -21,6 +21,8 @@ BATCH_SIZE = 16
 SCHEDULE_STEPS = 691
 FORMAL_STEPS = 32
 SCHEMA = "grpo-filter-audit-v1"
+CORRECTNESS_SCHEMA = "grpo-filter-correctness-v1"
+CORRECTNESS_RULE = "gsm8k_exact_extracted_numeric_answer"
 HASH = re.compile(r"[0-9a-f]{64}")
 
 
@@ -39,13 +41,35 @@ def load_json(path):
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def clean_correctness(completions, answers):
+    """Compare the GSM8K evaluator's extracted number to the gold answer."""
+    from my_example.rewards import MATCH_NUMBERS
+
+    require(len(completions) == len(answers), "Completions and gold answers must align")
+    result = []
+    for completion, answer in zip(completions, answers):
+        target = float(str(answer).strip())
+        require(math.isfinite(target), "Expected a finite GSM8K gold answer")
+        match = MATCH_NUMBERS.search(completion)
+        try:
+            prediction = float(match.group(1)) if match else None
+        except ValueError:
+            prediction = None
+        result.append(prediction == target)
+    return result
+
+
 class FilterAudit:
-    def __init__(self, method, condition, seed, steps, output):
+    def __init__(self, method, condition, seed, steps, output, *, correctness=False):
         require(method in METHODS and condition in CONDITIONS, "Invalid method or condition")
         require(seed in SEEDS and steps in {1, FORMAL_STEPS}, "Invalid seed or window")
+        if correctness:
+            require((seed, steps) == (SEEDS[0], FORMAL_STEPS),
+                    "Correctness pilot requires seed 5 and 32 updates")
         self.method, self.condition, self.seed, self.steps = method, condition, seed, steps
         self.fraction = CONDITIONS[condition]
         self.out = Path(output)
+        self.correctness = correctness
         self.prompt_batches = []
         self.batches = []
 
@@ -55,6 +79,7 @@ class FilterAudit:
             os.environ["TUNIX_FILTER_AUDIT_METHOD"], os.environ["TUNIX_FILTER_AUDIT_CONDITION"],
             int(os.environ["TUNIX_EXPERIMENT_SEED"]), int(os.environ["TUNIX_FILTER_AUDIT_STEPS"]),
             os.environ["TUNIX_FILTER_AUDIT_OUT"],
+            correctness=os.environ.get("TUNIX_FILTER_AUDIT_CORRECTNESS") == "1",
         )
         require(float(os.environ["TUNIX_REWARD_RANK_NOISE_FRACTION"]) == audit.fraction
                 and int(os.environ["TUNIX_REWARD_RANK_NOISE_SEED"]) == audit.seed
@@ -89,7 +114,7 @@ class FilterAudit:
                 and not learner.can_enable_async_rollout,
                 "Expected one four-prompt rollout batch and actor update per iteration")
 
-    def encode_rollouts(self, prompts, noise_flags):
+    def encode_rollouts(self, prompts, noise_flags, *, completions=None, answers=None):
         """Attach compact numeric row IDs/flags that follow TrainExample slicing."""
         import numpy as np
 
@@ -105,13 +130,21 @@ class FilterAudit:
         require(selected.shape == effective.shape == (4,)
                 and selected.dtype == effective.dtype == np.dtype(bool)
                 and not (effective & ~selected).any(), "Invalid group noise flags")
-        self.prompt_batches.append(tuple(hashlib.sha256(str(g[0]).encode()).hexdigest() for g in groups))
-        return np.column_stack((
-            np.full(BATCH_SIZE, len(self.prompt_batches), dtype=np.int32),
+        columns = [
+            np.full(BATCH_SIZE, len(self.prompt_batches) + 1, dtype=np.int32),
             np.arange(BATCH_SIZE, dtype=np.int32),
             np.repeat(selected, GROUP_SIZE).astype(np.int32),
             np.repeat(effective, GROUP_SIZE).astype(np.int32),
-        ))
+        ]
+        if self.correctness:
+            require(completions is not None and answers is not None
+                    and len(completions) == len(answers) == BATCH_SIZE,
+                    "Correctness pilot requires 16 completion texts and gold answers")
+            require(all(len(set(answers[i:i + GROUP_SIZE])) == 1
+                        for i in range(0, BATCH_SIZE, GROUP_SIZE)), "Gold answers disagree within a prompt group")
+            columns.append(np.asarray(clean_correctness(completions, answers), dtype=np.int32))
+        self.prompt_batches.append(tuple(hashlib.sha256(str(g[0]).encode()).hexdigest() for g in groups))
+        return np.column_stack(columns)
 
     def capture(self, aux):
         """Read only the final mask, the actual loss advantages and their row IDs."""
@@ -121,11 +154,13 @@ class FilterAudit:
         step = len(self.batches) + 1
         require(step <= self.steps and len(self.prompt_batches) == step
                 and self.actor.train_steps == step - 1, "Unexpected update/capture order")
-        require(metadata.shape == (BATCH_SIZE, 4) and advantage.shape == kept.shape == (BATCH_SIZE,)
+        require(metadata.shape == (BATCH_SIZE, 4 + int(self.correctness))
+                and advantage.shape == kept.shape == (BATCH_SIZE,)
                 and skipped.shape == () and kept.dtype == np.dtype(bool)
                 and np.isfinite(advantage).all(), "Malformed actor audit output")
         rows = []
-        for i, ((batch, index, selected, effective), adv, keep) in enumerate(zip(metadata, advantage, kept)):
+        for i, (fields, adv, keep) in enumerate(zip(metadata, advantage, kept)):
+            batch, index, selected, effective = fields[:4]
             require((batch, index) == (step, i) and selected in {0, 1} and effective in {0, 1},
                     "Actor input and rollout row IDs disagree")
             rows.append({
@@ -134,8 +169,11 @@ class FilterAudit:
                 "advantage": float(adv), "keep": bool(keep),
                 "noise_selected": bool(selected), "noise_effective": bool(effective),
             })
+            if self.correctness:
+                require(fields[4] in {0, 1}, "Malformed correctness flag")
+                rows[-1]["correct"] = bool(fields[4])
         entry = {"step": step, "skipped_samples": float(skipped), "rows": rows}
-        validate_batch(entry, step, self.condition, self.method)
+        validate_batch(entry, step, self.condition, self.method, correctness=self.correctness)
         self.batches.append(entry)
 
     def after_iteration(self):
@@ -198,8 +236,9 @@ class FilterAudit:
         with (self.out / "decisions.jsonl").open("x", encoding="utf-8") as stream:
             for entry in self.batches:
                 stream.write(json.dumps(entry, allow_nan=False) + "\n")
-        write_json(self.out / "run.json", {
-            "schema": SCHEMA, "scope": "early_training", "method": self.method,
+        metadata = {
+            "schema": CORRECTNESS_SCHEMA if self.correctness else SCHEMA,
+            "scope": "early_training", "method": self.method,
             "condition": self.condition, "seed": self.seed, "noise_fraction": self.fraction,
             "noise_seed": self.seed, "shuffle_seed": 42 + self.seed,
             "optimizer_updates": self.steps, "schedule_updates": SCHEDULE_STEPS,
@@ -207,11 +246,14 @@ class FilterAudit:
             "initial_lora_sha256": fingerprint.hexdigest(),
             "devices": [d.device_kind for d in mesh.devices.flat],
             "commit": subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip(),
-        })
+        }
+        if self.correctness:
+            metadata["correctness_rule"] = CORRECTNESS_RULE
+        write_json(self.out / "run.json", metadata)
         print(f"PASS {self.condition}/{self.method}/seed{self.seed}: {self.steps} optimizer updates", flush=True)
 
 
-def validate_batch(entry, step, condition, method):
+def validate_batch(entry, step, condition, method, *, correctness=False):
     rows = entry["rows"]
     require(type(entry["step"]) is int and entry["step"] == step and len(rows) == BATCH_SIZE,
             f"Step {step}: missing, repeated or malformed update")
@@ -223,6 +265,8 @@ def validate_batch(entry, step, condition, method):
             f"Step {step}: mask and skipped_samples disagree")
     require(all((r["group_index"], r["completion_index"]) == divmod(i, GROUP_SIZE)
                 for i, r in enumerate(rows)), f"Step {step}: duplicate or reordered completion")
+    if correctness:
+        require(all(type(r.get("correct")) is bool for r in rows), f"Step {step}: missing/invalid correctness")
     for start in range(0, BATCH_SIZE, GROUP_SIZE):
         group = rows[start:start + GROUP_SIZE]
         require(len({(r["prompt_id"], r["noise_selected"], r["noise_effective"]) for r in group}) == 1
@@ -233,34 +277,41 @@ def validate_batch(entry, step, condition, method):
     return rows
 
 
-def read_suite(root, smoke=False):
+def read_suite(root, smoke=False, *, correctness_condition=None):
     """Read exactly the requested matrix; do not pool incomplete or duplicate runs."""
     steps = 1 if smoke else FORMAL_STEPS
-    seeds = SEEDS[:1] if smoke else SEEDS
+    correctness = correctness_condition is not None
+    require(not (smoke and correctness), "Choose smoke or correctness, not both")
+    require(not correctness or correctness_condition in CONDITIONS, "Invalid correctness condition")
+    seeds = SEEDS[:1] if smoke or correctness else SEEDS
+    conditions = (correctness_condition,) if correctness else tuple(CONDITIONS)
+    schema = CORRECTNESS_SCHEMA if correctness else SCHEMA
     runs = {}
     for run in sorted(root.glob("*/run.json")):
         meta = load_json(run)
         method, condition, seed = (meta[k] for k in ("method", "condition", "seed"))
         key = condition, method, seed
-        require(key not in runs and method in METHODS and condition in CONDITIONS and seed in seeds
-                and meta["schema"] == SCHEMA and meta["scope"] == "early_training"
+        require(key not in runs and method in METHODS and condition in conditions and seed in seeds
+                and meta["schema"] == schema and meta["scope"] == "early_training"
+                and (not correctness or meta.get("correctness_rule") == CORRECTNESS_RULE)
                 and meta["optimizer_updates"] == steps and meta["schedule_updates"] == SCHEDULE_STEPS
                 and meta["noise_fraction"] == CONDITIONS[condition] and meta["noise_seed"] == seed
                 and meta["shuffle_seed"] == 42 + seed,
                 f"{run}: incompatible or duplicate run")
         with run.with_name("decisions.jsonl").open(encoding="utf-8") as stream:
-            batches = [validate_batch(json.loads(line), i, condition, method) for i, line in enumerate(stream, 1)]
+            batches = [validate_batch(json.loads(line), i, condition, method, correctness=correctness)
+                       for i, line in enumerate(stream, 1)]
         require(len(batches) == steps, f"{run}: incomplete decision log")
         runs[key] = meta, [row for batch in batches for row in batch]
-    expected = {(c, m, s) for c in CONDITIONS for m in METHODS for s in seeds}
+    expected = {(c, m, s) for c in conditions for m in METHODS for s in seeds}
     require(runs.keys() == expected, f"Incomplete audit matrix; missing {sorted(expected - runs.keys())}")
     first_meta = next(iter(runs.values()))[0]
     for meta, _ in runs.values():
         require(all(meta[k] == first_meta[k] for k in ("commit", "model_revision", "jax_version", "devices")),
                 "Mixed code/model/runtime across the audit matrix")
     for seed in seeds:
-        reference_meta, reference = runs["clean", "dtv", seed]
-        for condition in CONDITIONS:
+        reference_meta, reference = runs[conditions[0], "dtv", seed]
+        for condition in conditions:
             other = [runs[condition, method, seed] for method in METHODS]
             for meta, rows in other:
                 require(meta["initial_lora_sha256"] == reference_meta["initial_lora_sha256"],
@@ -293,13 +344,63 @@ def summarize(rows):
     ]
 
 
+def summarize_correctness(rows):
+    counts = {label: Counter() for label in ("all", "correct", "incorrect", "only_correct")}
+    require(len(rows) % GROUP_SIZE == 0, "Expected complete four-completion groups")
+    for start in range(0, len(rows), GROUP_SIZE):
+        group = rows[start:start + GROUP_SIZE]
+        one_correct = sum(r["correct"] for r in group) == 1
+        for row in group:
+            labels = ["all", "correct" if row["correct"] else "incorrect"]
+            if row["correct"] and one_correct:
+                labels.append("only_correct")
+            for label in labels:
+                counts[label].update(total=1, dropped=int(not row["keep"]))
+    return {
+        label: {"dropped": c["dropped"], "total": c["total"],
+                "drop_rate": c["dropped"] / c["total"] if c["total"] else None}
+        for label, c in counts.items()
+    }
+
+
+def format_cell(row):
+    if not row["total"]:
+        return "N/A"
+    return f'{row["dropped"]}/{row["total"]} ({row["drop_rate"]:.2%})'
+
+
+def report_correctness(runs, condition, as_json):
+    results = {m: summarize_correctness(runs[condition, m, SEEDS[0]][1]) for m in METHODS}
+    if as_json:
+        print(json.dumps({
+            "scope": "single_seed_early_training", "condition": condition,
+            "seed": SEEDS[0], "optimizer_updates_per_run": FORMAL_STEPS,
+            "correctness_rule": CORRECTNESS_RULE, "results": results,
+        }, indent=2, allow_nan=False))
+        return
+    print(f"Early-training correctness pilot: {condition}, seed {SEEDS[0]}, "
+          f"first {FORMAL_STEPS} updates per method. Cells are dropped/candidates.")
+    print("| Method | All | Correct | Incorrect | Only correct in its group |")
+    print("|---|---:|---:|---:|---:|")
+    for method, cells in results.items():
+        print("| " + " | ".join([method, *(format_cell(row) for row in cells.values())]) + " |")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("root", type=Path)
-    parser.add_argument("--smoke", action="store_true")
+    modes = parser.add_mutually_exclusive_group()
+    modes.add_argument("--smoke", action="store_true")
+    modes.add_argument("--correctness", action="store_true", help="Summarize the two-run correctness pilot")
+    parser.add_argument("--condition", choices=CONDITIONS, help="Required with --correctness")
     parser.add_argument("--json", action="store_true", help="Print pooled and per-seed counts")
     args = parser.parse_args()
-    runs = read_suite(args.root, args.smoke)
+    if args.correctness != (args.condition is not None):
+        parser.error("--correctness and --condition must be used together")
+    runs = read_suite(args.root, args.smoke, correctness_condition=args.condition)
+    if args.correctness:
+        report_correctness(runs, args.condition, args.json)
+        return
     steps = 1 if args.smoke else FORMAL_STEPS
     seeds = SEEDS[:1] if args.smoke else SEEDS
     if args.json:
@@ -323,8 +424,7 @@ def main():
                 cells = []
                 for sign in ("all", "positive", "negative", "zero"):
                     row = table[group, sign]
-                    cells.append(f'{row["dropped"]}/{row["total"]} ({row["drop_rate"]:.2%})'
-                                 if row["total"] else "N/A")
+                    cells.append(format_cell(row))
                 print("| " + " | ".join([c, m, group, *cells]) + " |")
     if args.json:
         print(json.dumps(output, indent=2, allow_nan=False))

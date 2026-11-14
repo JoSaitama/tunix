@@ -400,7 +400,10 @@ class GRPOLearner(rl_learner.RLLearner[TGrpoConfig]):
     audit_metadata = None
     if audit is not None and mode == rl_cluster_lib.Mode.TRAIN:
       audit_metadata = jax.device_put(
-          audit.encode_rollouts(training_input["prompts"], noise_flags)
+          audit.encode_rollouts(
+              training_input["prompts"], noise_flags,
+              completions=completion_text, answers=training_input.get("answer"),
+          )
       )
     return TrainExample(
         prompt_ids=prompt_ids,

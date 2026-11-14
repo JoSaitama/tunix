@@ -426,3 +426,22 @@ reward. All rates divide by candidates in that stratum; empty strata are N/A.
 These are early-training online rates, not rates over the original 691
 updates. Matching prompts and seeds does not imply matching completions
 after the training trajectories diverge.
+
+For a short correctness comparison, run:
+
+```bash
+bash my_example/rebuttal/run_grpo_filter_audit.sh correctness /path/to/new-clean-root clean
+bash my_example/rebuttal/run_grpo_filter_audit.sh correctness /path/to/new-mismatch-root mismatch0.2
+```
+
+Each invocation runs only DTV and DTV-Loo on the requested condition, seed 5,
+for 32 updates each (512 candidate completions per method per condition).
+Run the two conditions on separate idle workers if available. Each output
+root is checked and summarized independently. The audit compares the extracted final
+number with the original gold answer, independently of rewards and advantage.
+An unextractable or malformed completion counts as incorrect; no completion
+text is saved in the audit. The summary reports dropped/candidates for correct
+and incorrect completions and for the sole correct completion in each group
+that has exactly one correct candidate. The latter is a subset of correct,
+not a third mutually exclusive category. This is a single-seed early-training
+diagnostic, not part of the five-seed audit.
