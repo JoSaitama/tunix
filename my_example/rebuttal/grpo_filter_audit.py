@@ -64,8 +64,7 @@ class FilterAudit:
         require(method in METHODS and condition in CONDITIONS, "Invalid method or condition")
         require(seed in SEEDS and steps in {1, FORMAL_STEPS}, "Invalid seed or window")
         if correctness:
-            require((seed, steps) == (SEEDS[0], FORMAL_STEPS),
-                    "Correctness pilot requires seed 5 and 32 updates")
+            require(steps == FORMAL_STEPS, "Correctness audit requires 32 updates")
         self.method, self.condition, self.seed, self.steps = method, condition, seed, steps
         self.fraction = CONDITIONS[condition]
         self.out = Path(output)
@@ -277,13 +276,14 @@ def validate_batch(entry, step, condition, method, *, correctness=False):
     return rows
 
 
-def read_suite(root, smoke=False, *, correctness_condition=None):
+def read_suite(root, smoke=False, *, correctness_condition=None, remaining_seeds=False):
     """Read exactly the requested matrix; do not pool incomplete or duplicate runs."""
     steps = 1 if smoke else FORMAL_STEPS
     correctness = correctness_condition is not None
     require(not (smoke and correctness), "Choose smoke or correctness, not both")
     require(not correctness or correctness_condition in CONDITIONS, "Invalid correctness condition")
-    seeds = SEEDS[:1] if smoke or correctness else SEEDS
+    require(not remaining_seeds or correctness, "Remaining seeds require a correctness condition")
+    seeds = SEEDS[1:] if remaining_seeds else SEEDS[:1] if smoke or correctness else SEEDS
     conditions = (correctness_condition,) if correctness else tuple(CONDITIONS)
     schema = CORRECTNESS_SCHEMA if correctness else SCHEMA
     runs = {}
@@ -369,16 +369,36 @@ def format_cell(row):
     return f'{row["dropped"]}/{row["total"]} ({row["drop_rate"]:.2%})'
 
 
+def combine_correctness_runs(remaining, pilot, condition):
+    # The completed seed 5 predates the queue expansion. Each input queue
+    # already requires a single commit; keep both SHAs, do not mix seeds twice.
+    fields = ("schema", "correctness_rule", "model_revision", "jax_version", "devices", "schedule_updates")
+    baseline = pilot[condition, "dtv", SEEDS[0]][0]
+    require(not (remaining.keys() & pilot.keys()), "Duplicate correctness runs")
+    for meta, _ in remaining.values():
+        require(all(meta[k] == baseline[k] for k in fields),
+                "Seed 5 and remaining seeds have incompatible model/runtime/metric metadata")
+    return {**pilot, **remaining}
+
+
 def report_correctness(runs, condition, as_json):
-    results = {m: summarize_correctness(runs[condition, m, SEEDS[0]][1]) for m in METHODS}
+    seeds = [s for s in SEEDS if (condition, "dtv", s) in runs]
+    results = {}
+    per_seed = {}
+    for method in METHODS:
+        by_seed = {s: runs[condition, method, s][1] for s in seeds}
+        results[method] = summarize_correctness([row for rows in by_seed.values() for row in rows])
+        per_seed[method] = {s: summarize_correctness(rows) for s, rows in by_seed.items()}
     if as_json:
         print(json.dumps({
-            "scope": "single_seed_early_training", "condition": condition,
-            "seed": SEEDS[0], "optimizer_updates_per_run": FORMAL_STEPS,
-            "correctness_rule": CORRECTNESS_RULE, "results": results,
+            "scope": "single_seed_early_training" if len(seeds) == 1 else "multi_seed_early_training",
+            "condition": condition, "seeds": seeds, "optimizer_updates_per_run": FORMAL_STEPS,
+            "correctness_rule": CORRECTNESS_RULE, "results": results, "per_seed": per_seed,
+            "commit_by_seed": {s: runs[condition, "dtv", s][0]["commit"] for s in seeds},
+            **({"seed": seeds[0]} if len(seeds) == 1 else {}),
         }, indent=2, allow_nan=False))
         return
-    print(f"Early-training correctness pilot: {condition}, seed {SEEDS[0]}, "
+    print(f"Early-training correctness audit: {condition}, seeds {', '.join(map(str, seeds))}, "
           f"first {FORMAL_STEPS} updates per method. Cells are dropped/candidates.")
     print("| Method | All | Correct | Incorrect | Only correct in its group |")
     print("|---|---:|---:|---:|---:|")
@@ -391,14 +411,22 @@ def main():
     parser.add_argument("root", type=Path)
     modes = parser.add_mutually_exclusive_group()
     modes.add_argument("--smoke", action="store_true")
-    modes.add_argument("--correctness", action="store_true", help="Summarize the two-run correctness pilot")
+    modes.add_argument("--correctness", action="store_true", help="Summarize a correctness audit")
     parser.add_argument("--condition", choices=CONDITIONS, help="Required with --correctness")
+    parser.add_argument("--remaining-seeds", action="store_true", help="Expect correctness seeds 0, 13, 21, 42")
+    parser.add_argument("--seed5-root", type=Path, help="Combine the completed seed 5 with --remaining-seeds")
     parser.add_argument("--json", action="store_true", help="Print pooled and per-seed counts")
     args = parser.parse_args()
     if args.correctness != (args.condition is not None):
         parser.error("--correctness and --condition must be used together")
-    runs = read_suite(args.root, args.smoke, correctness_condition=args.condition)
+    if (args.remaining_seeds and not args.correctness) or (args.seed5_root and not args.remaining_seeds):
+        parser.error("--remaining-seeds requires --correctness; --seed5-root requires --remaining-seeds")
+    runs = read_suite(args.root, args.smoke, correctness_condition=args.condition,
+                      remaining_seeds=args.remaining_seeds)
     if args.correctness:
+        if args.seed5_root:
+            pilot = read_suite(args.seed5_root, correctness_condition=args.condition)
+            runs = combine_correctness_runs(runs, pilot, args.condition)
         report_correctness(runs, args.condition, args.json)
         return
     steps = 1 if args.smoke else FORMAL_STEPS

@@ -130,6 +130,21 @@ class FilterAuditTest(unittest.TestCase):
             self.assertEqual(result.returncode, 2)
         self.assertFalse(destination.exists())
 
+    def test_correctness_rest_plans_only_remaining_seeds(self):
+        script = Path(audit.__file__).with_name("run_grpo_filter_audit.sh")
+        destination = self.root / "must-not-exist"
+        for condition, fraction in (("clean", "0"), ("mismatch0.2", "0.2")):
+            plan = subprocess.check_output(
+                ["bash", script, "correctness-rest", destination, condition, "--dry-run"], text=True,
+            )
+            rows = [line.split()[1:5] for line in plan.splitlines() if line.startswith("--dry-run")]
+            self.assertEqual(rows, [
+                [f"method={method}", f"seed={seed}", f"condition={condition}", f"fraction={fraction}"]
+                for seed in audit.SEEDS[1:] for method in audit.METHODS
+            ])
+            self.assertEqual(plan.count("updates=32"), 8)
+        self.assertFalse(destination.exists())
+
     def test_correctness_uses_gold_not_advantage_or_corruption(self):
         collector = audit.FilterAudit("dtv-loo", "mismatch0.2", 5, 32, self.root, correctness=True)
         collector.jax = SimpleNamespace(device_get=lambda x: x)
@@ -174,28 +189,32 @@ class FilterAuditTest(unittest.TestCase):
             with self.subTest(condition=condition):
                 self.check_correctness_summary(condition)
 
+    def write_correctness_fixture(self, root, condition, seeds, commit="same"):
+        root.mkdir()
+        for seed in seeds:
+            for method in audit.METHODS:
+                collector, aux = self.sample(condition=condition, method=method)
+                collector.capture(aux)
+                path = root / f"{method}_seed{seed}"
+                path.mkdir()
+                batch = collector.batches[0]
+                for row in batch["rows"]:
+                    row["correct"] = row["completion_index"] == 0
+                (path / "decisions.jsonl").write_text("".join(
+                    json.dumps(dict(batch, step=step)) + "\n" for step in range(1, 33)
+                ))
+                audit.write_json(path / "run.json", {
+                    "schema": audit.CORRECTNESS_SCHEMA, "scope": "early_training", "method": method,
+                    "condition": condition, "seed": seed, "noise_fraction": audit.CONDITIONS[condition],
+                    "noise_seed": seed, "shuffle_seed": 42 + seed, "optimizer_updates": 32,
+                    "schedule_updates": 691, "commit": commit, "model_revision": "same",
+                    "jax_version": "same", "devices": ["same"] * 4, "initial_lora_sha256": "same",
+                    "correctness_rule": audit.CORRECTNESS_RULE,
+                })
+
     def check_correctness_summary(self, condition):
         root = self.root / condition
-        root.mkdir()
-        for method in audit.METHODS:
-            collector, aux = self.sample(condition=condition, method=method)
-            collector.capture(aux)
-            path = root / method
-            path.mkdir()
-            batch = collector.batches[0]
-            for row in batch["rows"]:
-                row["correct"] = row["completion_index"] == 0
-            (path / "decisions.jsonl").write_text("".join(
-                json.dumps(dict(batch, step=step)) + "\n" for step in range(1, 33)
-            ))
-            audit.write_json(path / "run.json", {
-                "schema": audit.CORRECTNESS_SCHEMA, "scope": "early_training", "method": method,
-                "condition": condition, "seed": 5, "noise_fraction": audit.CONDITIONS[condition],
-                "noise_seed": 5, "shuffle_seed": 47, "optimizer_updates": 32,
-                "schedule_updates": 691, "commit": "same", "model_revision": "same",
-                "jax_version": "same", "devices": ["same"] * 4, "initial_lora_sha256": "same",
-                "correctness_rule": audit.CORRECTNESS_RULE,
-            })
+        self.write_correctness_fixture(root, condition, [5])
         args = [sys.executable, "-m", "my_example.rebuttal.grpo_filter_audit", str(root), "--correctness",
                 "--condition", condition]
         report = json.loads(subprocess.check_output([*args, "--json"], text=True))
@@ -209,6 +228,27 @@ class FilterAuditTest(unittest.TestCase):
         other = "clean" if condition == "mismatch0.2" else "mismatch0.2"
         with self.assertRaisesRegex(ValueError, "incompatible"):
             audit.read_suite(root, correctness_condition=other)
+
+    def test_correctness_rest_and_seed5_combination(self):
+        condition = "clean"
+        pilot, remaining = self.root / "pilot", self.root / "remaining"
+        self.write_correctness_fixture(pilot, condition, [5], commit="old")
+        self.write_correctness_fixture(remaining, condition, audit.SEEDS[1:], commit="new")
+        args = [sys.executable, "-m", "my_example.rebuttal.grpo_filter_audit", str(remaining),
+                "--correctness", "--condition", condition, "--remaining-seeds", "--json"]
+        four = json.loads(subprocess.check_output(args, text=True))
+        self.assertEqual(four["seeds"], [0, 13, 21, 42])
+        self.assertEqual(four["results"]["dtv"]["all"]["total"], 2048)
+        five = json.loads(subprocess.check_output([*args, "--seed5-root", str(pilot)], text=True))
+        self.assertEqual(five["seeds"], [5, 0, 13, 21, 42])
+        self.assertEqual(five["results"]["dtv-loo"]["all"]["total"], 2560)
+        self.assertEqual(five["per_seed"]["dtv"]["5"]["correct"]["total"], 128)
+        self.assertEqual(five["commit_by_seed"], {"5": "old", "0": "new", "13": "new", "21": "new", "42": "new"})
+        old = audit.read_suite(pilot, correctness_condition=condition)
+        new = audit.read_suite(remaining, correctness_condition=condition, remaining_seeds=True)
+        new[condition, "dtv", 0][0]["model_revision"] = "other"
+        with self.assertRaisesRegex(ValueError, "incompatible"):
+            audit.combine_correctness_runs(new, old, condition)
 
     def test_actual_actor_jit_masks_and_update_match_unaudited_paths(self):
         from flax import nnx, struct

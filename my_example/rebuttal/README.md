@@ -445,3 +445,24 @@ and incorrect completions and for the sole correct completion in each group
 that has exactly one correct candidate. The latter is a subset of correct,
 not a third mutually exclusive category. This is a single-seed early-training
 diagnostic, not part of the five-seed audit.
+
+To fill in the other four seeds without rerunning seed 5:
+
+```bash
+bash my_example/rebuttal/run_grpo_filter_audit.sh correctness-rest /path/to/new-clean-root clean
+bash my_example/rebuttal/run_grpo_filter_audit.sh correctness-rest /path/to/new-mismatch-root mismatch0.2
+```
+
+Each queue runs seeds 0/13/21/42 for both methods. To pool each condition
+with its previous seed-5 run, provide both roots (not their summary files):
+
+```bash
+python -m my_example.rebuttal.grpo_filter_audit "$REST_ROOT" \
+  --correctness --condition "$CONDITION" --remaining-seeds --seed5-root "$SEED5_ROOT"
+```
+
+Counts are summed before calculating rates. The two queues must have the same
+model revision, runtime/device configuration and correctness rule. The
+original seed-5 queue can come from the earlier correctness commit; add
+`--json` to see both commits, exact counts and per-seed breakdowns. Keep Clean
+and Mismatch-20% separate.

@@ -13960,3 +13960,9 @@ This file tracks engineering changes made in this repository.
 
 - 改动范围：`my_example/rebuttal/{grpo_filter_audit.py,run_grpo_filter_audit.sh,README.md}`、`tests/my_example/grpo_filter_audit_test.py`、`develop.md`。在前一节尚未提交的实现上追加条件参数；每次只允许显式选择 `clean` 或 `mismatch0.2`，对应噪声 0 或 0.2。每台 v5p-16 用一个空闲 worker、4 颗 TPU，串行跑 DTV/DTV-Loo，均为 seed5、32 更新；各自生成独立汇总，不跨服务器混合记录。
 - 验证：11 项 CPU 审计测试通过，包括两条件 dry-run、Clean 无反转标签、两套独立汇总与拒绝错误条件；历史五 seed 审计的 Markdown/JSON 复算逐字一致。Ruff E9/F、`bash -n`、`git diff --check` 通过。未提交、推送、连接服务器或启动 TPU，真实运行仍待验证。
+
+## 2026-11-14 — 补齐 correctness 审计其余四个 seed
+
+- 改动范围：`my_example/rebuttal/{grpo_filter_audit.py,run_grpo_filter_audit.sh,README.md}`、`tests/my_example/grpo_filter_audit_test.py` 和 `develop.md`。新增 `correctness-rest`，每个条件单独在同一个 worker 串行跑 DTV/DTV-Loo × seed 0/13/21/42，各 32 次更新，不重跑 seed5。原训练算法、691 步调度和 correctness 定义均不变。
+- 汇总：每条件四个新 seed 共 2,048 条/方法；可用 `--seed5-root` 离线合并同条件历史 seed5，共 2,560 条/方法。先加删除数和候选数再算比例；保留每 seed 和各自 commit，拒绝条件、模型/设备/JAX、评分定义或数据矩阵不一致。不同 worker 的 Clean 与 Mismatch-20% 不混合。
+- 验证与待办：13 项 CPU 测试通过（含两条件各八组 dry-run、四/五 seed 分母与跨 commit 汇总）；旧五 seed advantage 审计 Markdown/JSON 逐字复现，Ruff E9/F、`bash -n`、`git diff --check` 通过。未提交、推送或启动 TPU。

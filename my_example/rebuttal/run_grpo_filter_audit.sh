@@ -6,7 +6,7 @@ cd "$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 usage() {
   printf '%s\n' \
     "usage: bash $0 {smoke|full} OUTPUT_ROOT [--dry-run]" \
-    "       bash $0 correctness OUTPUT_ROOT {clean|mismatch0.2} [--dry-run]" >&2
+    "       bash $0 {correctness|correctness-rest} OUTPUT_ROOT {clean|mismatch0.2} [--dry-run]" >&2
   exit 2
 }
 [[ $# -ge 2 ]] || usage
@@ -17,10 +17,14 @@ conditions=(clean mismatch0.2)
 case "$mode" in
   smoke) steps=1; seeds=(5); summary_args=(--smoke) ;;
   full) steps=32; seeds=(5 0 13 21 42); summary_args=() ;;
-  correctness)
+  correctness|correctness-rest)
     [[ "${1:-}" == clean || "${1:-}" == mismatch0.2 ]] || usage
     conditions=("$1")
     steps=32; seeds=(5); summary_args=(--correctness --condition "$1")
+    if [[ "$mode" == correctness-rest ]]; then
+      seeds=(0 13 21 42)
+      summary_args+=(--remaining-seeds)
+    fi
     shift
     ;;
   *) usage ;;
@@ -59,7 +63,7 @@ export TPU_VISIBLE_CHIPS=0,1,2,3 CLOUD_TPU_TASK_ID=0
 export TUNIX_GRPO_FILTER_AUDIT=1 TUNIX_FILTER_AUDIT_STEPS="$steps"
 export TUNIX_REWARD_MODE=accuracy TUNIX_DISABLE_TFLOPS_MEASUREMENT=1 PYTHONUNBUFFERED=1
 unset TUNIX_FILTER_AUDIT_CORRECTNESS
-if [[ "$mode" == correctness ]]; then
+if [[ "$mode" == correctness || "$mode" == correctness-rest ]]; then
   export TUNIX_FILTER_AUDIT_CORRECTNESS=1
 fi
 
