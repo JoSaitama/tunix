@@ -13966,3 +13966,10 @@ This file tracks engineering changes made in this repository.
 - 改动范围：`my_example/rebuttal/{grpo_filter_audit.py,run_grpo_filter_audit.sh,README.md}`、`tests/my_example/grpo_filter_audit_test.py` 和 `develop.md`。新增 `correctness-rest`，每个条件单独在同一个 worker 串行跑 DTV/DTV-Loo × seed 0/13/21/42，各 32 次更新，不重跑 seed5。原训练算法、691 步调度和 correctness 定义均不变。
 - 汇总：每条件四个新 seed 共 2,048 条/方法；可用 `--seed5-root` 离线合并同条件历史 seed5，共 2,560 条/方法。先加删除数和候选数再算比例；保留每 seed 和各自 commit，拒绝条件、模型/设备/JAX、评分定义或数据矩阵不一致。不同 worker 的 Clean 与 Mismatch-20% 不混合。
 - 验证与待办：13 项 CPU 测试通过（含两条件各八组 dry-run、四/五 seed 分母与跨 commit 汇总）；旧五 seed advantage 审计 Markdown/JSON 逐字复现，Ruff E9/F、`bash -n`、`git diff --check` 通过。未提交、推送或启动 TPU。
+
+- 诊断：无代码改动，仅更新本日志。用户 Mismatch-20% seed0 DTV 在至少 8 步后因 correctness 审计直接 `float("54,000")` 抛错；与 HBM 警告无关。用本地 Python 复现，确认预测提取器另有逗号截断限制；当前建议仅规范化合法带千分位的标准答案以保留已完成统计口径，预测提取、训练 reward 与 mask 不变。失败 run 不生成最终决策文件或 checkpoint；串行队列遇到退出码 1 停止。未执行远端；`git diff --check -- develop.md` 通过。
+
+## 2026-11-14 — 修复 correctness 审计的 GSM8K 标准答案千分位解析
+
+- 改动范围：`my_example/rebuttal/grpo_filter_audit.py`、`tests/my_example/grpo_filter_audit_test.py` 和 `develop.md`。仅在审计中转换合法千分位标准答案（如 `54,000`），不改模型回答提取、训练 reward、advantage、mask 或结果 schema；已成功完成的 seed5 结果仍可合并。
+- 验证与待办：CPU 审计 14 项通过，包含千分位、非法逗号、原模型回答提取不变；旧五 seed advantage 汇总 Markdown/JSON 逐字复现。Ruff E9/F 和 `git diff --check` 通过。未提交、推送或启动 TPU；失败的 Mismatch-20% 四 seed 队列须用新目录从 seed0 重启。

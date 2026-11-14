@@ -173,6 +173,16 @@ class FilterAuditTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "missing/invalid correctness"):
             audit.validate_batch(collector.batches[0], 1, "mismatch0.2", "dtv-loo", correctness=True)
 
+    def test_correctness_normalizes_only_valid_gold_thousands_separators(self):
+        self.assertEqual(audit.clean_correctness(
+            ["<answer>54000</answer>", "<answer>1234567.5</answer>",
+             "<answer>54,000</answer>", "<answer>54</answer>", "<answer>54000</answer>"],
+            ["54,000", " +1,234,567.50 ", "54,000", "54,000", "54000"],
+        ), [True, True, False, False, True])
+        for invalid in ("54,00", "1,,000", "1.234,56", "nan"):
+            with self.subTest(gold=invalid), self.assertRaises(ValueError):
+                audit.clean_correctness(["<answer>54000</answer>"], [invalid])
+
     def test_clean_pilot_does_not_require_reversal_flags(self):
         collector = audit.FilterAudit("dtv", "clean", 5, 32, self.root, correctness=True)
         collector.jax = SimpleNamespace(device_get=lambda x: x)

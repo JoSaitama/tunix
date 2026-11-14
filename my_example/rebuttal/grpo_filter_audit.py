@@ -24,6 +24,7 @@ SCHEMA = "grpo-filter-audit-v1"
 CORRECTNESS_SCHEMA = "grpo-filter-correctness-v1"
 CORRECTNESS_RULE = "gsm8k_exact_extracted_numeric_answer"
 HASH = re.compile(r"[0-9a-f]{64}")
+GROUPED_GOLD_NUMBER = re.compile(r"[+-]?[0-9]{1,3}(?:,[0-9]{3})+(?:\.[0-9]+)?")
 
 
 def require(ok, message):
@@ -48,7 +49,12 @@ def clean_correctness(completions, answers):
     require(len(completions) == len(answers), "Completions and gold answers must align")
     result = []
     for completion, answer in zip(completions, answers):
-        target = float(str(answer).strip())
+        gold = str(answer).strip()
+        # Normalize the dataset's thousands separators only. Leave model
+        # answer extraction and previously accepted gold values unchanged.
+        if GROUPED_GOLD_NUMBER.fullmatch(gold):
+            gold = gold.replace(",", "")
+        target = float(gold)
         require(math.isfinite(target), "Expected a finite GSM8K gold answer")
         match = MATCH_NUMBERS.search(completion)
         try:
